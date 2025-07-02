@@ -1,32 +1,40 @@
 """
 Python file that populates the database with the documents from the data folder, along with their embeddings.
-Embeddings are calculated using the Ollama model, locally.
+Embeddings are calculated using either OpenAI or a local Ollama model, depending
+on the `LLM_PROVIDER` environment variable.
 The documents are split into chunks and added to the database, once the embedding has been calculated.
 """
 
 import argparse
 import os
 import shutil
-from typing import List
 import warnings
+from typing import List
 
-from embedding_function import get_embedding_function
-
-from dotenv import load_dotenv
-from langchain_community.vectorstores.chroma import Chroma
+import chromadb
 from langchain.schema.document import Document
+from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from config import (
+    CHROMA_PATH,
+    CHUNK_OVERLAP,
+    CHUNK_SIZE,
+    DATA_PATH,
+    disable_chromadb_telemetry,
+    get_chromadb_settings,
+    suppress_chromadb_telemetry,
+    validate_config,
+)
+from embedding_function import get_embedding_function
 
 # Ignore deprecation warnings.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Load the environment variables
-load_dotenv()
-CHROMA_PATH = os.getenv("CHROMA_PATH")
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP"))
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE"))
-DATA_PATH = os.getenv("DATA_PATH")
+# Disable ChromaDB telemetry and validate configuration after imports
+disable_chromadb_telemetry()
+validate_config()
 
 
 def load_documents():
@@ -57,10 +65,14 @@ def add_to_chroma(chunks: List[Document]) -> bool:
     Returns:
         bool: True if the chunks were added successfully, False otherwise.
     """
-    # Load the existing database.
-    db = Chroma(
-        persist_directory=CHROMA_PATH, embedding_function=get_embedding_function()
-    )
+    # Load the existing database with PersistentClient for proper persistence
+    with suppress_chromadb_telemetry():
+        persistent_client = chromadb.PersistentClient(
+            path=CHROMA_PATH, settings=get_chromadb_settings()
+        )
+        db = Chroma(
+            client=persistent_client, embedding_function=get_embedding_function()
+        )
 
     # Calculate Page IDs.
     chunks_with_ids = calc_chunk_ids(chunks)
@@ -79,8 +91,23 @@ def add_to_chroma(chunks: List[Document]) -> bool:
     if len(new_chunks):
         print(f"👉 Adding new documents: {len(new_chunks)}")
         new_chunk_ids = [chunk.metadata["id"] for chunk in new_chunks]
-        db.add_documents(new_chunks, ids=new_chunk_ids)
-        db.persist()
+        try:
+            db.add_documents(new_chunks, ids=new_chunk_ids)
+            print("✅ Documents added successfully")
+
+            # With PersistentClient, persistence is automatic
+            print("📝 Using PersistentClient - auto-persistence enabled")
+
+            # Verify documents were actually added
+            verification = db.get()
+            print(
+                f"📊 Verification: Database now contains {len(verification['ids'])} documents"
+            )
+        except Exception as e:
+            print(f"❌ Error adding documents: {e}")
+            import traceback
+
+            traceback.print_exc()
     else:
         print("✅ No new documents to add")
 

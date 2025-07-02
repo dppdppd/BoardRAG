@@ -5,11 +5,20 @@ Script for loading the database into Argilla and visualizing the data.
 import os
 import warnings
 
+import argilla as rg
+import chromadb
+from dotenv import load_dotenv
+from langchain_chroma import Chroma
+
+from config import (
+    disable_chromadb_telemetry,
+    get_chromadb_settings,
+    suppress_chromadb_telemetry,
+)
 from embedding_function import get_embedding_function
 
-import argilla as rg
-from dotenv import load_dotenv
-from langchain_community.vectorstores.chroma import Chroma
+# Disable ChromaDB telemetry after imports
+disable_chromadb_telemetry()
 
 # Ignore deprecation warnings.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -28,9 +37,13 @@ def get_all_instances_database() -> dict:
         dict: The instances in the database.
     """
     # Load the existing database.
-    db = Chroma(
-        persist_directory=CHROMA_PATH, embedding_function=get_embedding_function()
-    )
+    with suppress_chromadb_telemetry():
+        persistent_client = chromadb.PersistentClient(
+            path=CHROMA_PATH, settings=get_chromadb_settings()
+        )
+        db = Chroma(
+            client=persistent_client, embedding_function=get_embedding_function()
+        )
 
     existing_items = db.get()  # IDs are always included by default
 

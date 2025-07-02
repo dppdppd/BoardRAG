@@ -1,6 +1,7 @@
-Answer the question based only on the following content:
+Answer the question based only on the following content. If the answer is NOT explicitly contained in the content, reply with "I don't know".
+
 {context}
 
 ---
-Anser the question based on the above context:
+Answer the question based on the above content:
 {question}

@@ -1,26 +1,26 @@
 # Use an official Python runtime as a parent image
 FROM python:3.10-slim
 
-# Set environment variables to prevent Python from writing .pyc files
+# Prevent Python from writing .pyc files and buffering stdout
 ENV PYTHONUNBUFFERED=1
 
-# Set a working directory
+# Set a working directory inside the image
 WORKDIR /app
 
-# Copy the requirements file into the container at /app
+# Copy dependency list first to leverage Docker layer caching
 COPY requirements.txt /app/
 
-# Install any needed packages specified in requirements.txt
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code into the container
+# Copy the rest of the application source code
 COPY . /app/
 
-# Expose the port the Gradio app runs on
+# Expose Gradio default port
 EXPOSE 7860
 
-# Set the Gradio server name
+# Gradio listens on all interfaces inside the container
 ENV GRADIO_SERVER_NAME="0.0.0.0"
 
-# Run the Gradio app
-CMD ["python", "app.py"]
+# Default command launches the RAG Gradio interface (watcher started via compose)
+CMD ["python", "app.py"] 

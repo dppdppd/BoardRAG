@@ -1,31 +1,42 @@
-version: '3.8'
+version: "3.8"
+
+# Docker Compose file for running BoardRAG with a Gradio interface. All runtime
+# configuration (including `LLM_PROVIDER`) is picked up from the project-root
+# `.env` file — nothing is hard-coded here.
+
 services:
+  # Local Ollama server (only used when LLM_PROVIDER=ollama)
   ollama:
     build:
       context: .
       dockerfile: docker/ollama/Dockerfile.app
+    container_name: ollama
     volumes:
       - ollama:/root/.ollama
-    container_name: ollama
-    pull_policy: always
     tty: true
     restart: unless-stopped
-    environment:
-      OLLAMA_MODELS: /root/.ollama/models
-    
+    pull_policy: always
+    profiles:
+      - ollama   # Start with:  COMPOSE_PROFILES=ollama docker compose up
 
+  # Gradio front-end running the BoardRAG app
   gradio:
     build:
       context: .
       dockerfile: docker/gradio/Dockerfile.app
+    command: >
+      bash -c "python watcher.py & python app.py"
+    volumes:
+      # Bind-mount host folders so large PDFs and the vector DB stay outside the
+      # image. Adjust paths if you run compose from a different directory.
+      - ./data:/app/data
+      - ./chroma:/app/chroma
     ports:
       - "7860:7860"
-    depends_on:
-      - ollama
+    env_file:
+      - .env      # bring all user-defined environment variables inside
     environment:
-      OLLAMA_URL:  "http://ollama:11434" # Replace with the actual URL/port if needed
-      JINJA_TEMPLATE_PATH:  /app/templates/rag_query_pixegami.txt 
-      EMBEDDER_MODEL: nomic-embed-text # Make sure these are consistent with the ones listed in ollama_init.sh
-      GENERATOR_MODEL: mistral
+      ENABLE_CHROMA_TELEMETRY: "False"
+
 volumes:
   ollama:

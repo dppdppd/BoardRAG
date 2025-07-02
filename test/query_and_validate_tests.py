@@ -3,15 +3,22 @@ Test module for the query_and_validate function.
 """
 
 import os
+from pathlib import Path
 
 from query import query_rag
 
 from dotenv import load_dotenv
 from langchain.prompts import PromptTemplate
-from langchain_community.llms.ollama import Ollama
+from langchain_openai import ChatOpenAI
 
 load_dotenv()
-EVAL_TEMPLATE_PATH = "templates/" + os.getenv("EVAL_TEMPLATE_PATH")
+
+_eval_env = os.getenv("EVAL_TEMPLATE_PATH", "eval_prompt_tests.txt")
+_eval_path = Path(_eval_env)
+if not _eval_path.is_file():
+    _eval_path = Path(__file__).parent.parent / "templates" / _eval_env
+
+EVAL_TEMPLATE_PATH = str(_eval_path)
 
 
 def load_jinja2_prompt(expected_response: str, actual_response: str) -> PromptTemplate:
@@ -55,8 +62,24 @@ def query_and_validate(question: str, expected_response: str) -> bool:
     response_text = query_rag(question)["response_text"]
     prompt = load_jinja2_prompt(expected_response, response_text)
 
-    model = Ollama(model="mistral")
-    evaluation_results_str = model.invoke(prompt)
+    # Use an OpenAI chat model for evaluation. Falls back to GPT-3.5-Turbo if
+    # no specific evaluator model is provided via the environment.
+    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    if llm_provider == "ollama":
+        from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
+
+        evaluator_model_name = os.getenv("EVALUATOR_MODEL", "mistral")
+        model = Ollama(
+            model=evaluator_model_name,
+            base_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+        )
+    else:
+        evaluator_model_name = os.getenv("EVALUATOR_MODEL", "gpt-3.5-turbo")
+        model = ChatOpenAI(model=evaluator_model_name, temperature=0)
+    evaluation_raw = model.invoke(prompt)
+    evaluation_results_str = (
+        evaluation_raw.content if hasattr(evaluation_raw, "content") else evaluation_raw
+    )
     evaluation_results_str_cleaned = evaluation_results_str.strip().lower()
 
     print(prompt)
