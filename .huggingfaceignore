@@ -1,0 +1,20 @@
+# Hugging Face Spaces ignore file
+# Exclude PDF files from being pushed to HF Spaces
+
+# PDF files in data directory
+data/*.pdf
+
+# Also exclude the chroma database directory
+chroma/
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Other large files that shouldn't be in HF Spaces
+*.tar
+*.tar.gz
+*.zip
+*.rar
+*.7z 
