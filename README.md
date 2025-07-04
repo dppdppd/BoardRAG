@@ -1,3 +1,15 @@
+---
+title: BoardRAG
+emoji: 📈
+colorFrom: blue
+colorTo: pink
+sdk: gradio
+sdk_version: 5.35.0
+app_file: app.py
+pinned: false
+license: unknown
+---
+
 # 🎲 BoardRAG
 
 A RAG application feeding on board games running locally. Create a database with your favorite board game rulesets and query the RAG model to get answers to your questions!
@@ -116,15 +128,3 @@ EMBEDDER_MODEL = "text-embedding-3-small"
 EVAL_TEMPLATE_PATH = "eval_prompt_tests.txt"
 JINJA_TEMPLATE_PATH = "rag_query_pixegami.txt"
 ```
-
----
-title: BoardRAG
-emoji: 📈
-colorFrom: blue
-colorTo: pink
-sdk: gradio
-sdk_version: 5.35.0
-app_file: app.py
-pinned: false
-license: unknown
----
