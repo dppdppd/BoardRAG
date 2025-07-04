@@ -199,3 +199,4 @@ cython_debug/
 *.code-workspace
 .ruff_cache/
 .cursor
+temp_tests/

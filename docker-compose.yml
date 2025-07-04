@@ -24,8 +24,7 @@ services:
     build:
       context: .
       dockerfile: docker/gradio/Dockerfile.app
-    command: >
-      bash -c "python watcher.py & python app.py"
+    command: python app.py
     volumes:
       # Bind-mount host folders so large PDFs and the vector DB stay outside the
       # image. Adjust paths if you run compose from a different directory.

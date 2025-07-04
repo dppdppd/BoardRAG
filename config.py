@@ -90,9 +90,9 @@ MODEL_CONFIGS = {
         "evaluator": "gpt-4o",
     },
     "anthropic": {
-        "generator": "claude-3-5-sonnet-20241022",
+        "generator": "claude-sonnet-4-20250514",
         "embedder": "text-embedding-3-small",  # Still use OpenAI for embeddings
-        "evaluator": "claude-3-5-sonnet-20241022",
+        "evaluator": "claude-sonnet-4-20250514",
     },
     "ollama": {
         "generator": "mistral",
@@ -120,7 +120,14 @@ CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma")
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
-    "claude-3-5-sonnet-20241022": {"chunk_size": 3200, "chunk_overlap": 400},
+    "claude-sonnet-4-20250514": {
+        "chunk_size": 1400,
+        "chunk_overlap": 250,
+    },  # Enhanced for Claude 4's improved reasoning
+    "claude-3-5-sonnet-20241022": {
+        "chunk_size": 1200,
+        "chunk_overlap": 200,
+    },  # Reduced for better citations
     "claude-3-5-haiku-20241022": {"chunk_size": 2400, "chunk_overlap": 300},
     "gpt-4o": {"chunk_size": 2400, "chunk_overlap": 300},
     "gpt-4-turbo": {"chunk_size": 2400, "chunk_overlap": 300},

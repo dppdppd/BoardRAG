@@ -22,5 +22,5 @@ EXPOSE 7860
 # Gradio listens on all interfaces inside the container
 ENV GRADIO_SERVER_NAME="0.0.0.0"
 
-# Default command launches the RAG Gradio interface (watcher started via compose)
+# Default command launches the RAG Gradio interface
 CMD ["python", "app.py"] 
