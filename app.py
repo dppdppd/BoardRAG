@@ -688,10 +688,15 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
 
 
 if __name__ == "__main__":
+    import os
+
+    # Get port from environment variable (Render sets this automatically)
+    port = int(os.environ.get("PORT", 7860))
+
     demo.queue(max_size=50)  # Allow up to 50 users in queue
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7860,
+        server_port=port,
         allowed_paths=[config.DATA_PATH],
-        share=False,  # Set to True only for temporary sharing
+        share=False,
     )

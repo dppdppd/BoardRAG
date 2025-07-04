@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: boardrag
+    env: python
+    plan: free  # or starter/standard for better performance
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: LLM_PROVIDER
+        value: openai
+      - key: CHROMA_PATH
+        value: ./chroma
+      - key: DATA_PATH
+        value: ./data
+      - key: ENABLE_CHROMA_TELEMETRY
+        value: "False"
+      # Add your API keys via Render dashboard:
+      # - key: OPENAI_API_KEY
+      #   sync: false  # Set via dashboard for security
+      # - key: ANTHROPIC_API_KEY  
+      #   sync: false  # Optional, set via dashboard
+    disk:
+      name: boardrag-disk
+      mountPath: /opt/render/project/src
+      sizeGB: 1  # Free tier allows up to 1GB 
