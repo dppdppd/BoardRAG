@@ -117,11 +117,14 @@ EVAL_TEMPLATE_PATH = "eval_prompt_tests.txt"
 JINJA_TEMPLATE_PATH = "rag_query_pixegami.txt"
 ```
 
-## Future work
-
-- [ ] Visualize chat results using Argilla
-- [X] Build a Gradio interface for the RAG model
-- [ ] Dockerize the application
-- [ ] Add more rulesets to the database, alongside their test files
-- [ ] Include a CI/CD pipeline
-
+---
+title: BoardRAG
+emoji: 📈
+colorFrom: blue
+colorTo: pink
+sdk: gradio
+sdk_version: 5.35.0
+app_file: app.py
+pinned: false
+license: unknown
+---
