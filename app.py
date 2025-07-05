@@ -43,7 +43,9 @@ def list_pdfs() -> List[str]:
     """Return names of all PDFs in data directory."""
     if not os.path.isdir(config.DATA_PATH):
         return []
-    return sorted([f for f in os.listdir(config.DATA_PATH) if f.lower().endswith(".pdf")])
+    return sorted(
+        [f for f in os.listdir(config.DATA_PATH) if f.lower().endswith(".pdf")]
+    )
 
 
 def refresh_game_lists() -> List[str]:
@@ -520,7 +522,9 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
 
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Password field at top of sidebar
-            password_tb = gr.Textbox(type="password", placeholder="🔐 Enter Password", label="Access")
+            password_tb = gr.Textbox(
+                type="password", placeholder="🔐 Enter Password", label="Access"
+            )
             access_msg = gr.Markdown("", visible=False)
 
             # Game selection (hidden until unlocked)
@@ -533,32 +537,41 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
             )
 
             # Add PDF upload section in expanding panel
-            with gr.Accordion("📤 Add New Game", open=False, visible=False) as upload_accordion:
+            with gr.Accordion(
+                "📤 Add New Game", open=False, visible=False
+            ) as upload_accordion:
                 upload_file = gr.File(
                     file_types=[".pdf"],
                     label="Upload PDF Rulebook",
                     file_count="single",
                 )
-                upload_button = gr.Button("Process PDF", variant="primary")
                 upload_status = gr.Textbox(
-                    label="Upload Status", interactive=False, visible=False
+                    label="Upload Status", interactive=False, visible=True
                 )
 
             # Admin-only panels ------------------------------------------------
 
-            with gr.Accordion("🗑️ Delete PDF", open=False, visible=False) as delete_accordion:
+            with gr.Accordion(
+                "🗑️ Delete PDF", open=False, visible=False
+            ) as delete_accordion:
                 delete_dropdown = gr.Dropdown(choices=list_pdfs(), label="Select PDF")
                 delete_button = gr.Button("Delete", variant="stop")
                 delete_status = gr.Textbox(interactive=False)
 
-            with gr.Accordion("✏️ Rename Game", open=False, visible=False) as rename_accordion:
-                rename_game_dropdown = gr.Dropdown(choices=game_choices, label="Select Game")
+            with gr.Accordion(
+                "✏️ Rename Game", open=False, visible=False
+            ) as rename_accordion:
+                rename_game_dropdown = gr.Dropdown(
+                    choices=game_choices, label="Select Game"
+                )
                 new_name_tb = gr.Textbox(label="New Name")
                 rename_button = gr.Button("Rename", variant="primary")
                 rename_status = gr.Textbox(interactive=False)
 
             # Technical info (admin only)
-            with gr.Accordion("⚙️ Technical Info", open=False, visible=False) as tech_accordion:
+            with gr.Accordion(
+                "⚙️ Technical Info", open=False, visible=False
+            ) as tech_accordion:
                 gr.Markdown(get_config_info())
 
                 # Add rebuild library button
@@ -596,17 +609,15 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
         return (
             status,
             dropdown_update,
-            gr.update(visible=True),
             gr.update(value=None),
         )
 
-    upload_button.click(
+    upload_file.upload(
         upload_with_status_update,
         inputs=[upload_file],
         outputs=[
             upload_status,
             game_dropdown,
-            upload_status,
             upload_file,
         ],
     )
@@ -648,7 +659,15 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
     password_tb.change(
         unlock_handler,
         inputs=[password_tb],
-        outputs=[access_state, access_msg, game_dropdown, upload_accordion, delete_dropdown, rename_game_dropdown, tech_accordion],
+        outputs=[
+            access_state,
+            access_msg,
+            game_dropdown,
+            upload_accordion,
+            delete_dropdown,
+            rename_game_dropdown,
+            tech_accordion,
+        ],
     )
 
     # ------------------------------------------------------------------
@@ -666,9 +685,11 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
 
             # Remove chunks from DB
             with config.suppress_chromadb_telemetry():
-                client = chromadb.PersistentClient(path=config.CHROMA_PATH, settings=config.get_chromadb_settings())
+                client = chromadb.PersistentClient(
+                    path=config.CHROMA_PATH, settings=config.get_chromadb_settings()
+                )
                 db = Chroma(client=client, embedding_function=get_embedding_function())
-                ids_to_del = [i for i in db.get(include=[])['ids'] if pdf_name in i]
+                ids_to_del = [i for i in db.get(include=[])["ids"] if pdf_name in i]
                 if ids_to_del:
                     db.delete(ids=ids_to_del)
 
@@ -715,8 +736,15 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
                 return "❌ Game not found", gr.update(), gr.update()
 
             with config.suppress_chromadb_telemetry():
-                client = chromadb.PersistentClient(path=config.CHROMA_PATH, settings=config.get_chromadb_settings())
-                col = client.get_or_create_collection(name="game_names", metadata={"description": "Stores extracted game names from PDF filenames"})
+                client = chromadb.PersistentClient(
+                    path=config.CHROMA_PATH, settings=config.get_chromadb_settings()
+                )
+                col = client.get_or_create_collection(
+                    name="game_names",
+                    metadata={
+                        "description": "Stores extracted game names from PDF filenames"
+                    },
+                )
                 col.update(ids=[filename], documents=[new_name])
 
             games = refresh_game_lists()
