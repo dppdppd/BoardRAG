@@ -568,7 +568,7 @@ with gr.Blocks(
             with gr.Row(elem_classes=["input-row"]):
                 msg = gr.Textbox(
                     placeholder="First select a game above, then ask your question...",
-                    lines=2,  # limit initial height
+                    lines=1,  # single line so Enter submits (use Shift+Enter for newline)
                     max_lines=4,  # prevent it from growing too tall on mobile
                     scale=9,
                     container=False,
