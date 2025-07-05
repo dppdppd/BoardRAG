@@ -47,13 +47,14 @@ disable_chromadb_telemetry()
 validate_config()
 
 
-def extract_game_name_from_filename(filename: str) -> str:
+def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
     """
     Use LLM API to extract the proper game name from a PDF filename.
     Also reads the first few pages of the PDF for better accuracy.
 
     Args:
         filename (str): PDF filename like "up front rulebook bw.pdf"
+        debug (bool): Whether to print the prompt sent to the LLM
 
     Returns:
         str: Cleaned game name like "Up Front"
@@ -74,7 +75,12 @@ def extract_game_name_from_filename(filename: str) -> str:
             documents = loader.load()
 
             # Get text from first 10 pages (or fewer if PDF is shorter)
-            pages_to_read = min(10, len(documents))
+            import os
+
+            # Allow overriding via env var NAME_EXTRACTION_PAGES (default 20)
+            pages_limit = int(os.getenv("NAME_EXTRACTION_PAGES", 10))
+            pages_to_read = min(pages_limit, len(documents))
+
             page_texts = []
 
             for i in range(pages_to_read):
@@ -100,6 +106,8 @@ def extract_game_name_from_filename(filename: str) -> str:
     max_retries = 3
     base_delay = 1
 
+    last_raw_response = None  # For debugging fallback
+
     for attempt in range(max_retries):
         try:
             # Use configured provider for filename extraction
@@ -122,21 +130,32 @@ CONTENT FROM FIRST PAGES:
 
 """
 
-            prompt = f"""Given the PDF content provided, what is this board game's name? "{filename}"{context_section}
+            prompt = f""" Extract the proper board game name from this filename: "{filename}"{context_section}
 
 Guidelines:
-- Return ONLY the official published game name
+- Return ONLY the official published game name with no preamble or formatting.
 - Remove file-related words: "rules", "manual", "rulebook", "complete", "rework", "bw", "color", "v1", "v2"
-- Consider common board game abbreviations (CNA, D&D, MTG, etc.)
-- Think about what actual published board games exist
+- If an acronym, find a possible name from the PDF content
 - Use proper capitalization for official game titles
 - If you see the actual game title in the PDF content, prefer that over filename guessing
 
 Filename: {filename}
 Official game name:"""
 
+            if debug:
+                print("\n===== PROMPT SENT TO LLM =====\n")
+                print(prompt)
+                print("\n==============================\n")
+
             response = model.invoke(prompt)
-            game_name = response.content.strip().strip("\"'")
+            last_raw_response = getattr(response, "content", str(response))
+
+            if debug:
+                print("\n===== RAW LLM RESPONSE =====\n")
+                print(last_raw_response)
+                print("\n============================\n")
+
+            game_name = last_raw_response.strip().strip("\"'")
 
             # If response contains multiple lines, just take the first line
             if "\n" in game_name:
@@ -181,6 +200,11 @@ Official game name:"""
     fallback_name = (
         filename.replace(".pdf", "").replace("-", " ").replace("_", " ").title()
     )
+    if debug and last_raw_response is not None:
+        print("\n❌ Using fallback – last raw LLM response was:\n")
+        print(last_raw_response)
+        print()
+
     print(f"Using fallback name: '{fallback_name}' for '{filename}'")
     return fallback_name
 
