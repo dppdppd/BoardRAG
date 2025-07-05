@@ -122,10 +122,7 @@ CONTENT FROM FIRST PAGES:
 
 """
 
-            prompt = f"""You are a board game expert. Extract the proper board game name from this filename: "{filename}"{context_section}
-
-IMPORTANT: Use your knowledge of published board games to identify what this filename refers to.
-If PDF content is provided above, use it to confirm the correct game title.
+            prompt = f"""Given the PDF content provided, what is this board game's name? "{filename}"{context_section}
 
 Guidelines:
 - Return ONLY the official published game name
@@ -134,18 +131,6 @@ Guidelines:
 - Think about what actual published board games exist
 - Use proper capitalization for official game titles
 - If you see the actual game title in the PDF content, prefer that over filename guessing
-
-Examples of proper extraction:
-- "monopoly.pdf" → "Monopoly"
-- "catan.pdf" → "Catan"
-- "dnd-players-handbook.pdf" → "Dungeons & Dragons"
-- "mtg-comprehensive-rules.pdf" → "Magic: The Gathering"
-- "up-front-rulebook-bw.pdf" → "Up Front"
-- "ticket-to-ride.pdf" → "Ticket to Ride"
-
-For abbreviations, think about famous board games:
-- CNA is a well-known abbreviation for a famous complex wargame
-- Consider what major published board games use these initials
 
 Filename: {filename}
 Official game name:"""

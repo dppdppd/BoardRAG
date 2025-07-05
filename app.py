@@ -550,7 +550,7 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
                     file_count="single",
                 )
                 upload_status = gr.Textbox(
-                    label="Upload Status", interactive=False, visible=True
+                    label="Upload Status", interactive=False, visible=False
                 )
 
             # Admin-only panels ------------------------------------------------
@@ -610,10 +610,13 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
     # Connect upload button
     def upload_with_status_update(pdf_file):
         status, dropdown_update = upload_pdf_handler(pdf_file)
+        # Refresh PDF list for delete dropdown
+        new_pdfs = list_pdfs()
         return (
-            status,
+            gr.update(value=status, visible=True),
             dropdown_update,
-            gr.update(value=None),
+            gr.update(value=None),  # reset file input
+            gr.update(choices=new_pdfs),
         )
 
     upload_file.upload(
@@ -623,6 +626,7 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
             upload_status,
             game_dropdown,
             upload_file,
+            delete_dropdown,
         ],
     )
 
