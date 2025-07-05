@@ -1,3 +1,5 @@
+# Ruff pre-commit hooks disabled
+
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   # Ruff version.
