@@ -116,7 +116,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 # ---------------------------------------------------------------------------
 # Vector Database Configuration
 # ---------------------------------------------------------------------------
-CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma")
+# CHROMA_PATH will be redefined below once we know if we're on HF Spaces.
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
@@ -147,7 +147,20 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", _chunking["chunk_overlap"]))
 # ---------------------------------------------------------------------------
 # Data and Template Paths
 # ---------------------------------------------------------------------------
-DATA_PATH = os.getenv("DATA_PATH", "data")
+# Detect if running inside a Hugging Face Space (SPACE_ID env var is always set)
+ON_HF_SPACE = bool(os.getenv("SPACE_ID"))
+
+# Default to the persistent storage mount point on Spaces for data & DB paths
+_default_data_path = "/data" if ON_HF_SPACE else "data"
+_default_chroma_path = (
+    os.path.join(_default_data_path, "chroma") if ON_HF_SPACE else "chroma"
+)
+
+# Allow overriding via environment variables
+DATA_PATH = os.getenv("DATA_PATH", _default_data_path)
+CHROMA_PATH = os.getenv("CHROMA_PATH", _default_chroma_path)
+
+# Templates (these are small text files so they can stay in repo)
 JINJA_TEMPLATE_PATH = os.getenv("JINJA_TEMPLATE_PATH", "rag_query_improved.txt")
 EVAL_TEMPLATE_PATH = os.getenv("EVAL_TEMPLATE_PATH", "eval_prompt_tests.txt")
 
