@@ -85,6 +85,10 @@ def get_config_info():
 - OpenAI API Key: {openai_status}
 - Anthropic API Key: {anthropic_status}
 
+**Password Configuration:**
+- USER_PW: {"✅ Set" if USER_PW else "❌ Missing"}
+- ADMIN_PW: {"✅ Set" if ADMIN_PW else "❌ Missing"}
+
 **Optional Services:**
 - Ollama URL: `{config.OLLAMA_URL}`
 - Argilla API URL: `{config.ARGILLA_API_URL or "Not configured"}`
@@ -643,7 +647,6 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
 
         # Refresh game lists when logging in
         updated_games = refresh_game_lists() if show_user else []
-        updated_pdfs = list_pdfs() if show_admin else []
 
         # Updates
         return (
@@ -651,8 +654,8 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
             gr.update(value=msg, visible=True),
             gr.update(choices=updated_games, visible=show_user),  # game_dropdown
             gr.update(visible=show_user),  # upload_accordion
-            gr.update(choices=updated_pdfs, visible=show_admin),  # delete_accordion
-            gr.update(choices=updated_games, visible=show_admin),  # rename_accordion
+            gr.update(visible=show_admin),  # delete_accordion
+            gr.update(visible=show_admin),  # rename_accordion
             gr.update(visible=show_admin),  # tech_accordion
         )
 
@@ -664,10 +667,20 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
             access_msg,
             game_dropdown,
             upload_accordion,
-            delete_dropdown,
-            rename_game_dropdown,
+            delete_accordion,
+            rename_accordion,
             tech_accordion,
         ],
+    ).then(
+        # Refresh admin dropdown contents when panels become visible
+        lambda level: (
+            gr.update(choices=list_pdfs()) if level == "admin" else gr.update(),
+            gr.update(choices=refresh_game_lists())
+            if level == "admin"
+            else gr.update(),
+        ),
+        inputs=[access_state],
+        outputs=[delete_dropdown, rename_game_dropdown],
     )
 
     # ------------------------------------------------------------------
