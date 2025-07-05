@@ -62,6 +62,13 @@ theme_css = """
   overflow: visible !important;
   white-space: normal !important;
 }
+
+/* Cap chatbot height on wider screens */
+@media (min-width: 769px) {
+  .custom-chatbot {
+    max-height: 900px !important;
+  }
+}
 """
 
 # -----------------------------------------------------------------------------
