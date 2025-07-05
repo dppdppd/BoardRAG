@@ -27,7 +27,42 @@ INTRO_STRING = """
 # 🎲 BoardRAG
 """
 
-theme_css = ""
+theme_css = """
+/* --------------------------------------------------
+   Responsive tweaks for single-column (mobile) view
+   -------------------------------------------------- */
+
+/* Switch the main content row to a vertical stack on narrow screens */
+@media (max-width: 768px) {
+  .main-content {
+    flex-direction: column !important; /* stack columns */
+  }
+
+  /* Put sidebar (access & controls) above chat in the stack */
+  .sidebar {
+    order: -1 !important;
+    width: 100% !important;
+  }
+
+  /* Chat column comes after sidebar */
+  .chat-column {
+    order: 1 !important;
+    width: 100% !important;
+  }
+
+  /* Reduce chatbot height on small screens */
+  .custom-chatbot {
+    height: 60vh !important;
+    max-height: 60vh !important;
+  }
+}
+
+/* Prevent title text from being clipped */
+.markdown-body h1 {
+  overflow: visible !important;
+  white-space: normal !important;
+}
+"""
 
 # -----------------------------------------------------------------------------
 # Access control passwords (set in environment)
