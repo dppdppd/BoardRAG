@@ -27,6 +27,7 @@ import chromadb
 from langchain_anthropic import ChatAnthropic
 from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI
+from langchain_community.document_loaders import PyPDFLoader
 
 from config import (
     CHROMA_PATH,
@@ -49,6 +50,7 @@ validate_config()
 def extract_game_name_from_filename(filename: str) -> str:
     """
     Use LLM API to extract the proper game name from a PDF filename.
+    Also reads the first few pages of the PDF for better accuracy.
 
     Args:
         filename (str): PDF filename like "up front rulebook bw.pdf"
@@ -58,6 +60,38 @@ def extract_game_name_from_filename(filename: str) -> str:
     """
     import time
     import random
+
+    # Try to extract text from first few pages for better context
+    pdf_context = ""
+    try:
+        # Construct full path to PDF
+        from config import DATA_PATH
+        pdf_path = Path(DATA_PATH) / filename
+        
+        if pdf_path.exists():
+            loader = PyPDFLoader(str(pdf_path))
+            documents = loader.load()
+            
+            # Get text from first 3 pages (or fewer if PDF is shorter)
+            pages_to_read = min(3, len(documents))
+            page_texts = []
+            
+            for i in range(pages_to_read):
+                page_text = documents[i].page_content.strip()
+                if page_text:
+                    # Take first 500 chars per page to keep context manageable
+                    page_texts.append(page_text[:500])
+            
+            if page_texts:
+                pdf_context = "\n\n".join(page_texts)
+                print(f"📖 Extracted {len(pdf_context)} chars from first {pages_to_read} pages of {filename}")
+            else:
+                print(f"⚠️ No readable text found in first pages of {filename}")
+        else:
+            print(f"⚠️ PDF file not found: {pdf_path}")
+    except Exception as e:
+        print(f"⚠️ Could not read PDF content from {filename}: {e}")
+        pdf_context = ""
 
     # Retry configuration
     max_retries = 3
@@ -75,9 +109,20 @@ def extract_game_name_from_filename(filename: str) -> str:
             else:  # openai
                 model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
 
-            prompt = f"""You are a board game expert. Extract the proper board game name from this filename: "{filename}"
+            # Build prompt with optional PDF content
+            context_section = ""
+            if pdf_context:
+                context_section = f"""
+
+CONTENT FROM FIRST PAGES:
+{pdf_context}
+
+"""
+
+            prompt = f"""You are a board game expert. Extract the proper board game name from this filename: "{filename}"{context_section}
 
 IMPORTANT: Use your knowledge of published board games to identify what this filename refers to.
+If PDF content is provided above, use it to confirm the correct game title.
 
 Guidelines:
 - Return ONLY the official published game name
@@ -85,6 +130,7 @@ Guidelines:
 - Consider common board game abbreviations (CNA, D&D, MTG, etc.)
 - Think about what actual published board games exist
 - Use proper capitalization for official game titles
+- If you see the actual game title in the PDF content, prefer that over filename guessing
 
 Examples of proper extraction:
 - "monopoly.pdf" → "Monopoly"

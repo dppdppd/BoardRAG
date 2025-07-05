@@ -18,7 +18,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import config
 from embedding_function import get_embedding_function
-from query import get_available_games, query_rag
+from query import get_available_games, query_rag, get_stored_game_names
 
 # Disable ChromaDB telemetry after imports
 config.disable_chromadb_telemetry()
@@ -27,68 +27,31 @@ INTRO_STRING = """
 # 🎲 BoardRAG
 """
 
-# CSS for dark/light mode toggle
-theme_css = """
-/* Light mode (default) */
-.gradio-container {
-    transition: background-color 0.3s ease, color 0.3s ease;
-}
+theme_css = ""
 
-/* Dark mode overrides */
-.dark-mode .gradio-container {
-    background-color: #1a1a1a !important;
-    color: #ffffff !important;
-}
+# -----------------------------------------------------------------------------
+# Access control passwords (set in environment)
+# -----------------------------------------------------------------------------
+USER_PW = os.getenv("USER_PW")
+ADMIN_PW = os.getenv("ADMIN_PW")
 
-.dark-mode .gradio-container .block,
-.dark-mode .gradio-container [data-testid="block"] {
-    background-color: #2d2d2d !important;
-    border-color: #404040 !important;
-    color: #ffffff !important;
-}
 
-.dark-mode .gradio-container input,
-.dark-mode .gradio-container textarea,
-.dark-mode .gradio-container select {
-    background-color: #333333 !important;
-    border-color: #555555 !important;
-    color: #ffffff !important;
-}
+# Utility helpers -------------------------------------------------------------
 
-.dark-mode .gradio-container button {
-    background-color: #404040 !important;
-    color: #ffffff !important;
-    border-color: #555555 !important;
-}
 
-.dark-mode .gradio-container button:hover {
-    background-color: #555555 !important;
-}
+def list_pdfs() -> List[str]:
+    """Return names of all PDFs in data directory."""
+    if not os.path.isdir(config.DATA_PATH):
+        return []
+    return sorted([f for f in os.listdir(config.DATA_PATH) if f.lower().endswith(".pdf")])
 
-.dark-mode .gradio-container .chatbot,
-.dark-mode .gradio-container [data-testid="chatbot"] {
-    background-color: #1a1a1a !important;
-    color: #ffffff !important;
-}
 
-.dark-mode .gradio-container p,
-.dark-mode .gradio-container h1,
-.dark-mode .gradio-container h2,
-.dark-mode .gradio-container h3,
-.dark-mode .gradio-container h4,
-.dark-mode .gradio-container h5,
-.dark-mode .gradio-container h6,
-.dark-mode .gradio-container span,
-.dark-mode .gradio-container div,
-.dark-mode .gradio-container label {
-    color: #ffffff !important;
-}
-
-/* Theme toggle button */
-#theme-toggle {
-    margin-bottom: 10px;
-}
-"""
+def refresh_game_lists() -> List[str]:
+    """Wrapper around get_available_games with error swallow."""
+    try:
+        return get_available_games()
+    except Exception:
+        return []
 
 
 def get_config_info():
@@ -527,8 +490,8 @@ def rebuild_library_handler():
 
 # Create the interface
 with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
-    # State to track current theme
-    current_theme = gr.State(value="light")
+    # State holding current access level: "none", "user", "admin"
+    access_state = gr.State(value="none")
 
     gr.Markdown(INTRO_STRING)
 
@@ -556,20 +519,21 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
                 clear = gr.ClearButton([msg, chatbot], scale=1, size="sm")
 
         with gr.Column(scale=1, elem_classes=["sidebar"]):
-            # Theme toggle button
-            theme_toggle = gr.Button(
-                "🌙 Dark Mode", elem_id="theme-toggle", variant="secondary", size="sm"
-            )
+            # Password field at top of sidebar
+            password_tb = gr.Textbox(type="password", placeholder="🔐 Enter Password", label="Access")
+            access_msg = gr.Markdown("", visible=False)
 
+            # Game selection (hidden until unlocked)
             game_dropdown = gr.Dropdown(
                 choices=game_choices,
                 value=None,
                 label="Select Game (Required)",
                 info="Choose a game to get answers from its rulebook",
+                visible=False,
             )
 
             # Add PDF upload section in expanding panel
-            with gr.Accordion("📤 Add New Game", open=False):
+            with gr.Accordion("📤 Add New Game", open=False, visible=False) as upload_accordion:
                 upload_file = gr.File(
                     file_types=[".pdf"],
                     label="Upload PDF Rulebook",
@@ -580,8 +544,21 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
                     label="Upload Status", interactive=False, visible=False
                 )
 
-            # Add collapsible config section
-            with gr.Accordion("⚙️ Technical Info", open=False):
+            # Admin-only panels ------------------------------------------------
+
+            with gr.Accordion("🗑️ Delete PDF", open=False, visible=False) as delete_accordion:
+                delete_dropdown = gr.Dropdown(choices=list_pdfs(), label="Select PDF")
+                delete_button = gr.Button("Delete", variant="stop")
+                delete_status = gr.Textbox(interactive=False)
+
+            with gr.Accordion("✏️ Rename Game", open=False, visible=False) as rename_accordion:
+                rename_game_dropdown = gr.Dropdown(choices=game_choices, label="Select Game")
+                new_name_tb = gr.Textbox(label="New Name")
+                rename_button = gr.Button("Rename", variant="primary")
+                rename_status = gr.Textbox(interactive=False)
+
+            # Technical info (admin only)
+            with gr.Accordion("⚙️ Technical Info", open=False, visible=False) as tech_accordion:
                 gr.Markdown(get_config_info())
 
                 # Add rebuild library button
@@ -634,56 +611,127 @@ with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
         ],
     )
 
-    # Theme toggle functionality
-    def toggle_theme_handler(current_theme_state):
-        """Toggle between light and dark themes."""
-        new_theme = "dark" if current_theme_state == "light" else "light"
-        button_text = "☀️ Light Mode" if new_theme == "dark" else "🌙 Dark Mode"
+    # ------------------------------------------------------------------
+    # ACCESS CONTROL HANDLER
+    # ------------------------------------------------------------------
 
-        return new_theme, gr.update(value=button_text)
+    def unlock_handler(pw):
+        if ADMIN_PW and pw == ADMIN_PW:
+            level = "admin"
+            msg = "### ✅ Admin access granted"
+        elif USER_PW and pw == USER_PW:
+            level = "user"
+            msg = "### ✅ User access granted"
+        else:
+            level = "none"
+            msg = "### ❌ Invalid password"
 
-    theme_toggle.click(
-        fn=toggle_theme_handler,
-        inputs=[current_theme],
-        outputs=[current_theme, theme_toggle],
-        js="""
-        function(current_theme_state) {
-            const body = document.body;
-            const isDarkMode = body.classList.contains('dark-mode');
-            
-            if (isDarkMode) {
-                body.classList.remove('dark-mode');
-                localStorage.setItem('theme', 'light');
-            } else {
-                body.classList.add('dark-mode');
-                localStorage.setItem('theme', 'dark');
-            }
-            
-            return current_theme_state;
-        }
-        """,
+        # Determine visibilities
+        show_user = level in {"user", "admin"}
+        show_admin = level == "admin"
+
+        # Refresh game lists when logging in
+        updated_games = refresh_game_lists() if show_user else []
+        updated_pdfs = list_pdfs() if show_admin else []
+
+        # Updates
+        return (
+            level,
+            gr.update(value=msg, visible=True),
+            gr.update(choices=updated_games, visible=show_user),  # game_dropdown
+            gr.update(visible=show_user),  # upload_accordion
+            gr.update(choices=updated_pdfs, visible=show_admin),  # delete_accordion
+            gr.update(choices=updated_games, visible=show_admin),  # rename_accordion
+            gr.update(visible=show_admin),  # tech_accordion
+        )
+
+    password_tb.change(
+        unlock_handler,
+        inputs=[password_tb],
+        outputs=[access_state, access_msg, game_dropdown, upload_accordion, delete_dropdown, rename_game_dropdown, tech_accordion],
     )
 
-    # Initialize theme on page load
-    demo.load(
-        fn=None,
-        js="""
-        function() {
-            const savedTheme = localStorage.getItem('theme');
-            const body = document.body;
-            
-            if (savedTheme === 'dark') {
-                body.classList.add('dark-mode');
-                
-                setTimeout(() => {
-                    const themeButton = document.querySelector('#theme-toggle button');
-                    if (themeButton) {
-                        themeButton.textContent = '☀️ Light Mode';
-                    }
-                }, 100);
-            }
-        }
-        """,
+    # ------------------------------------------------------------------
+    # DELETE PDF HANDLER
+    # ------------------------------------------------------------------
+
+    def delete_pdf_handler(pdf_name):
+        if not pdf_name:
+            return "❌ No PDF selected", gr.update(), gr.update(), gr.update()
+        try:
+            # Remove file from disk
+            file_path = os.path.join(config.DATA_PATH, pdf_name)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            # Remove chunks from DB
+            with config.suppress_chromadb_telemetry():
+                client = chromadb.PersistentClient(path=config.CHROMA_PATH, settings=config.get_chromadb_settings())
+                db = Chroma(client=client, embedding_function=get_embedding_function())
+                ids_to_del = [i for i in db.get(include=[])['ids'] if pdf_name in i]
+                if ids_to_del:
+                    db.delete(ids=ids_to_del)
+
+                # Remove stored game name
+                try:
+                    names_col = client.get_collection("game_names")
+                    names_col.delete(ids=[pdf_name])
+                except Exception:
+                    pass
+
+            # Refresh dropdowns
+            new_pdfs = list_pdfs()
+            new_games = refresh_game_lists()
+            return (
+                f"✅ Deleted {pdf_name}",
+                gr.update(choices=new_pdfs, value=None),
+                gr.update(choices=new_games, value=None),
+                gr.update(choices=new_games, value=None),
+            )
+        except Exception as e:
+            return f"❌ Error: {e}", gr.update(), gr.update(), gr.update()
+
+    delete_button.click(
+        delete_pdf_handler,
+        inputs=[delete_dropdown],
+        outputs=[delete_status, delete_dropdown, game_dropdown, rename_game_dropdown],
+    )
+
+    # ------------------------------------------------------------------
+    # RENAME GAME HANDLER
+    # ------------------------------------------------------------------
+
+    def rename_game_handler(old_name, new_name):
+        if not old_name or not new_name:
+            return "❌ Provide both fields", gr.update(), gr.update()
+        try:
+            stored = get_stored_game_names()
+            filename = None
+            for fn, gn in stored.items():
+                if gn == old_name:
+                    filename = fn
+                    break
+            if not filename:
+                return "❌ Game not found", gr.update(), gr.update()
+
+            with config.suppress_chromadb_telemetry():
+                client = chromadb.PersistentClient(path=config.CHROMA_PATH, settings=config.get_chromadb_settings())
+                col = client.get_or_create_collection(name="game_names", metadata={"description": "Stores extracted game names from PDF filenames"})
+                col.update(ids=[filename], documents=[new_name])
+
+            games = refresh_game_lists()
+            return (
+                f"✅ Renamed to {new_name}",
+                gr.update(choices=games, value=None),
+                gr.update(choices=games, value=None),
+            )
+        except Exception as e:
+            return f"❌ Error: {e}", gr.update(), gr.update()
+
+    rename_button.click(
+        rename_game_handler,
+        inputs=[rename_game_dropdown, new_name_tb],
+        outputs=[rename_status, game_dropdown, rename_game_dropdown],
     )
 
 
