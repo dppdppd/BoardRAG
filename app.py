@@ -526,10 +526,11 @@ with gr.Blocks(
             with gr.Row(elem_classes=["input-row"]):
                 msg = gr.Textbox(
                     placeholder="First select a game above, then ask your question...",
+                    lines=2,  # limit initial height
+                    max_lines=4,  # prevent it from growing too tall on mobile
                     scale=9,
                     container=False,
                 )
-                clear = gr.ClearButton([msg, chatbot], scale=1, size="sm")
 
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Password field at top of sidebar
