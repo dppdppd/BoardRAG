@@ -66,25 +66,28 @@ def extract_game_name_from_filename(filename: str) -> str:
     try:
         # Construct full path to PDF
         from config import DATA_PATH
+
         pdf_path = Path(DATA_PATH) / filename
-        
+
         if pdf_path.exists():
             loader = PyPDFLoader(str(pdf_path))
             documents = loader.load()
-            
-            # Get text from first 3 pages (or fewer if PDF is shorter)
-            pages_to_read = min(3, len(documents))
+
+            # Get text from first 10 pages (or fewer if PDF is shorter)
+            pages_to_read = min(10, len(documents))
             page_texts = []
-            
+
             for i in range(pages_to_read):
                 page_text = documents[i].page_content.strip()
                 if page_text:
                     # Take first 500 chars per page to keep context manageable
                     page_texts.append(page_text[:500])
-            
+
             if page_texts:
                 pdf_context = "\n\n".join(page_texts)
-                print(f"📖 Extracted {len(pdf_context)} chars from first {pages_to_read} pages of {filename}")
+                print(
+                    f"📖 Extracted {len(pdf_context)} chars from first {pages_to_read} pages of {filename}"
+                )
             else:
                 print(f"⚠️ No readable text found in first pages of {filename}")
         else:

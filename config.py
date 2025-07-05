@@ -13,6 +13,7 @@ import contextlib
 import os
 import sys
 from dotenv import load_dotenv
+from pathlib import Path
 
 
 def disable_chromadb_telemetry():
@@ -159,6 +160,31 @@ _default_chroma_path = (
 # Allow overriding via environment variables
 DATA_PATH = os.getenv("DATA_PATH", _default_data_path)
 CHROMA_PATH = os.getenv("CHROMA_PATH", _default_chroma_path)
+
+# ---------------------------------------------------------------------------
+# Ensure chosen DATA_PATH is writable; if not, fall back to repo-local 'data'
+# ---------------------------------------------------------------------------
+
+
+def _is_writable(dir_path: str) -> bool:
+    """Check if we can create and write a temporary file in dir_path."""
+    try:
+        os.makedirs(dir_path, exist_ok=True)
+        test_file = Path(dir_path) / ".write_test"
+        with open(test_file, "w") as f:
+            f.write("ok")
+        test_file.unlink()
+        return True
+    except Exception:
+        return False
+
+
+# On HF Spaces without persistent storage, '/data' is not writable → fallback
+if not _is_writable(DATA_PATH):
+    fallback_data = "data"
+    DATA_PATH = fallback_data
+    CHROMA_PATH = os.path.join(fallback_data, "chroma")
+    os.makedirs(DATA_PATH, exist_ok=True)
 
 # Templates (these are small text files so they can stay in repo)
 JINJA_TEMPLATE_PATH = os.getenv("JINJA_TEMPLATE_PATH", "rag_query_improved.txt")
