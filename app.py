@@ -495,7 +495,14 @@ def rebuild_library_handler():
 
 
 # Create the interface
-with gr.Blocks(theme=gr.themes.Glass(), css=theme_css) as demo:
+my_theme = gr.themes.Default
+
+with gr.Blocks(
+    theme=gr.themes.Default(
+        font=[gr.themes.GoogleFont("Georgia"), "Arial", "sans-serif"]
+    ),
+    css=theme_css,
+) as demo:
     # State holding current access level: "none", "user", "admin"
     access_state = gr.State(value="none")
 
