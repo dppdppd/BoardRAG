@@ -32,8 +32,12 @@ def get_chromadb_settings():
     try:
         import chromadb
 
+        # Determine whether database reset is allowed (default True)
+        allow_reset_env = os.getenv("ALLOW_RESET", "True").lower() in {"1", "true", "yes"}
+
         return chromadb.config.Settings(
             anonymized_telemetry=False,
+            allow_reset=allow_reset_env,
         )
     except ImportError:
         return None
