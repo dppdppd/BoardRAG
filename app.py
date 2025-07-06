@@ -70,6 +70,11 @@ theme_css = """
     max-height: 900px !important;
   }
 }
+
+/* Add vertical spacing between components in sidebar */
+.sidebar .gr-box, .sidebar .gr-form-component {
+  margin-bottom: 0.75rem !important;
+}
 """
 
 # -----------------------------------------------------------------------------
@@ -498,7 +503,20 @@ def rebuild_library_handler():
         from pathlib import Path
 
         status_messages = []
-        status_messages.append("🔄 Starting library rebuild...")
+        status_messages.append("🗑️ Clearing existing database …")
+
+        # Reset the entire Chroma database so removed PDFs disappear
+        with config.suppress_chromadb_telemetry():
+            persistent_client = chromadb.PersistentClient(
+                path=config.CHROMA_PATH, settings=config.get_chromadb_settings()
+            )
+            try:
+                persistent_client.reset()
+                status_messages.append("✅ Database reset complete")
+            except Exception as e:
+                status_messages.append(f"❌ Error resetting database: {e}")
+
+        status_messages.append("🔄 Starting library rebuild …")
 
         # Get list of PDFs in data directory
         data_path = Path(config.DATA_PATH)
@@ -561,7 +579,7 @@ def build_rename_choices() -> List[str]:
     try:
         stored = get_stored_game_names()  # filename -> game name
         for fn, gn in stored.items():
-            choices.append(f"{gn} - {fn}")
+            choices.append(f"{fn} - {gn}")
     except Exception:
         pass
     return sorted(choices)
@@ -705,6 +723,7 @@ with gr.Blocks(
                 gr.update(),
                 gr.update(value=None),
                 gr.update(),
+                gr.update(value=None),
             )
 
         # Ensure we work with a list
@@ -720,6 +739,7 @@ with gr.Blocks(
 
         # Refresh PDF list for delete dropdown
         new_pdfs = list_pdfs()
+        rename_choices = build_rename_choices()
 
         final_status = "\n".join(status_msgs)
 
@@ -728,6 +748,7 @@ with gr.Blocks(
             dropdown_update,
             gr.update(value=None),  # reset file input
             gr.update(choices=new_pdfs),
+            gr.update(choices=rename_choices),
         )
 
     upload_file.upload(
@@ -738,6 +759,7 @@ with gr.Blocks(
             game_dropdown,
             upload_file,
             delete_dropdown,
+            rename_game_dropdown,
         ],
     )
 
@@ -858,8 +880,8 @@ with gr.Blocks(
             if " - " not in selected_entry:
                 return "❌ Invalid selection", gr.update(), gr.update()
 
-            # Parse out components
-            old_game, filename = [x.strip() for x in selected_entry.split(" - ", 1)]
+            # Parse out components (filename first, then current game name)
+            filename, old_game = [x.strip() for x in selected_entry.split(" - ", 1)]
             
             with config.suppress_chromadb_telemetry():
                 client = chromadb.PersistentClient(
