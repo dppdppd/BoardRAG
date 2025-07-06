@@ -551,6 +551,22 @@ def rebuild_library_handler():
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 
 
+# -----------------------------------------------------------------------------
+# Helper to build choices like "Game Name - filename.pdf" for rename dropdown
+# -----------------------------------------------------------------------------
+
+def build_rename_choices() -> List[str]:
+    """Return list of strings combining game name and pdf filename."""
+    choices = []
+    try:
+        stored = get_stored_game_names()  # filename -> game name
+        for fn, gn in stored.items():
+            choices.append(f"{gn} - {fn}")
+    except Exception:
+        pass
+    return sorted(choices)
+
+
 # Create the interface
 my_theme = gr.themes.Default
 
@@ -568,13 +584,6 @@ with gr.Blocks(
     # Get available games for the dropdown (with proper names)
     available_games = get_available_games()
     game_choices = available_games
-
-    # Model selection dropdown
-    model_dropdown = gr.Dropdown(
-        choices=["claude-4-sonnet", "gpt-4o"],
-        value="claude-4-sonnet",
-        label="Model",
-    )
 
     # Mobile-first responsive layout
     with gr.Row(elem_classes=["main-content"]):
@@ -603,6 +612,14 @@ with gr.Blocks(
             )
             access_msg = gr.Markdown("", visible=False)
 
+            # Model selection (hidden until unlocked)
+            model_dropdown = gr.Dropdown(
+                choices=["claude-4-sonnet", "gpt-4o"],
+                value="claude-4-sonnet",
+                label="Model",
+                visible=False,
+            )
+
             # Game selection (hidden until unlocked)
             game_dropdown = gr.Dropdown(
                 choices=game_choices,
@@ -618,8 +635,8 @@ with gr.Blocks(
             ) as upload_accordion:
                 upload_file = gr.File(
                     file_types=[".pdf"],
-                    label="Upload PDF Rulebook",
-                    file_count="single",
+                    label="Upload PDF Rulebooks",
+                    file_count="multiple",  # allow selecting multiple PDFs at once
                 )
                 upload_status = gr.Textbox(
                     label="Upload Status", interactive=False, visible=False
@@ -635,10 +652,10 @@ with gr.Blocks(
                 delete_status = gr.Textbox(interactive=False)
 
             with gr.Accordion(
-                "✏️ Rename Game", open=False, visible=False
+                "✏️ Assign PDF", open=False, visible=False
             ) as rename_accordion:
                 rename_game_dropdown = gr.Dropdown(
-                    choices=game_choices, label="Select Game"
+                    choices=build_rename_choices(), label="Select PDF"
                 )
                 new_name_tb = gr.Textbox(label="New Name")
                 rename_button = gr.Button("Rename", variant="primary")
@@ -680,12 +697,34 @@ with gr.Blocks(
     ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
 
     # Connect upload button
-    def upload_with_status_update(pdf_file):
-        status, dropdown_update = upload_pdf_handler(pdf_file)
+    def upload_with_status_update(pdf_files):
+        """Handle one or many uploaded PDFs in a batch."""
+        if not pdf_files:
+            return (
+                gr.update(value="❌ No files uploaded", visible=True),
+                gr.update(),
+                gr.update(value=None),
+                gr.update(),
+            )
+
+        # Ensure we work with a list
+        if not isinstance(pdf_files, list):
+            pdf_files = [pdf_files]
+
+        status_msgs = []
+        dropdown_update = gr.update()
+
+        for pdf_file in pdf_files:
+            status, dropdown_update = upload_pdf_handler(pdf_file)
+            status_msgs.append(status)
+
         # Refresh PDF list for delete dropdown
         new_pdfs = list_pdfs()
+
+        final_status = "\n".join(status_msgs)
+
         return (
-            gr.update(value=status, visible=True),
+            gr.update(value=final_status, visible=True),
             dropdown_update,
             gr.update(value=None),  # reset file input
             gr.update(choices=new_pdfs),
@@ -729,6 +768,7 @@ with gr.Blocks(
             level,
             gr.update(value=msg, visible=True),
             gr.update(choices=updated_games, visible=show_user),  # game_dropdown
+            gr.update(visible=show_user),  # model_dropdown
             gr.update(visible=show_user),  # upload_accordion
             gr.update(visible=show_admin),  # delete_accordion
             gr.update(visible=show_admin),  # rename_accordion
@@ -742,6 +782,7 @@ with gr.Blocks(
             access_state,
             access_msg,
             game_dropdown,
+            model_dropdown,
             upload_accordion,
             delete_accordion,
             rename_accordion,
@@ -751,9 +792,7 @@ with gr.Blocks(
         # Refresh admin dropdown contents when panels become visible
         lambda level: (
             gr.update(choices=list_pdfs()) if level == "admin" else gr.update(),
-            gr.update(choices=refresh_game_lists())
-            if level == "admin"
-            else gr.update(),
+            gr.update(choices=build_rename_choices()) if level == "admin" else gr.update(),
         ),
         inputs=[access_state],
         outputs=[delete_dropdown, rename_game_dropdown],
@@ -792,11 +831,12 @@ with gr.Blocks(
             # Refresh dropdowns
             new_pdfs = list_pdfs()
             new_games = refresh_game_lists()
+            rename_choices = build_rename_choices()
             return (
                 f"✅ Deleted {pdf_name}",
                 gr.update(choices=new_pdfs, value=None),
                 gr.update(choices=new_games, value=None),
-                gr.update(choices=new_games, value=None),
+                gr.update(choices=rename_choices, value=None),
             )
         except Exception as e:
             return f"❌ Error: {e}", gr.update(), gr.update(), gr.update()
@@ -811,19 +851,16 @@ with gr.Blocks(
     # RENAME GAME HANDLER
     # ------------------------------------------------------------------
 
-    def rename_game_handler(old_name, new_name):
-        if not old_name or not new_name:
+    def rename_game_handler(selected_entry, new_name):
+        if not selected_entry or not new_name:
             return "❌ Provide both fields", gr.update(), gr.update()
         try:
-            stored = get_stored_game_names()
-            filename = None
-            for fn, gn in stored.items():
-                if gn == old_name:
-                    filename = fn
-                    break
-            if not filename:
-                return "❌ Game not found", gr.update(), gr.update()
+            if " - " not in selected_entry:
+                return "❌ Invalid selection", gr.update(), gr.update()
 
+            # Parse out components
+            old_game, filename = [x.strip() for x in selected_entry.split(" - ", 1)]
+            
             with config.suppress_chromadb_telemetry():
                 client = chromadb.PersistentClient(
                     path=config.CHROMA_PATH, settings=config.get_chromadb_settings()
@@ -837,10 +874,11 @@ with gr.Blocks(
                 col.update(ids=[filename], documents=[new_name])
 
             games = refresh_game_lists()
+            rename_choices = build_rename_choices()
             return (
                 f"✅ Renamed to {new_name}",
                 gr.update(choices=games, value=None),
-                gr.update(choices=games, value=None),
+                gr.update(choices=rename_choices, value=None),
             )
         except Exception as e:
             return f"❌ Error: {e}", gr.update(), gr.update()
