@@ -275,7 +275,7 @@ def upload_pdf_handler(pdf_file):
         return f"❌ Error processing '{filename}': {str(e)}", gr.update()
 
 
-def query_interface(message, selected_game, chat_history):
+def query_interface(message, selected_game, chat_history, selected_model):
     """
     Queries the RAG model with the given query and returns the response.
 
@@ -283,6 +283,7 @@ def query_interface(message, selected_game, chat_history):
         message (str): The query to be passed to the RAG model.
         selected_game (str): The selected game to filter results by.
         chat_history (str): The chat history.
+        selected_model (str): The selected model to use for the query.
 
     Returns:
         str: The response from the RAG model.
@@ -299,6 +300,17 @@ def query_interface(message, selected_game, chat_history):
         )
         chat_history.append((message, error_message))
         return "", chat_history
+
+    # Update model/provider based on user selection
+    if selected_model:
+        model_lower = selected_model.lower()
+        if "claude" in model_lower:
+            config.LLM_PROVIDER = "anthropic"
+        elif "gpt" in model_lower:
+            config.LLM_PROVIDER = "openai"
+        else:
+            config.LLM_PROVIDER = "openai"
+        config.GENERATOR_MODEL = selected_model
 
     # Get the simple filename mapping for filtering
     mapping = getattr(get_available_games, "_filename_mapping", {})
@@ -554,6 +566,13 @@ with gr.Blocks(
     available_games = get_available_games()
     game_choices = available_games
 
+    # Model selection dropdown
+    model_dropdown = gr.Dropdown(
+        choices=["claude-4-sonnet", "gpt-4o"],
+        value="claude-4-sonnet",
+        label="Model",
+    )
+
     # Mobile-first responsive layout
     with gr.Row(elem_classes=["main-content"]):
         with gr.Column(scale=3, elem_classes=["chat-column"]):
@@ -645,7 +664,7 @@ with gr.Blocks(
                     placeholder="Click 'Rebuild Library' to process all PDFs or 'Process New PDFs' to add only new ones",
                 )
 
-    msg.submit(query_interface, [msg, game_dropdown, chatbot], [msg, chatbot])
+    msg.submit(query_interface, [msg, game_dropdown, chatbot, model_dropdown], [msg, chatbot])
 
     # Connect rebuild library button
     rebuild_button.click(
