@@ -66,6 +66,7 @@ theme_css = """
 /* Cap chatbot height on wider screens */
 @media (min-width: 769px) {
   .custom-chatbot {
+    height: 80vh !important; /* steady size even when sidebar expands */
     max-height: 900px !important;
   }
 }
