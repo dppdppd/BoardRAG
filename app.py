@@ -315,7 +315,9 @@ def query_interface(message, selected_game, chat_history, selected_model):
 
     # Get the simple filename mapping for filtering
     mapping = getattr(get_available_games, "_filename_mapping", {})
-    game_filter = mapping.get(selected_game, selected_game.lower())
+    game_filter = mapping.get(selected_game)
+    if game_filter is None:
+        game_filter = [selected_game.lower()]
 
     resp = query_rag(message, game_filter)
 

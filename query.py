@@ -245,7 +245,7 @@ def get_available_games() -> List[str]:
 
         # Extract unique filenames from source paths
         filenames = set()
-        filename_to_simple = {}  # Map cleaned name back to simple name for filtering
+        game_to_files = {}
 
         for doc_id in all_docs["ids"]:
             if ":" in doc_id:
@@ -263,6 +263,8 @@ def get_available_games() -> List[str]:
 
         # Build games list using stored names
         games = []
+        game_to_files = {}
+
         for filename in sorted(filenames):
             if filename in stored_names:
                 # Use stored game name
@@ -274,11 +276,16 @@ def get_available_games() -> List[str]:
                 proper_name = extract_and_store_game_name(filename)
 
             simple_name = filename.replace(".pdf", "").split()[0].lower()
-            games.append(proper_name)
-            filename_to_simple[proper_name] = simple_name
 
-        # Store the mapping for use in filtering
-        get_available_games._filename_mapping = filename_to_simple
+            # Deduplicate visible game names
+            if proper_name not in games:
+                games.append(proper_name)
+
+            # Build list of simple filenames per game
+            game_to_files.setdefault(proper_name, []).append(simple_name)
+
+        # Store the mapping for use in filtering (game -> list of simple filenames)
+        get_available_games._filename_mapping = game_to_files
 
         return sorted(games)
     except Exception as e:
@@ -432,14 +439,17 @@ def query_rag(
 
     # Apply game filter if specified
     if selected_game:
-        # Filter results by source path containing the game name
+        # selected_game can be a list of filter strings or a single string
+        filters = selected_game if isinstance(selected_game, list) else [selected_game]
+
         filtered_results = []
         for doc, score in all_results:
-            source = doc.metadata.get("source", "")
-            if selected_game in source.lower():
+            source = doc.metadata.get("source", "").lower()
+            if any(f in source for f in filters):
                 filtered_results.append((doc, score))
                 if len(filtered_results) >= 40:  # Increased to maintain context
                     break
+
         results = filtered_results
         print(
             f"  Filtered from {len(all_results)} to {len(results)} results for game '{selected_game}'"
@@ -531,16 +541,7 @@ def main():
     include_sources = args.include_sources
     include_context = args.include_context
 
-    # Convert proper game name to simple filename for filtering
-    game_filter = None
-    if selected_game:
-        # Get available games to populate the mapping
-        get_available_games()  # Call to populate the _filename_mapping
-        mapping = getattr(get_available_games, "_filename_mapping", {})
-        # Try to find the game in the mapping, or use as-is
-        game_filter = mapping.get(selected_game, selected_game.lower())
-
-    response = query_rag(query_text, game_filter)
+    response = query_rag(query_text, selected_game)
 
     # Extract game name from first source
     if response["sources"] and response["sources"][0]:
