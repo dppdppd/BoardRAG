@@ -579,7 +579,7 @@ def build_rename_choices() -> List[str]:
     try:
         stored = get_stored_game_names()  # filename -> game name
         for fn, gn in stored.items():
-            choices.append(f"{fn} - {gn}")
+            choices.append(f"{gn} - {fn}")
     except Exception:
         pass
     return sorted(choices)
@@ -880,8 +880,8 @@ with gr.Blocks(
             if " - " not in selected_entry:
                 return "❌ Invalid selection", gr.update(), gr.update()
 
-            # Parse out components (filename first, then current game name)
-            filename, old_game = [x.strip() for x in selected_entry.split(" - ", 1)]
+            # Parse out components (game name first, then filename)
+            old_game, filename = [x.strip() for x in selected_entry.split(" - ", 1)]
             
             with config.suppress_chromadb_telemetry():
                 client = chromadb.PersistentClient(
