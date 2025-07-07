@@ -11,6 +11,7 @@ INSTRUCTIONS:
 4. Provide specific examples from the context when available
 <!-- 5. Include relevant quotes that support your answer -->
 5. Only say "I don't know" if there is absolutely no relevant information about the topic
+6. Answer directly and authoritatively as if you are the rulebook itself. Do not use phrases like 'based on the context provided,' 'the context indicates,' or 'according to the rules.' State information as definitive facts.
 
 CONTEXT:
 {context}
