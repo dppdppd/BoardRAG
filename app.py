@@ -632,8 +632,8 @@ with gr.Blocks(
 
             # Model selection (hidden until unlocked)
             model_dropdown = gr.Dropdown(
-                choices=["claude-4-sonnet", "gpt-4o"],
-                value="claude-4-sonnet",
+                choices=["claude-4-sonnet", "o3"],
+                value="o3",
                 label="Model",
                 visible=False,
             )
