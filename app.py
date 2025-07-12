@@ -204,10 +204,10 @@ def add_chunks_to_database(chunks: List[Document]) -> bool:
         if new_chunks:
             new_chunk_ids = [chunk.metadata["id"] for chunk in new_chunks]
             db.add_documents(new_chunks, ids=new_chunk_ids)
-
+            
             # Extract and store game names for new chunks
             extract_and_store_game_names_for_chunks(new_chunks)
-
+            
             return True
         return False
 
@@ -219,14 +219,14 @@ def add_chunks_to_database(chunks: List[Document]) -> bool:
 def extract_and_store_game_names_for_chunks(chunks: List[Document]):
     """
     Extract and store game names for the PDFs represented in the chunks.
-
+    
     Args:
         chunks (List[Document]): The chunks to extract game names for.
     """
     try:
         # Import here to avoid circular imports
         from query import extract_and_store_game_name
-
+        
         # Get unique filenames from the chunks
         filenames = set()
         for chunk in chunks:
@@ -236,11 +236,11 @@ def extract_and_store_game_names_for_chunks(chunks: List[Document]):
                 filename = os.path.basename(source)
                 if filename.endswith(".pdf"):
                     filenames.add(filename)
-
+        
         # Extract and store game names for each unique filename
         for filename in sorted(filenames):
             extract_and_store_game_name(filename)
-
+            
     except Exception as e:
         print(f"⚠️ Error extracting game names: {e}")
 
@@ -408,13 +408,13 @@ def refresh_games_handler():
     try:
         # First, check for new PDFs in the data directory and process them
         from pathlib import Path
-
+        
         status_messages = []
-
+        
         # Get list of PDFs in data directory
         data_path = Path(config.DATA_PATH)
         pdf_files = list(data_path.glob("*.pdf"))
-
+        
         if pdf_files:
             # Connect to database to check existing documents
             with config.suppress_chromadb_telemetry():
@@ -425,7 +425,7 @@ def refresh_games_handler():
                     client=persistent_client,
                     embedding_function=get_embedding_function(),
                 )
-
+            
             # Get existing document IDs to check what's already processed
             existing_items = db.get(include=[])
             existing_sources = set()
@@ -435,34 +435,34 @@ def refresh_games_handler():
                     if "/" in source_path:
                         filename = source_path.split("/")[-1]
                         existing_sources.add(filename)
-
+            
             # Find new PDFs that haven't been processed
             new_pdfs = []
             for pdf_file in pdf_files:
                 if pdf_file.name not in existing_sources:
                     new_pdfs.append(pdf_file)
-
+            
             if new_pdfs:
                 status_messages.append(
                     f"📄 Found {len(new_pdfs)} new PDFs to process..."
                 )
-
+                
                 # Process each new PDF individually to avoid token limits
                 for pdf_file in new_pdfs:
                     try:
                         # Process the PDF
                         chunks = process_single_pdf(str(pdf_file))
-
+                        
                         # Add to database in smaller batches
                         batch_size = 50  # Process in batches of 50 chunks
                         total_added = 0
-
+                        
                         for i in range(0, len(chunks), batch_size):
                             batch_chunks = chunks[i : i + batch_size]
                             success = add_chunks_to_database(batch_chunks)
                             if success:
                                 total_added += len(batch_chunks)
-
+                        
                         if total_added > 0:
                             status_messages.append(
                                 f"✅ Added {pdf_file.name} ({total_added} chunks)"
@@ -471,7 +471,7 @@ def refresh_games_handler():
                             status_messages.append(
                                 f"⚠️ {pdf_file.name} - no new content added"
                             )
-
+                            
                     except Exception as e:
                         status_messages.append(
                             f"❌ Error processing {pdf_file.name}: {str(e)}"
@@ -480,7 +480,7 @@ def refresh_games_handler():
                 status_messages.append("📄 No new PDFs found in data directory")
         else:
             status_messages.append("📄 No PDFs found in data directory")
-
+        
         # Now refresh the games list
         available_games = get_available_games()
         if available_games:
@@ -489,10 +489,10 @@ def refresh_games_handler():
             )
         else:
             status_messages.append("⚠️ No games found in database")
-
+        
         final_status = "\n".join(status_messages)
         return final_status, gr.update(choices=available_games)
-
+        
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 
@@ -501,7 +501,7 @@ def rebuild_library_handler():
     """Rebuild the entire library by processing all PDFs in the data directory."""
     try:
         from pathlib import Path
-
+        
         status_messages = []
         status_messages.append("🗑️ Clearing existing database …")
 
@@ -517,33 +517,33 @@ def rebuild_library_handler():
                 status_messages.append(f"❌ Error resetting database: {e}")
 
         status_messages.append("🔄 Starting library rebuild …")
-
+        
         # Get list of PDFs in data directory
         data_path = Path(config.DATA_PATH)
         pdf_files = list(data_path.glob("*.pdf"))
-
+        
         if not pdf_files:
             return "📄 No PDFs found in data directory", gr.update()
-
+        
         status_messages.append(f"📄 Found {len(pdf_files)} PDFs to process...")
-
+        
         # Process each PDF individually to avoid token limits
         total_processed = 0
         for pdf_file in pdf_files:
             try:
                 # Process the PDF
                 chunks = process_single_pdf(str(pdf_file))
-
+                
                 # Add to database in smaller batches
                 batch_size = 50  # Process in batches of 50 chunks
                 total_added = 0
-
+                
                 for i in range(0, len(chunks), batch_size):
                     batch_chunks = chunks[i : i + batch_size]
                     success = add_chunks_to_database(batch_chunks)
                     if success:
                         total_added += len(batch_chunks)
-
+                
                 if total_added > 0:
                     status_messages.append(
                         f"✅ Processed {pdf_file.name} ({total_added} chunks)"
@@ -551,20 +551,20 @@ def rebuild_library_handler():
                     total_processed += 1
                 else:
                     status_messages.append(f"⚠️ {pdf_file.name} - no new content added")
-
+                    
             except Exception as e:
                 status_messages.append(f"❌ Error processing {pdf_file.name}: {str(e)}")
-
+        
         # Refresh the games list
         available_games = get_available_games()
         status_messages.append(
             f"🎯 Library rebuild complete! {total_processed} PDFs processed."
         )
         status_messages.append(f"📚 Total games available: {len(available_games)}")
-
+        
         final_status = "\n".join(status_messages)
         return final_status, gr.update(choices=available_games)
-
+        
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 
@@ -596,7 +596,7 @@ with gr.Blocks(
 ) as demo:
     # State holding current access level: "none", "user", "admin"
     access_state = gr.State(value="none")
-
+    
     gr.Markdown(INTRO_STRING)
 
     # Get available games for the dropdown (with proper names)
@@ -607,22 +607,22 @@ with gr.Blocks(
     with gr.Row(elem_classes=["main-content"]):
         with gr.Column(scale=3, elem_classes=["chat-column"]):
             chatbot = gr.Chatbot(
-                height="80vh",
-                show_copy_button=True,
+                height="80vh", 
+                show_copy_button=True, 
                 elem_classes=["custom-chatbot"],
                 render_markdown=True,
             )
-
+            
             # Input section - move here for better mobile UX
             with gr.Row(elem_classes=["input-row"]):
                 msg = gr.Textbox(
-                    placeholder="First select a game above, then ask your question...",
+                    placeholder="First select a game above, then ask your question...", 
                     lines=1,  # single line so Enter submits (use Shift+Enter for newline)
                     max_lines=4,  # prevent it from growing too tall on mobile
                     scale=9,
                     container=False,
                 )
-
+        
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Password field at top of sidebar
             password_tb = gr.Textbox(
@@ -684,7 +684,7 @@ with gr.Blocks(
                 "⚙️ Technical Info", open=False, visible=False
             ) as tech_accordion:
                 gr.Markdown(get_config_info())
-
+                
                 # Add rebuild library button
                 with gr.Row():
                     rebuild_button = gr.Button(
@@ -693,7 +693,7 @@ with gr.Blocks(
                     refresh_button = gr.Button(
                         "🔄 Process New PDFs", variant="secondary"
                     )
-
+                
                 rebuild_status = gr.Textbox(
                     label="Status",
                     interactive=False,
@@ -734,7 +734,7 @@ with gr.Blocks(
         dropdown_update = gr.update()
 
         for pdf_file in pdf_files:
-            status, dropdown_update = upload_pdf_handler(pdf_file)
+        status, dropdown_update = upload_pdf_handler(pdf_file)
             status_msgs.append(status)
 
         # Refresh PDF list for delete dropdown

@@ -118,7 +118,11 @@ def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
 
                 model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL)
             else:  # openai
-                model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
+                # o3 model doesn't support temperature parameter, only default (1) is supported
+                if GENERATOR_MODEL == "o3":
+                    model = ChatOpenAI(model=GENERATOR_MODEL)
+                else:
+                    model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
 
             # Build prompt with optional PDF content
             context_section = ""
@@ -491,7 +495,11 @@ def query_rag(
     elif LLM_PROVIDER.lower() == "anthropic":
         model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0)
     elif LLM_PROVIDER.lower() == "openai":
-        model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
+        # o3 model doesn't support temperature parameter, only default (1) is supported
+        if GENERATOR_MODEL == "o3":
+            model = ChatOpenAI(model=GENERATOR_MODEL)
+        else:
+            model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
     else:
         raise ValueError(
             f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
