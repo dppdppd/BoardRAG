@@ -118,9 +118,9 @@ def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
 
                 model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL)
             else:  # openai
-                # o3 model doesn't support temperature parameter, only default (1) is supported
+                # o3 model only supports temperature=1, other OpenAI models use 0 for determinism
                 if GENERATOR_MODEL == "o3":
-                    model = ChatOpenAI(model=GENERATOR_MODEL)
+                    model = ChatOpenAI(model=GENERATOR_MODEL, temperature=1)
                 else:
                     model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
 
@@ -495,9 +495,9 @@ def query_rag(
     elif LLM_PROVIDER.lower() == "anthropic":
         model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0)
     elif LLM_PROVIDER.lower() == "openai":
-        # o3 model doesn't support temperature parameter, only default (1) is supported
+        # o3 model only supports temperature=1, others use 0
         if GENERATOR_MODEL == "o3":
-            model = ChatOpenAI(model=GENERATOR_MODEL)
+            model = ChatOpenAI(model=GENERATOR_MODEL, temperature=1)
         else:
             model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
     else:
