@@ -85,7 +85,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 # LLM Provider selection: "openai", "anthropic", or "ollama"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
 
 # Model configurations by provider
 MODEL_CONFIGS = {
@@ -125,6 +125,7 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
+    "o3": {"chunk_size": 3000, "chunk_overlap": 400},  # Optimized for o3's advanced reasoning
     "claude-sonnet-4-20250514": {
         "chunk_size": 1400,
         "chunk_overlap": 250,
