@@ -90,9 +90,9 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
 # Model configurations by provider
 MODEL_CONFIGS = {
     "openai": {
-        "generator": "gpt-4o",
+        "generator": "o3",
         "embedder": "text-embedding-3-small",
-        "evaluator": "gpt-4o",
+        "evaluator": "o3",
     },
     "anthropic": {
         "generator": "claude-sonnet-4-20250514",
