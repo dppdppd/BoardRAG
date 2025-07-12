@@ -734,7 +734,7 @@ with gr.Blocks(
         dropdown_update = gr.update()
 
         for pdf_file in pdf_files:
-        status, dropdown_update = upload_pdf_handler(pdf_file)
+            status, dropdown_update = upload_pdf_handler(pdf_file)
             status_msgs.append(status)
 
         # Refresh PDF list for delete dropdown
