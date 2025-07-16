@@ -392,14 +392,17 @@ def extract_and_store_game_name(filename: str) -> str:
 
 
 def query_rag(
-    query_text: str, selected_game: Optional[str] = None
+    query_text: str,
+    selected_game: Optional[str] = None,
+    chat_history: Optional[str] = None,
 ) -> Dict[str, Union[str, Dict]]:
     """
     Queries the RAG model with the given query and returns the response.
 
     Args:
-        query_text (str): The query to be passed to the RAG model.
-        selected_game (Optional[str]): Game to filter results by (e.g., 'monopoly', 'catan')
+        query_text (str): The user's latest question.
+        selected_game (Optional[str]): Game to filter results by (e.g., 'monopoly', 'catan').
+        chat_history (Optional[str]): Conversation history formatted as a string, where each prior turn is included to provide conversational context. If None, the question is treated as standalone.
 
     Returns:
         Dict: The response from the RAG model.
@@ -414,15 +417,19 @@ def query_rag(
         )
         db = Chroma(client=persistent_client, embedding_function=embedding_function)
 
-    # Search in the database
-    print("🔍 Searching in the database...")
-    print(f"  Query text: '{query_text}'")
+    # Prepare search query – include chat history to give the retriever more context for follow-up questions
+    search_query = (
+        f"{chat_history}\n\n{query_text}" if chat_history else query_text
+    )
+
+    print("🔍 Searching in the database…")
+    print(f"  Search query: '{search_query[:1000]}'")  # truncate long prints
     if selected_game:
         print(f"  Filtering by game: '{selected_game}'")
 
     # Test embedding generation
     try:
-        test_embedding = embedding_function.embed_query(query_text)
+        test_embedding = embedding_function.embed_query(search_query)
         print(f"  Generated embedding dimensions: {len(test_embedding)}")
         print(f"  First few embedding values: {test_embedding[:3]}")
     except Exception as e:
@@ -439,7 +446,7 @@ def query_rag(
     k_results = (
         75 if selected_game else 40
     )  # Increased to maintain context with smaller chunks
-    all_results = db.similarity_search_with_score(query_text, k=k_results)
+    all_results = db.similarity_search_with_score(search_query, k=k_results)
 
     # Apply game filter if specified
     if selected_game:
@@ -472,17 +479,26 @@ def query_rag(
         print("  No results found in similarity search")
 
     # Build the prompt
-    print("🔮 Building the prompt ...")
+    print("🔮 Building the prompt …")
     context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
+
+    # Combine chat history with the latest question so the LLM has conversational context
+    if chat_history:
+        composite_question = (
+            f"Previous conversation (for context):\n{chat_history}\n\nUser's latest question: {query_text}"
+        )
+    else:
+        composite_question = query_text
+
     # Try improved template first, fallback to original
     try:
         prompt = load_jinja2_prompt(
             context=context_text,
-            question=query_text,
+            question=composite_question,
             template_name="rag_query_improved.txt",
         )
     except Exception:
-        prompt = load_jinja2_prompt(context=context_text, question=query_text)
+        prompt = load_jinja2_prompt(context=context_text, question=composite_question)
 
     print("🍳 Generating the response...")
     # Temperature is fixed to 0 for deterministic answers that are easier to test.

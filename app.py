@@ -324,7 +324,13 @@ def query_interface(message, selected_game, chat_history, selected_model):
     if game_filter is None:
         game_filter = [selected_game.lower()]
 
-    resp = query_rag(message, game_filter)
+    # Format chat history for conversational context (limit to last 10 turns to keep prompt size manageable)
+    history_snippets = chat_history[-10:] if chat_history else []
+    formatted_history = "\n".join([
+        f"User: {user_msg}\nAssistant: {bot_msg}" for user_msg, bot_msg in history_snippets
+    ])
+
+    resp = query_rag(message, game_filter, formatted_history)
 
     # Get fresh available games list to ensure we have the latest data
     available_games = get_available_games()
