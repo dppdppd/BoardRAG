@@ -281,13 +281,13 @@ def upload_pdf_handler(pdf_file):
         return f"❌ Error processing '{filename}': {str(e)}", gr.update()
 
 
-def query_interface(message, selected_game, chat_history, selected_model):
+def query_interface(message, selected_games, chat_history, selected_model):
     """
     Queries the RAG model with the given query and returns the response.
 
     Args:
         message (str): The query to be passed to the RAG model.
-        selected_game (str): The selected game to filter results by.
+        selected_games (List[str]): The selected games to filter results by.
         chat_history (str): The chat history.
         selected_model (str): The selected model to use for the query.
 
@@ -300,7 +300,8 @@ def query_interface(message, selected_game, chat_history, selected_model):
     if not message.strip():
         return "", chat_history
 
-    if not selected_game:
+    # Validate game selection – must choose at least one
+    if not selected_games:
         error_message = (
             "⚠️ Please select a specific game from the dropdown before asking questions."
         )
@@ -318,11 +319,19 @@ def query_interface(message, selected_game, chat_history, selected_model):
             config.LLM_PROVIDER = "openai"
         config.GENERATOR_MODEL = selected_model
 
-    # Get the simple filename mapping for filtering
+    # Normalise to list (Dropdown multiselect returns list; but handle stray string just in case)
+    if isinstance(selected_games, str):
+        selected_games = [selected_games]
+
+    # Build a list of simple filename filters for the selected games
     mapping = getattr(get_available_games, "_filename_mapping", {})
-    game_filter = mapping.get(selected_game)
-    if game_filter is None:
-        game_filter = [selected_game.lower()]
+    game_filter: List[str] = []
+    for game in selected_games:
+        mapped = mapping.get(game)
+        if mapped:
+            game_filter.extend(mapped)
+        else:
+            game_filter.append(game.lower())
 
     # Format chat history for conversational context (limit to last 10 turns to keep prompt size manageable)
     history_snippets = chat_history[-10:] if chat_history else []
@@ -336,8 +345,8 @@ def query_interface(message, selected_game, chat_history, selected_model):
     available_games = get_available_games()
 
     # Determine proper game name - use selected game if available, otherwise extract from sources
-    if selected_game and selected_game != "All Games":
-        game_name = selected_game
+    if selected_games:
+        game_name = ", ".join(selected_games)
     elif resp["sources"] and resp["sources"][0]:
         # Try to find matching game from available games based on source
         source_file = Path(resp["sources"][0]).name.lower()
@@ -647,9 +656,10 @@ with gr.Blocks(
             # Game selection (hidden until unlocked)
             game_dropdown = gr.Dropdown(
                 choices=game_choices,
-                value=None,
-                label="Select Game (Required)",
-                info="Choose a game to get answers from its rulebook",
+                value=[],
+                multiselect=True,  # Allow selecting several games at once
+                label="Select Game(s) (Required)",
+                info="Choose one or more games to constrain the answer",
                 visible=False,
             )
 

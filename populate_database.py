@@ -14,7 +14,7 @@ from typing import List
 import chromadb
 from langchain.schema.document import Document
 from langchain_chroma import Chroma
-from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_community.document_loaders import PyPDFDirectoryLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from config import (
@@ -37,11 +37,45 @@ disable_chromadb_telemetry()
 validate_config()
 
 
-def load_documents():
+def load_documents(target_paths: List[str] | None = None):
+    """Load PDF documents from the specified *target_paths*.
+
+    If *target_paths* is ``None`` or empty, the entire ``DATA_PATH`` directory is
+    scanned (current behaviour). Otherwise, *target_paths* can contain either
+    filenames or sub-directories **relative to** ``DATA_PATH`` or absolute
+    paths. This allows callers to load **only the newly-added game rulebooks**,
+    dramatically reducing the work that needs to be done when expanding the
+    library.
+
+    Args:
+        target_paths (List[str] | None): Files or directories to load. If not
+            provided, the whole ``DATA_PATH`` tree is loaded.
+
+    Returns:
+        List[Document]: The loaded documents.
     """
-    Extracts the documents from the data folder, processes them using Haystack and loads them into the database.
-    """
-    return PyPDFDirectoryLoader(DATA_PATH).load()
+
+    # Default: load everything (original behaviour)
+    if not target_paths:
+        return PyPDFDirectoryLoader(DATA_PATH).load()
+
+    documents: List[Document] = []
+
+    for path in target_paths:
+        # Resolve path – support both relative (to DATA_PATH) and absolute
+        # inputs so callers have flexibility.
+        full_path = (
+            os.path.join(DATA_PATH, path) if not os.path.isabs(path) else path
+        )
+
+        if os.path.isdir(full_path):
+            documents.extend(PyPDFDirectoryLoader(full_path).load())
+        elif os.path.isfile(full_path):
+            documents.extend(PyPDFLoader(full_path).load())
+        else:
+            print(f"⚠️  Path not found – skipping: {full_path}")
+
+    return documents
 
 
 def split_documents(documents: List[Document]):
@@ -160,15 +194,27 @@ def clear_database():
 def main() -> None:
     # Check if the database should be cleared (using the --clear flag).
     parser = argparse.ArgumentParser()
-    parser.add_argument("--reset", action="store_true", help="Reset the database.")
+    parser.add_argument(
+        "--reset", action="store_true", help="Reset the database.")
+
+    # Optional positional paths (files or directories) to process. If omitted,
+    # the entire DATA_PATH will be processed (original behaviour).
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="Specific PDF files or directories to (re)process. "
+        "Relative paths are resolved against DATA_PATH.",
+    )
     args = parser.parse_args()
 
     if args.reset:
         print("✨ Clearing Database")
         clear_database()
 
-    # Create (or update) the data store.
-    documents = load_documents()
+    # Create (or update) the data store. If the user supplied specific paths we
+    # only process those, which speeds up incremental updates (e.g. when adding
+    # a single new game).
+    documents = load_documents(args.paths)
     chunks = split_documents(documents)
     add_to_chroma(chunks)
 
