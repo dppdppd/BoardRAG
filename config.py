@@ -136,6 +136,21 @@ SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
 
 # ---------------------------------------------------------------------------
+# Optional - Search Query Rewrite Configuration
+# ---------------------------------------------------------------------------
+# Enable to run an extra LLM call that rewrites the user's question into a
+# concise web-search query. Turn on via ENABLE_SEARCH_REWRITE=true.
+
+ENABLE_SEARCH_REWRITE = os.getenv("ENABLE_SEARCH_REWRITE", "True").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+# Model used for query rewriting (falls back to GENERATOR_MODEL)
+SEARCH_REWRITE_MODEL = os.getenv("SEARCH_REWRITE_MODEL", GENERATOR_MODEL)
+
+# ---------------------------------------------------------------------------
 # Ollama Configuration
 # ---------------------------------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")

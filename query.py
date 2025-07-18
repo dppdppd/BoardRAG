@@ -45,6 +45,8 @@ from config import (
     SEARCH_PROVIDER,
     SERPAPI_API_KEY,
     BRAVE_API_KEY,
+    ENABLE_SEARCH_REWRITE,
+    SEARCH_REWRITE_MODEL,
 )
 from embedding_function import get_embedding_function
 from templates.load_jinja_template import load_jinja2_prompt
@@ -527,11 +529,52 @@ def extract_and_store_game_name(filename: str) -> str:
     return game_name
 
 
+def rewrite_search_query(raw_query: str) -> str:
+    """Optional LLM-powered rewrite of search query for better retrieval."""
+    if not ENABLE_SEARCH_REWRITE:
+        return raw_query
+
+    try:
+        print("✏️  Rewriting web search query via LLM …")
+
+        # Choose provider following same logic as answer generation but simpler
+        if LLM_PROVIDER.lower() == "anthropic":
+            model = ChatAnthropic(model=SEARCH_REWRITE_MODEL, temperature=0)
+        elif LLM_PROVIDER.lower() == "ollama":
+            from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
+
+            model = Ollama(model=SEARCH_REWRITE_MODEL, base_url=OLLAMA_URL)
+        else:  # openai
+            # o3 only supports temperature=1
+            temp = 1 if SEARCH_REWRITE_MODEL == "o3" else 0
+            model = ChatOpenAI(model=SEARCH_REWRITE_MODEL, temperature=temp)
+
+        prompt = (
+            "You are a search expert. Rewrite the following user question into a concise, "
+            "effective web search query. Use quotation marks around exact phrases only if "
+            "they are essential. Remove polite fluff. Return one line only, no extra text.\n\n"
+            f"User question: {raw_query}\n\nSearch query:"
+        )
+
+        rewritten = model.invoke(prompt)
+        rewritten_text = getattr(rewritten, "content", str(rewritten)).strip()
+        # Guard: fall back if result too short or too long
+        if 3 <= len(rewritten_text) <= 200:
+            print(f"✏️  Rewritten query: {rewritten_text!r}")
+            return rewritten_text
+        print("⚠️ Rewriter produced unusable output; falling back to raw query")
+    except Exception as e:
+        print(f"⚠️ Query rewrite failed: {e}")
+
+    return raw_query
+
+
 def query_rag(
     query_text: str,
     selected_game: Optional[str] = None,
     chat_history: Optional[str] = None,
     game_names: Optional[List[str]] = None,
+    enable_web: Optional[bool] = None,
 ) -> Dict[str, Union[str, Dict]]:
     """
     Queries the RAG model with the given query and returns the response.
@@ -616,14 +659,17 @@ def query_rag(
         print("  No results found in similarity search")
 
     # Supplement with live web search results (optional)
+    effective_web_search = ENABLE_WEB_SEARCH if enable_web is None else enable_web
+
     web_docs: List[Document] = []
-    if ENABLE_WEB_SEARCH:
+    if effective_web_search:
         # Incorporate game name(s) into web search for better relevance
         quoted_game = ""
         if game_names:
             # Use first game name to keep query concise; wrap in quotes
             quoted_game = f'"{game_names[0]}" '
-        web_query = f"{quoted_game}{query_text}"
+        pre_query = f"{quoted_game}{query_text}"
+        web_query = rewrite_search_query(pre_query)
 
         print(
             f"🌐 Web search enabled – fetching top {WEB_SEARCH_RESULTS} snippets with query: {web_query!r}…"

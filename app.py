@@ -159,6 +159,7 @@ def get_config_info():
 - Ollama URL: `{config.OLLAMA_URL}`
 - Argilla API URL: `{config.ARGILLA_API_URL or "Not configured"}`
 - Web Search: `{('Enabled – ' + config.SEARCH_PROVIDER.capitalize()) if config.ENABLE_WEB_SEARCH else 'Disabled'}` (top {config.WEB_SEARCH_RESULTS})
+- Query Rewrite: `{ 'On' if config.ENABLE_SEARCH_REWRITE else 'Off' }`
 """
     return config_text
 
@@ -302,7 +303,7 @@ def upload_pdf_handler(pdf_file):
         return f"❌ Error processing '{filename}': {str(e)}", gr.update()
 
 
-def query_interface(message, selected_games, chat_history, selected_model):
+def query_interface(message, selected_games, include_web, chat_history, selected_model):
     """
     Queries the RAG model with the given query and returns the response.
 
@@ -360,7 +361,13 @@ def query_interface(message, selected_games, chat_history, selected_model):
         f"User: {user_msg}\nAssistant: {bot_msg}" for user_msg, bot_msg in history_snippets
     ])
 
-    resp = query_rag(message, game_filter, formatted_history, game_names=selected_games)
+    resp = query_rag(
+        message,
+        game_filter,
+        formatted_history,
+        game_names=selected_games,
+        enable_web=include_web,
+    )
 
     # Get fresh available games list to ensure we have the latest data
     invalidate_games_cache()
@@ -673,6 +680,13 @@ with gr.Blocks(
                 visible=False,
             )
 
+            # Web search toggle (hidden until unlocked)
+            include_web_cb = gr.Checkbox(
+                label="Include Web Search",
+                value=True,
+                visible=False,
+            )
+
             # Game selection (hidden until unlocked)
             game_dropdown = gr.Dropdown(
                 choices=game_choices,
@@ -738,7 +752,11 @@ with gr.Blocks(
                     placeholder="Click 'Rebuild Library' to process all PDFs or 'Process New PDFs' to add only new ones",
                 )
 
-    msg.submit(query_interface, [msg, game_dropdown, chatbot, model_dropdown], [msg, chatbot])
+    msg.submit(
+        query_interface,
+        [msg, game_dropdown, include_web_cb, chatbot, model_dropdown],
+        [msg, chatbot],
+    )
 
     # Connect rebuild library button
     rebuild_button.click(
@@ -827,7 +845,7 @@ with gr.Blocks(
             level,
             gr.update(value=msg, visible=True),
             gr.update(choices=updated_games, visible=show_user),  # game_dropdown
-            gr.update(visible=show_user),  # model_dropdown
+            gr.update(value=True, visible=show_user),  # include_web_cb
             gr.update(visible=show_user),  # upload_accordion
             gr.update(visible=show_admin),  # delete_accordion
             gr.update(visible=show_admin),  # rename_accordion
@@ -841,6 +859,7 @@ with gr.Blocks(
             access_state,
             access_msg,
             game_dropdown,
+            include_web_cb,
             model_dropdown,
             upload_accordion,
             delete_accordion,
