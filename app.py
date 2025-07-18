@@ -842,10 +842,11 @@ with gr.Blocks(
 
         # Updates
         return (
-            level,
-            gr.update(value=msg, visible=True),
+            level,  # State
+            gr.update(value=msg, visible=True),  # access_msg markdown
             gr.update(choices=updated_games, visible=show_user),  # game_dropdown
             gr.update(value=True, visible=show_user),  # include_web_cb
+            gr.update(visible=show_user),  # model_dropdown
             gr.update(visible=show_user),  # upload_accordion
             gr.update(visible=show_admin),  # delete_accordion
             gr.update(visible=show_admin),  # rename_accordion
@@ -866,14 +867,6 @@ with gr.Blocks(
             rename_accordion,
             tech_accordion,
         ],
-    ).then(
-        # Refresh admin dropdown contents when panels become visible
-        lambda level: (
-            gr.update(choices=list_pdfs()) if level == "admin" else gr.update(),
-            gr.update(choices=build_rename_choices()) if level == "admin" else gr.update(),
-        ),
-        inputs=[access_state],
-        outputs=[delete_dropdown, rename_game_dropdown],
     )
 
     # ------------------------------------------------------------------
