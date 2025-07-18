@@ -114,6 +114,28 @@ EMBEDDER_MODEL = os.getenv("EMBEDDER_MODEL", _config["embedder"])
 EVALUATOR_MODEL = os.getenv("EVALUATOR_MODEL", _config["evaluator"])
 
 # ---------------------------------------------------------------------------
+# Optional - Web Search Configuration
+# ---------------------------------------------------------------------------
+# Enable or disable supplementary web search results in responses.
+# Set ENABLE_WEB_SEARCH=true (or 1/yes) in the environment to turn this on.
+
+ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "True").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+# How many web snippets to fetch per query (only used when ENABLE_WEB_SEARCH)
+WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "5"))
+
+# Search provider selection: "duckduckgo" (default), "serpapi", or "brave"
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "brave").lower()
+
+# API keys for external providers (only required when selected)
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+
+# ---------------------------------------------------------------------------
 # Ollama Configuration
 # ---------------------------------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
@@ -254,6 +276,10 @@ def print_config():
     print(f"  Database: {CHROMA_PATH}")
     print(f"  Data: {DATA_PATH}")
     print(f"  Template: {JINJA_TEMPLATE_PATH}")
+
+    # Web search configuration (non-sensitive)
+    web_status = "Enabled" if ENABLE_WEB_SEARCH else "Disabled"
+    print(f"  Web Search: {web_status} – {WEB_SEARCH_RESULTS} snippets per query")
 
     # Show API key status without revealing keys
     openai_status = "✅ Set" if OPENAI_API_KEY else "❌ Missing"

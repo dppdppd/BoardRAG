@@ -20,6 +20,24 @@ import config
 from embedding_function import get_embedding_function
 from query import get_available_games, query_rag, get_stored_game_names
 
+# -----------------------------------------------------------------------------
+# Cached games helper – avoids expensive DB scan on every chat turn
+# -----------------------------------------------------------------------------
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=1)
+def cached_games() -> List[str]:
+    """Return cached list of available games (proper names)."""
+    return get_available_games()
+
+
+def invalidate_games_cache():
+    """Clear the cached games list so next call refreshes from DB."""
+    cached_games.cache_clear()
+
+
 # Disable ChromaDB telemetry after imports
 config.disable_chromadb_telemetry()
 
@@ -97,9 +115,9 @@ def list_pdfs() -> List[str]:
 
 
 def refresh_game_lists() -> List[str]:
-    """Wrapper around get_available_games with error swallow."""
+    """Return cached game list, swallowing errors."""
     try:
-        return get_available_games()
+        return cached_games()
     except Exception:
         return []
 
@@ -140,6 +158,7 @@ def get_config_info():
 **Optional Services:**
 - Ollama URL: `{config.OLLAMA_URL}`
 - Argilla API URL: `{config.ARGILLA_API_URL or "Not configured"}`
+- Web Search: `{('Enabled – ' + config.SEARCH_PROVIDER.capitalize()) if config.ENABLE_WEB_SEARCH else 'Disabled'}` (top {config.WEB_SEARCH_RESULTS})
 """
     return config_text
 
@@ -269,12 +288,14 @@ def upload_pdf_handler(pdf_file):
 
         if success:
             # Refresh the game list
-            available_games = get_available_games()
+            invalidate_games_cache()
+            available_games = cached_games()
             status = f"✅ Successfully added '{filename}' to the database! ({len(chunks)} chunks processed)"
             return status, gr.update(choices=available_games)
         else:
             status = f"⚠️ '{filename}' was uploaded but no new content was added (might already exist in database)"
-            available_games = get_available_games()
+            invalidate_games_cache()
+            available_games = cached_games()
             return status, gr.update(choices=available_games)
 
     except Exception as e:
@@ -339,10 +360,11 @@ def query_interface(message, selected_games, chat_history, selected_model):
         f"User: {user_msg}\nAssistant: {bot_msg}" for user_msg, bot_msg in history_snippets
     ])
 
-    resp = query_rag(message, game_filter, formatted_history)
+    resp = query_rag(message, game_filter, formatted_history, game_names=selected_games)
 
     # Get fresh available games list to ensure we have the latest data
-    available_games = get_available_games()
+    invalidate_games_cache()
+    available_games = cached_games()
 
     # Determine proper game name - use selected game if available, otherwise extract from sources
     if selected_games:
@@ -362,53 +384,49 @@ def query_interface(message, selected_games, chat_history, selected_model):
     else:
         game_name = "Game"
 
-    # Create clean source citations with clickable PDF links
+    # Create clean source citations (PDF pages or web URLs)
     if resp["sources"]:
-        # Extract file and page info from sources (format: "data/filename.pdf:page:chunk")
-        source_info = {}
+        pdf_info = {}
+        url_sources = []
+
         for source in resp["sources"]:
-            if ":" in source:
+            if source is None:
+                continue
+            if source.startswith("http"):
+                url_sources.append(source)
+            elif ":" in source:
                 parts = source.split(":")
                 if len(parts) >= 2:
                     filepath = parts[0]
                     page_num = parts[1]
                     filename = Path(filepath).name
 
-                    if filename not in source_info:
-                        source_info[filename] = set()
-                    source_info[filename].add(int(page_num))
+                    if filename not in pdf_info:
+                        pdf_info[filename] = set()
+                    # Guard against non-int page numbers (web chunks etc.)
+                    try:
+                        pdf_info[filename].add(int(page_num))
+                    except ValueError:
+                        pass
 
-        # Create clean citations with original filenames
         clean_citations = []
-        for filename, pages in list(source_info.items())[:2]:  # Limit to 2 files
-            # Keep the original filename with .pdf extension
-            clean_name = filename
 
-            # Sort page numbers and create page reference
+        # Add up to 2 PDFs citations
+        for filename, pages in list(pdf_info.items())[:2]:
             sorted_pages = sorted(pages)
             if len(sorted_pages) == 1:
                 page_ref = f"p. {sorted_pages[0]}"
             elif len(sorted_pages) <= 3:
                 page_ref = f"pp. {', '.join(map(str, sorted_pages))}"
-            elif len(sorted_pages) <= 8:
-                # Show individual pages if 8 or fewer
-                page_ref = f"pp. {', '.join(map(str, sorted_pages))}"
             else:
-                # Show first few pages + "..." + last few pages for large ranges
-                first_pages = sorted_pages[:3]
-                last_pages = sorted_pages[-2:]
-                if first_pages[-1] + 1 < last_pages[0]:  # Check if there's a gap
-                    page_ref = f"pp. {', '.join(map(str, first_pages))}, ..., {', '.join(map(str, last_pages))}"
-                else:
-                    # No gap, just show the range
-                    page_ref = f"pp. {sorted_pages[0]}-{sorted_pages[-1]}"
+                page_ref = f"pp. {sorted_pages[0]}-{sorted_pages[-1]}"
+            clean_citations.append(f"{filename} ({page_ref})")
 
-            # Create citation with original filename
-            clean_citations.append(f"{clean_name} ({page_ref})")
+        # Add up to 2 web URLs
+        for url in url_sources[:2]:
+            clean_citations.append(url)
 
-        sources_str = ", ".join(clean_citations)
-        if len(source_info) > 2:
-            sources_str += f" (+ {len(source_info) - 2} more)"
+        sources_str = ", ".join(clean_citations) if clean_citations else "N/A"
     else:
         sources_str = "N/A"
 
@@ -497,7 +515,8 @@ def refresh_games_handler():
             status_messages.append("📄 No PDFs found in data directory")
         
         # Now refresh the games list
-        available_games = get_available_games()
+        invalidate_games_cache()
+        available_games = cached_games()
         if available_games:
             status_messages.append(
                 f"✅ Refreshed! Found {len(available_games)} games: {', '.join(available_games[:3])}{'...' if len(available_games) > 3 else ''}"
@@ -571,7 +590,8 @@ def rebuild_library_handler():
                 status_messages.append(f"❌ Error processing {pdf_file.name}: {str(e)}")
         
         # Refresh the games list
-        available_games = get_available_games()
+        invalidate_games_cache()
+        available_games = cached_games()
         status_messages.append(
             f"🎯 Library rebuild complete! {total_processed} PDFs processed."
         )
@@ -615,7 +635,7 @@ with gr.Blocks(
     gr.Markdown(INTRO_STRING)
 
     # Get available games for the dropdown (with proper names)
-    available_games = get_available_games()
+    available_games = cached_games()
     game_choices = available_games
 
     # Mobile-first responsive layout
@@ -799,6 +819,7 @@ with gr.Blocks(
         show_admin = level == "admin"
 
         # Refresh game lists when logging in
+        invalidate_games_cache()
         updated_games = refresh_game_lists() if show_user else []
 
         # Updates
@@ -867,6 +888,7 @@ with gr.Blocks(
                     pass
 
             # Refresh dropdowns
+            invalidate_games_cache()
             new_pdfs = list_pdfs()
             new_games = refresh_game_lists()
             rename_choices = build_rename_choices()
@@ -911,11 +933,12 @@ with gr.Blocks(
                 )
                 col.update(ids=[filename], documents=[new_name])
 
-            games = refresh_game_lists()
+            invalidate_games_cache()
+            new_games = refresh_game_lists()
             rename_choices = build_rename_choices()
             return (
                 f"✅ Renamed to {new_name}",
-                gr.update(choices=games, value=None),
+                gr.update(choices=new_games, value=None),
                 gr.update(choices=rename_choices, value=None),
             )
         except Exception as e:

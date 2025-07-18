@@ -24,11 +24,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union
 
 import chromadb
+import os
 from langchain_anthropic import ChatAnthropic
 from langchain_chroma import Chroma
 from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import PyPDFLoader
-
+from langchain.schema.document import Document
+# config imports extended
 from config import (
     CHROMA_PATH,
     GENERATOR_MODEL,
@@ -38,13 +40,144 @@ from config import (
     get_chromadb_settings,
     suppress_chromadb_telemetry,
     validate_config,
+    ENABLE_WEB_SEARCH,
+    WEB_SEARCH_RESULTS,
+    SEARCH_PROVIDER,
+    SERPAPI_API_KEY,
+    BRAVE_API_KEY,
 )
 from embedding_function import get_embedding_function
 from templates.load_jinja_template import load_jinja2_prompt
 
-# Disable ChromaDB telemetry and validate configuration after imports
-disable_chromadb_telemetry()
-validate_config()
+# Optional import for web search; only loaded when enabled to avoid extra dependency at runtime
+if ENABLE_WEB_SEARCH:
+    try:
+        from duckduckgo_search import ddg
+    except ImportError:  # Fallback if dependency missing
+        ddg = None
+
+# Global config ----------------------------------------------------------------
+# Importing here to avoid circular deps and keep single source of truth.
+from config import (
+    CHROMA_PATH,
+    GENERATOR_MODEL,
+    LLM_PROVIDER,
+    OLLAMA_URL,
+    disable_chromadb_telemetry,
+    get_chromadb_settings,
+    suppress_chromadb_telemetry,
+    validate_config,
+    ENABLE_WEB_SEARCH,
+    WEB_SEARCH_RESULTS,
+)
+
+# ---------------------------------------------------------------------------
+# Verbose logging toggle (set VERBOSE=true to enable extra prints)
+# ---------------------------------------------------------------------------
+VERBOSE_LOGGING = os.getenv("VERBOSE", "False").lower() in {"1", "true", "yes"}
+
+
+def perform_web_search(query: str, k: int = 5) -> List[Document]:
+    """Return top *k* DuckDuckGo search snippets as Document objects.
+
+    Each Document gets its snippet as *page_content* and carries the URL both
+    as *id* and *source* metadata so downstream citation code can display it.
+    """
+    if not ENABLE_WEB_SEARCH:
+        return []
+
+    results = []
+
+    if SEARCH_PROVIDER == "serpapi":
+        if not SERPAPI_API_KEY:
+            print("⚠️ SERPAPI_API_KEY not set; falling back to DuckDuckGo")
+        else:
+            try:
+                from serpapi import GoogleSearch  # type: ignore
+
+                params = {
+                    "q": query,
+                    "api_key": SERPAPI_API_KEY,
+                    "num": k,
+                    "engine": "google",
+                }
+                search = GoogleSearch(params)
+                serp_results = search.get_dict()
+                organic = serp_results.get("organic_results", [])
+                for item in organic[:k]:
+                    results.append({
+                        "snippet": item.get("snippet", ""),
+                        "url": item.get("link", ""),
+                    })
+            except Exception as e:
+                print(f"⚠️ SerpAPI search failed: {e}")
+
+    elif SEARCH_PROVIDER == "brave":
+        if not BRAVE_API_KEY:
+            print("⚠️ BRAVE_API_KEY not set; falling back to DuckDuckGo")
+        else:
+            try:
+                import requests  # pylint: disable=import-error
+
+                endpoint = "https://api.search.brave.com/res/v1/web/search"
+                headers = {"X-Subscription-Token": BRAVE_API_KEY}
+                params = {"q": query, "count": k}
+                resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("web", {}).get("results", [])[:k]:
+                        results.append({
+                            "snippet": item.get("description", ""),
+                            "url": item.get("url", ""),
+                        })
+                else:
+                    print(f"⚠️ Brave API HTTP {resp.status_code}: {resp.text[:100]}")
+            except Exception as e:
+                print(f"⚠️ Brave search failed: {e}")
+
+    # If still empty or provider is duckduckgo / brute fallback, use duckduckgo methods
+    if not results and SEARCH_PROVIDER in {"duckduckgo", "serpapi", "brave"}:
+        if ddg is not None:
+            try:
+                results = ddg(query, max_results=k) or []
+            except Exception as e:
+                print(f"⚠️ ddg() failed: {e}")
+
+        # Fallback DDGS
+        if not results:
+            try:
+                from duckduckgo_search import DDGS  # type: ignore
+
+                with DDGS() as search:
+                    results = search.text(query, max_results=k) or []
+            except Exception as e:
+                print(f"⚠️ DDGS fallback failed: {e}")
+
+    if not results:
+        print("⚠️ Web search returned 0 results")
+        return []
+
+    docs: List[Document] = []
+    for res in results:
+        snippet = (
+            res.get("snippet")
+            or res.get("body")
+            or res.get("text")
+            or res.get("title")
+            or ""
+        )
+        url = res.get("url") or res.get("href") or res.get("link") or ""
+        if not snippet or not url:
+            continue
+        meta = {
+            "id": url,  # So it appears in sources list
+            "source": url,
+            "url": url,
+            "web": True,
+        }
+        docs.append(Document(page_content=snippet, metadata=meta))
+    print(f"🌐 Added {len(docs)} web snippets to context")
+    return docs
 
 
 def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
@@ -273,7 +406,8 @@ def get_available_games() -> List[str]:
             if filename in stored_names:
                 # Use stored game name
                 proper_name = stored_names[filename]
-                print(f"📦 Using stored game name: '{proper_name}' for '{filename}'")
+                if VERBOSE_LOGGING:
+                    print(f"📦 Using stored game name: '{proper_name}' for '{filename}'")
             else:
                 # Fallback to extracting (this should be rare after initial setup)
                 print(f"⚠️ Game name not found in storage, extracting for: '{filename}'")
@@ -293,7 +427,8 @@ def get_available_games() -> List[str]:
 
         return sorted(games)
     except Exception as e:
-        print(f"Error getting available games: {e}")
+        if VERBOSE_LOGGING:
+            print(f"Error getting available games: {e}")
         return []
 
 
@@ -379,7 +514,8 @@ def extract_and_store_game_name(filename: str) -> str:
     # First check if we already have it stored
     stored_names = get_stored_game_names()
     if filename in stored_names:
-        print(f"📦 Using stored game name: '{stored_names[filename]}' for '{filename}'")
+        if VERBOSE_LOGGING:
+            print(f"📦 Using stored game name: '{stored_names[filename]}' for '{filename}'")
         return stored_names[filename]
 
     # Extract the game name using LLM
@@ -395,6 +531,7 @@ def query_rag(
     query_text: str,
     selected_game: Optional[str] = None,
     chat_history: Optional[str] = None,
+    game_names: Optional[List[str]] = None,
 ) -> Dict[str, Union[str, Dict]]:
     """
     Queries the RAG model with the given query and returns the response.
@@ -478,6 +615,25 @@ def query_rag(
     else:
         print("  No results found in similarity search")
 
+    # Supplement with live web search results (optional)
+    web_docs: List[Document] = []
+    if ENABLE_WEB_SEARCH:
+        # Incorporate game name(s) into web search for better relevance
+        quoted_game = ""
+        if game_names:
+            # Use first game name to keep query concise; wrap in quotes
+            quoted_game = f'"{game_names[0]}" '
+        web_query = f"{quoted_game}{query_text}"
+
+        print(
+            f"🌐 Web search enabled – fetching top {WEB_SEARCH_RESULTS} snippets with query: {web_query!r}…"
+        )
+        web_docs = perform_web_search(web_query, k=WEB_SEARCH_RESULTS)
+        print(f"🌐 Retrieved {len(web_docs)} web snippets")
+        # Treat them as zero-score items but include for context.
+        if web_docs:
+            results.extend([(doc, 0.0) for doc in web_docs])
+
     # Build the prompt
     print("🔮 Building the prompt …")
     context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
@@ -559,13 +715,18 @@ def main():
         action=argparse.BooleanOptionalAction,
         help="Include context in the response.",
     )
+    parser.add_argument(
+        "--game_names",
+        nargs="*",
+        help="Optional game names to include in web search",
+    )
     args = parser.parse_args()
     query_text = args.query_text
     selected_game = args.game
     include_sources = args.include_sources
     include_context = args.include_context
 
-    response = query_rag(query_text, selected_game)
+    response = query_rag(query_text, selected_game, game_names=args.game_names)
 
     # Extract game name from first source
     if response["sources"] and response["sources"][0]:
