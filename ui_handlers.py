@@ -202,35 +202,46 @@ def refresh_games_handler():
 
 def wipe_chat_history_handler(selected_game, session_id):
     """Clear chat history for the current game and update prompt list."""
-    from conversation_store import save as save_conv, _STORE
+    print(f"🚨 WIPE HANDLER CALLED! selected_game='{selected_game}', session_id='{session_id}'")
+    
+    # Import here to avoid issues
+    from conversation_store import save as save_conv, _STORE, _flush, _LOCK
+    
     try:
-        print(f"[DEBUG] wipe_chat_history_handler called with selected_game='{selected_game}', session_id='{session_id}'")
+        if not selected_game:
+            print(f"[ERROR] No game selected!")
+            return "❌ No game selected", gr.update(), gr.update()
+            
+        if not session_id:
+            print(f"[ERROR] No session ID!")
+            return "❌ No session ID", gr.update(), gr.update()
         
-        if selected_game and session_id:
-            # Check what was stored before
-            print(f"[DEBUG] Before clearing - session exists: {session_id in _STORE}")
-            if session_id in _STORE:
-                print(f"[DEBUG] Before clearing - games in session: {list(_STORE[session_id].keys())}")
-                if selected_game in _STORE[session_id]:
-                    print(f"[DEBUG] Before clearing - messages in game '{selected_game}': {len(_STORE[session_id][selected_game])}")
+        print(f"[DEBUG] About to clear history for game '{selected_game}' in session '{session_id}'")
+        
+        # Directly manipulate the store and flush
+        with _LOCK:
+            if session_id not in _STORE:
+                _STORE[session_id] = {}
             
-            # Save empty conversation to properly clear and persist
-            save_conv(session_id, selected_game, [])
-            print(f"[DEBUG] Called save_conv with empty list")
+            # Clear the specific game's conversation
+            _STORE[session_id][selected_game] = []
+            print(f"[DEBUG] Set {selected_game} conversation to empty list in memory")
             
-            # Check what's stored after
-            if session_id in _STORE:
-                print(f"[DEBUG] After clearing - games in session: {list(_STORE[session_id].keys())}")
-                if selected_game in _STORE[session_id]:
-                    print(f"[DEBUG] After clearing - messages in game '{selected_game}': {len(_STORE[session_id][selected_game])}")
-            
-        else:
-            print(f"[DEBUG] Not clearing - missing selected_game or session_id")
-            
-        msg = "🗑️ Chat history cleared!"
+            # Force flush to disk
+            _flush()
+            print(f"[DEBUG] Flushed changes to disk")
+        
+        # Verify it's actually cleared
+        from conversation_store import get as load_conv
+        verification = load_conv(session_id, selected_game)
+        print(f"[DEBUG] Verification: loaded {len(verification)} messages after clearing")
+        
+        msg = "🗑️ Chat history cleared and persisted!"
+        print(f"[SUCCESS] Returning success message")
         return msg, gr.update(value=[]), gr.update(choices=[], value=None)
+        
     except Exception as e:
-        print(f"[DEBUG] Error in wipe_chat_history_handler: {e}")
+        print(f"[ERROR] Exception in wipe_chat_history_handler: {e}")
         import traceback
         traceback.print_exc()
         return f"❌ Error wiping chat history: {str(e)}", gr.update(), gr.update()

@@ -292,6 +292,30 @@ with gr.Blocks(
         inputs=[game_dropdown, session_state],
         outputs=[chatbot, prompt_radio],
     )
+    
+    # Hook into chatbot changes to detect when it's been cleared via the built-in button
+    def detect_chatbot_clear(chat_history, selected_game, session_id):
+        """Detect if chatbot was cleared and sync the stored conversation."""
+        print(f"🚨 CHATBOT CHANGE DETECTED! chat_history length: {len(chat_history) if chat_history else 0}")
+        print(f"[DEBUG] selected_game: '{selected_game}', session_id: '{session_id}'")
+        
+        # If chatbot is empty but we have a game and session, clear stored conversation
+        if (not chat_history or len(chat_history) == 0) and selected_game and session_id:
+            print(f"[DEBUG] Chatbot appears to be cleared - clearing stored conversation")
+            from conversation_store import save as save_conv
+            save_conv(session_id, selected_game, [])
+            print(f"[DEBUG] Stored conversation cleared for game '{selected_game}'")
+            # Also clear the prompt radio
+            return gr.update(choices=[], value=None)
+        else:
+            print(f"[DEBUG] Chatbot not empty or missing game/session - no action taken")
+            return gr.update()
+    
+    chatbot.change(
+        detect_chatbot_clear,
+        inputs=[chatbot, game_dropdown, session_state],
+        outputs=[prompt_radio],
+    )
 
     # Update Chatbot panel title when game changes
     game_dropdown.change(
