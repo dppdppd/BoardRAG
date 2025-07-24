@@ -382,21 +382,28 @@ def rename_game_handler(selected_entry, new_name):
     try:
         import chromadb
         from query import get_chromadb_settings, suppress_chromadb_telemetry
+        from config import CHROMA_PATH
 
         with suppress_chromadb_telemetry():
-            client = chromadb.PersistentClient(path="chroma", settings=get_chromadb_settings())
+            client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
 
         collection = client.get_or_create_collection("game_names")
 
         # Upsert the new mapping for this single PDF
         collection.upsert(ids=[filename], documents=[new_name])
-        print("[DEBUG] Upserted new mapping in game_names collection")
+        print(f"[DEBUG] Upserted new mapping in game_names collection: '{filename}' -> '{new_name}'")
+
+        # Clear any cached mapping to force refresh
+        if hasattr(get_available_games, '_filename_mapping'):
+            delattr(get_available_games, '_filename_mapping')
+            print("[DEBUG] Cleared cached filename mapping")
 
         # Refresh dropdowns
         available_games = get_available_games()
         upd_games = gr.update(choices=available_games)
         upd_pdfs = gr.update(choices=get_pdf_dropdown_choices())
 
+        print(f"[DEBUG] Refreshed games list, now has {len(available_games)} games")
         return f"✅ Assigned '{filename}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs
     except Exception as e:
         print(f"[DEBUG] Error in rename_game_handler: {e}")
