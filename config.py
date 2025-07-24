@@ -125,6 +125,9 @@ ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "False").lower() in {
     "yes",
 }
 
+# Debug print so users can see what the setting resolved to at import time
+print(f"[config] ENABLE_WEB_SEARCH = {ENABLE_WEB_SEARCH}")
+
 # How many web snippets to fetch per query (only used when ENABLE_WEB_SEARCH)
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "5"))
 

@@ -840,7 +840,7 @@ with gr.Blocks(
             level,  # State
             gr.update(value=msg, visible=True),  # access_msg markdown
             gr.update(choices=updated_games, visible=show_user),  # game_dropdown
-            gr.update(value=True, visible=show_user),  # include_web_cb
+            gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
             gr.update(visible=show_user),  # model_dropdown
             gr.update(visible=show_user),  # upload_accordion
             gr.update(visible=show_admin),  # delete_accordion
