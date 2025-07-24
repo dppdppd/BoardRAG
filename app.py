@@ -35,6 +35,40 @@ from ui_handlers import (
 from ui_components import query_interface
 from storage_utils import format_storage_info
 
+# -------------------------------------------------------------
+# JavaScript helper – scroll Chatbot to a user prompt selected
+# -------------------------------------------------------------
+
+SCROLL_TO_PROMPT_JS = '''
+function(prompt_text) {
+  if (!prompt_text) return;
+
+  const wrapper = document.querySelector('.custom-chatbot');
+  if (!wrapper) return;
+
+  const msgs = wrapper.querySelectorAll('[data-role="user"], .message.user');
+  const txt = prompt_text.trim();
+  let target = null;
+  msgs.forEach(m => {
+    if (!target && m.innerText.trim().startsWith(txt)) target = m;
+  });
+  if (!target) return;
+
+  // Find nearest scrollable ancestor (including wrapper)
+  let scrollParent = target.parentElement;
+  while (scrollParent && scrollParent !== document.body) {
+    const style = getComputedStyle(scrollParent);
+    if (/(auto|scroll)/.test(style.overflowY)) break;
+    scrollParent = scrollParent.parentElement;
+  }
+  if (!scrollParent) scrollParent = wrapper;
+
+  const parentRect = scrollParent.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const offset = targetRect.top - parentRect.top + scrollParent.scrollTop - 6; // small padding
+  scrollParent.scrollTo({ top: offset, behavior: 'smooth' });
+}
+'''
 # -----------------------------------------------------------------------------
 # Cached games helper – avoids expensive DB scan on every chat turn
 # -----------------------------------------------------------------------------
@@ -99,6 +133,15 @@ with gr.Blocks(
     # Mobile-first responsive layout
     with gr.Row(elem_classes=["main-content"]):
         with gr.Column(scale=3, elem_classes=["chat-column"]):
+            # Game selector (always visible once unlocked)
+            game_dropdown = gr.Dropdown(
+                choices=game_choices,
+                value=None,
+                multiselect=False,
+                label="Game",
+                visible=False,
+            )
+
             chatbot = gr.Chatbot(
                 height="80vh",
                 show_copy_button=True,
@@ -108,17 +151,11 @@ with gr.Blocks(
                 label="Chatbot",
             )
             
-            # Simple processing indicator
-            with gr.Row(visible=False) as progress_row:
-                gr.HTML(
-                    value='<div style="text-align: center; padding: 8px; color: #666; font-size: 12px;">Processing...</div>',
-                    elem_classes=["progress-indicator"]
-                )
-            
+
             # Input section - move here for better mobile UX
             with gr.Row(elem_classes=["input-row"]):
                 msg = gr.Textbox(
-                    placeholder="First select a game above, then ask your question...",
+                    placeholder="Your question...",
                     lines=1,  # single line so Enter submits (use Shift+Enter for newline)
                     max_lines=4,  # prevent it from growing too tall on mobile
                     scale=8,
@@ -133,25 +170,12 @@ with gr.Blocks(
 
         # Right sidebar for controls and settings
         with gr.Column(scale=1, elem_classes=["sidebar"]):
-            # Password field at top of sidebar
-            password_tb = gr.Textbox(
-                type="password", 
-                placeholder="🔐 Enter Access Code", 
-                label="Access"
-            )
-            access_msg = gr.Markdown("", visible=False)
-
-            # Game selector (always visible once unlocked)
-            game_dropdown = gr.Dropdown(
-                choices=game_choices,
-                value=None,
-                multiselect=False,
-                label="Game",
-                visible=False,
-            )
+            # Prompt history – starts open and is shown once unlocked
+            with gr.Accordion("📝 Chat History", open=True, visible=False) as prompt_accordion:
+                prompt_radio = gr.Radio(value=None, choices=[], label="", interactive=True, elem_id="prompt-radio")
 
             # Model settings panel (optional)
-            with gr.Accordion("🤖 Options", open=False, visible=False) as model_accordion:
+            with gr.Accordion("⚙️ Options", open=False, visible=False) as model_accordion:
                 model_dropdown = gr.Dropdown(
                     choices=["claude-4-sonnet", "o3"],
                     value="o3",
@@ -234,6 +258,14 @@ with gr.Blocks(
                     placeholder="Click 'Rebuild Library' to process all PDFs or 'Process New PDFs' to add only new ones",
                 )
 
+            # Access controls at very bottom
+            password_tb = gr.Textbox(
+                type="password",
+                placeholder="🔐 Enter Access Code",
+                label="Access"
+            )
+            access_msg = gr.Markdown("", visible=False)
+
     # --------------------------------------------------------------
     # Event handlers
     # --------------------------------------------------------------
@@ -242,14 +274,15 @@ with gr.Blocks(
     msg_submit_event = msg.submit(
         query_interface,
         [msg, game_dropdown, include_web_cb, chatbot, model_dropdown, session_state],
-        [msg, chatbot, cancel_btn, progress_row],
+        [msg, chatbot, cancel_btn, prompt_radio],
+        show_progress="full",  # This enables the processing overlay on all outputs
     )
 
     # Cancel button hides itself and aborts the running job
     cancel_btn.click(
-        lambda: (gr.update(visible=False), gr.update(visible=False)),
+        lambda: gr.update(visible=False),
         [],
-        [cancel_btn, progress_row],
+        [cancel_btn],
         cancels=[msg_submit_event],
     )
 
@@ -257,7 +290,7 @@ with gr.Blocks(
     game_dropdown.change(
         load_history,
         inputs=[game_dropdown, session_state],
-        outputs=[chatbot],
+        outputs=[chatbot, prompt_radio],
     )
 
     # Update Chatbot panel title when game changes
@@ -272,7 +305,7 @@ with gr.Blocks(
     session_state.change(
         auto_load_on_session_ready,
         inputs=[session_state, game_dropdown],
-        outputs=[game_dropdown, chatbot],
+        outputs=[game_dropdown, chatbot, prompt_radio],
     )
     
     # Auto-unlock interface when access state is restored from storage
@@ -282,6 +315,7 @@ with gr.Blocks(
         outputs=[
             access_msg,
             game_dropdown,
+            prompt_accordion,
             model_accordion,
             include_web_cb,
             model_dropdown,
@@ -300,6 +334,7 @@ with gr.Blocks(
             access_state,
             access_msg,
             game_dropdown,
+            prompt_accordion,
             model_accordion,
             include_web_cb,
             model_dropdown,
@@ -322,7 +357,9 @@ with gr.Blocks(
 
     # Connect wipe chat history button
     wipe_button.click(
-        wipe_chat_history_handler, inputs=[], outputs=[rebuild_status, chatbot]
+        wipe_chat_history_handler,
+        inputs=[game_dropdown, session_state],
+        outputs=[rebuild_status, chatbot, prompt_radio]
     ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
 
     # Connect refresh storage button
@@ -350,6 +387,9 @@ with gr.Blocks(
         inputs=[rename_game_dropdown, new_name_tb],
         outputs=[rename_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     )
+
+    # Attach JS scroll on selection
+    prompt_radio.change(fn=None, inputs=[prompt_radio], outputs=[], js=SCROLL_TO_PROMPT_JS)
 
 if __name__ == "__main__":
     demo.launch(

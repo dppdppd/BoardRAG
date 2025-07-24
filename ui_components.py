@@ -9,18 +9,24 @@ from conversation_store import save as save_conv
 
 
 def query_interface(message, selected_games, include_web, chat_history, selected_model, session_id):
-    """Stream RAG answer; third output controls Cancel button visibility; fourth output controls progress indicator."""
+    """Stream RAG answer; third output controls Cancel button visibility; fourth output updates the prompt history list."""
+
+    def _prompt_update(history):
+        """Return a gradio update for the prompt radio component."""
+        prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
+        display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in prompts]
+        return gr.update(choices=display_prompts, value=None)
 
     # Basic validation --------------------------------------------------
     if not message.strip():
-        yield "", chat_history, gr.update(visible=False), gr.update(visible=False)
+        yield "", chat_history, gr.update(visible=False), gr.update()
         return
 
     if not selected_games:
         error_message = "⚠️ Please select a specific game from the dropdown before asking questions."
         chat_history.append({"role": "user", "content": message})
         chat_history.append({"role": "assistant", "content": error_message})
-        yield "", chat_history, gr.update(visible=False), gr.update(visible=False)
+        yield "", chat_history, gr.update(visible=False), gr.update()
         return
 
     # Update provider based on dropdown --------------------------------
@@ -50,7 +56,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
         game_filter.extend(mapped if mapped else [game.lower()])
 
     if not game_filter:
-        yield "", chat_history, gr.update(visible=False), gr.update(visible=False)
+        yield "", chat_history, gr.update(visible=False), gr.update()
         return
 
     # Get recent conversation history for context -----------------------
@@ -62,7 +68,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     # Placeholder bot msg ----------------------------------------------
     chat_history.append({"role": "user", "content": message})
     chat_history.append({"role": "assistant", "content": ""})
-    yield "", chat_history, gr.update(visible=True), gr.update(visible=True)
+    yield "", chat_history, gr.update(visible=True), gr.update()
 
     # Stream generation with progress feedback -------------------------
     from query import stream_query_rag  # local import to avoid cycles
@@ -79,7 +85,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     
     progress_msg = processing_msgs[0]
     chat_history[-1] = {"role": "assistant", "content": progress_msg}
-    yield "", chat_history, gr.update(visible=True), gr.update(visible=True)
+    yield "", chat_history, gr.update(visible=True), gr.update()
     
     time.sleep(0.5)  # Brief pause to show initial message
 
@@ -107,12 +113,11 @@ def query_interface(message, selected_games, include_web, chat_history, selected
             timer_text = f" (⏱️ {elapsed:.1f}s)"
             progress_with_timer = processing_msgs[progress_idx] + timer_text
             chat_history[-1] = {"role": "assistant", "content": progress_with_timer}
-            yield "", chat_history, gr.update(visible=True), gr.update(visible=True)
+            yield "", chat_history, gr.update(visible=True), gr.update()
             last_progress_update = current_time
         elif bot_response.strip():  # Once we have actual content, show it
             chat_history[-1] = {"role": "assistant", "content": bot_response}
-            # Hide progress indicator once we start getting actual content
-            yield "", chat_history, gr.update(visible=True), gr.update(visible=False)
+            yield "", chat_history, gr.update(visible=True), gr.update()
 
     # After stream finishes, compute source citations -------------------
     sources = meta.get("sources", [])
@@ -180,7 +185,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     else:
         print(f"[DEBUG] NOT saving conversation - selected_games_list: {selected_games_list}, session_id: '{session_id}'")
 
-    yield "", chat_history, gr.update(visible=False), gr.update(visible=False) 
+    yield "", chat_history, gr.update(visible=False), _prompt_update(chat_history) 
 
 
 def create_password_interface():

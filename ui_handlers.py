@@ -46,11 +46,12 @@ def unlock_handler(password, session_id):
     invalidate_games_cache()
     updated_games = get_available_games() if show_user else []
 
-    # Updates for original UI structure
+    # Updates for original UI structure (added prompt accordion)
     return (
         level,  # access_state
         gr.update(value=msg, visible=True),  # access_msg
         gr.update(choices=updated_games, visible=show_user),  # game_dropdown
+        gr.update(visible=show_user),  # prompt_accordion
         gr.update(visible=show_user),  # model_accordion
         gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
         gr.update(visible=show_user),  # model_dropdown
@@ -69,10 +70,13 @@ def rebuild_library_handler():
 
         # Clean existing vector store safely (avoids Windows file-lock errors)
         import chromadb
+        from query import get_chromadb_settings, suppress_chromadb_telemetry
+
         if os.path.exists(chroma_path):
             try:
-                print("[DEBUG] Resetting existing Chroma DB via PersistentClient.reset()")
-                chromadb.PersistentClient(path=chroma_path).reset()
+                print("[DEBUG] Resetting existing Chroma DB via PersistentClient.reset() with consistent settings")
+                with suppress_chromadb_telemetry():
+                    chromadb.PersistentClient(path=chroma_path, settings=get_chromadb_settings()).reset()
             except Exception as e:
                 return f"❌ Error resetting Chroma DB: {e}", gr.update()
 
@@ -102,11 +106,26 @@ def rebuild_library_handler():
         )
         split_documents = text_splitter.split_documents(documents)
 
-        db = Chroma.from_documents(
-            split_documents,
-            get_embedding_function(),
-            persist_directory=chroma_path,
-        )
+        from query import get_chromadb_settings, suppress_chromadb_telemetry
+        from itertools import islice
+
+        def batched(it, n=100):
+            it = iter(it)
+            while True:
+                batch = list(islice(it, n))
+                if not batch:
+                    break
+                yield batch
+
+        with suppress_chromadb_telemetry():
+            db = Chroma(
+                persist_directory=chroma_path,
+                embedding_function=get_embedding_function(),
+                client_settings=get_chromadb_settings(),
+            )
+
+        for chunk_batch in batched(split_documents, 100):
+            db.add_documents(chunk_batch)
 
         # Refresh available games
         available_games = get_available_games()
@@ -125,7 +144,8 @@ def refresh_games_handler():
         if not os.path.exists(data_path):
             return "❌ No data directory found", gr.update()
 
-        stored_games = get_stored_game_names()
+        stored_games_dict = get_stored_game_names()
+        stored_games = set(stored_games_dict.values())  # existing game names
         all_game_dirs = {p.name for p in Path(data_path).iterdir() if p.is_dir()}
         new_games = all_game_dirs - stored_games
 
@@ -153,11 +173,26 @@ def refresh_games_handler():
             )
             split_documents = text_splitter.split_documents(documents)
 
-            db = Chroma(
-                persist_directory=chroma_path,
-                embedding_function=get_embedding_function(),
-            )
-            db.add_documents(split_documents)
+            from query import get_chromadb_settings, suppress_chromadb_telemetry
+            from itertools import islice
+
+            def batched(it, n=100):
+                it = iter(it)
+                while True:
+                    batch = list(islice(it, n))
+                    if not batch:
+                        break
+                    yield batch
+
+            with suppress_chromadb_telemetry():
+                db = Chroma(
+                    persist_directory=chroma_path,
+                    embedding_function=get_embedding_function(),
+                    client_settings=get_chromadb_settings(),
+                )
+
+            for chunk_batch in batched(split_documents, 100):
+                db.add_documents(chunk_batch)
 
         available_games = get_available_games()
         return f"✅ Added {len(new_games)} new game(s): {', '.join(new_games)}", gr.update(choices=available_games)
@@ -165,13 +200,40 @@ def refresh_games_handler():
         return f"❌ Error processing new games: {str(e)}", gr.update()
 
 
-def wipe_chat_history_handler():
-    """Wipe all stored chat conversations."""
+def wipe_chat_history_handler(selected_game, session_id):
+    """Clear chat history for the current game and update prompt list."""
+    from conversation_store import save as save_conv, _STORE
     try:
-        wipe_all()
-        return "🗑️ All chat history has been wiped successfully!", gr.update()
+        print(f"[DEBUG] wipe_chat_history_handler called with selected_game='{selected_game}', session_id='{session_id}'")
+        
+        if selected_game and session_id:
+            # Check what was stored before
+            print(f"[DEBUG] Before clearing - session exists: {session_id in _STORE}")
+            if session_id in _STORE:
+                print(f"[DEBUG] Before clearing - games in session: {list(_STORE[session_id].keys())}")
+                if selected_game in _STORE[session_id]:
+                    print(f"[DEBUG] Before clearing - messages in game '{selected_game}': {len(_STORE[session_id][selected_game])}")
+            
+            # Save empty conversation to properly clear and persist
+            save_conv(session_id, selected_game, [])
+            print(f"[DEBUG] Called save_conv with empty list")
+            
+            # Check what's stored after
+            if session_id in _STORE:
+                print(f"[DEBUG] After clearing - games in session: {list(_STORE[session_id].keys())}")
+                if selected_game in _STORE[session_id]:
+                    print(f"[DEBUG] After clearing - messages in game '{selected_game}': {len(_STORE[session_id][selected_game])}")
+            
+        else:
+            print(f"[DEBUG] Not clearing - missing selected_game or session_id")
+            
+        msg = "🗑️ Chat history cleared!"
+        return msg, gr.update(value=[]), gr.update(choices=[], value=None)
     except Exception as e:
-        return f"❌ Error wiping chat history: {str(e)}", gr.update()
+        print(f"[DEBUG] Error in wipe_chat_history_handler: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"❌ Error wiping chat history: {str(e)}", gr.update(), gr.update()
 
 
 def refresh_storage_handler():
@@ -328,21 +390,31 @@ def load_history(selected_game, session_id):
     if not selected_game or not session_id:
         # Clear chat when no game selected or no session
         print(f"[DEBUG] Clearing chat - no game selected or no session")
-        return gr.update(value=[])
+        return gr.update(value=[]), gr.update(value="")
+    
+    # Update last_game when user manually switches games
+    from conversation_store import _STORE, _flush, _LOCK
+    with _LOCK:
+        user_data = _STORE.setdefault(session_id, {})
+        user_data["_last_game"] = selected_game
+        _flush()
+        print(f"[DEBUG] Updated last_game to '{selected_game}' for session '{session_id}'")
     
     # Debug: check what's stored for this session
-    from conversation_store import _STORE
     print(f"[DEBUG] Available sessions in store: {list(_STORE.keys())}")
     if session_id in _STORE:
         print(f"[DEBUG] Games for session '{session_id}': {list(_STORE[session_id].keys())}")
     
-    history = load_conv(session_id, selected_game)  # This now returns messages format
+    history = load_conv(session_id, selected_game)  # messages format
     print(f"[DEBUG] Loading history for game '{selected_game}' and session '{session_id}': {len(history)} messages")
     
     if history:
         print(f"[DEBUG] First message preview: {history[0]}")
-    
-    return gr.update(value=history)
+
+    # Build prompt list for radio component
+    prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
+    display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in prompts]
+    return gr.update(value=history), gr.update(choices=display_prompts, value=None)
 
 
 def auto_load_on_session_ready(session_id, current_game_selection):
@@ -351,7 +423,7 @@ def auto_load_on_session_ready(session_id, current_game_selection):
     
     if not session_id:
         print(f"[DEBUG] No session ID provided, returning empty updates")
-        return gr.update(), gr.update()
+        return gr.update(), gr.update(), gr.update()
     
     # Get the last game this user was using
     last_game = get_last_game(session_id)
@@ -374,16 +446,42 @@ def auto_load_on_session_ready(session_id, current_game_selection):
         # Restore the last selected game and its conversation
         history = load_conv(session_id, last_game)
         print(f"[DEBUG] ✅ Restoring last game '{last_game}' with {len(history)} messages")
-        return gr.update(value=last_game), gr.update(value=history)
+        # Build prompt list
+        prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
+        if prompts:
+            import html as _html
+            items = []
+            for p in prompts:
+                disp = (p[:60] + "…") if len(p) > 60 else p
+                items.append(f"<div class='prompt-item' onclick=\"scrollPrompt('{_html.escape(p)}')\">{_html.escape(disp)}</div>")
+            css = "<style>#prompt-list .prompt-item{display:block;padding:4px 8px;margin:3px 0;border:1px solid #ddd;border-radius:4px;background:#f7f7f7;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}#prompt-list .prompt-item:hover{background:#eaeaea;}</style>"
+            html_value = css + "".join(items)
+        else:
+            html_value = "<em>No prompts yet</em>"
+        script = "<script>if(typeof scrollPrompt!=='function'){window.scrollPrompt = function(t){const c=document.querySelector('.custom-chatbot');if(!c)return;const msgs=c.querySelectorAll('[data-role\\=\"user\"], .message.user');msgs.forEach(function(e){if(e.innerText.trim().startsWith(t.trim())){e.scrollIntoView({behavior:'smooth',block:'start'});}});};}</script>"
+        return gr.update(value=last_game), gr.update(value=history), gr.update(choices=prompts, value=None)
     elif current_game_selection and session_id:
         # Load conversation for currently selected game
         history = load_conv(session_id, current_game_selection)
         print(f"[DEBUG] Loading current game '{current_game_selection}' with {len(history)} messages")
-        return gr.update(), gr.update(value=history)
+        # Build prompt list for current selection
+        prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
+        if prompts:
+            import html as _html
+            items = []
+            for p in prompts:
+                disp = (p[:60] + "…") if len(p) > 60 else p
+                items.append(f"<div class='prompt-item' onclick=\"scrollPrompt('{_html.escape(p)}')\">{_html.escape(disp)}</div>")
+            css = "<style>#prompt-list .prompt-item{display:block;padding:4px 8px;margin:3px 0;border:1px solid #ddd;border-radius:4px;background:#f7f7f7;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}#prompt-list .prompt-item:hover{background:#eaeaea;}</style>"
+            html_value = css + "".join(items)
+        else:
+            html_value = "<em>No prompts yet</em>"
+        script = "<script>if(typeof scrollPrompt!=='function'){window.scrollPrompt = function(t){const c=document.querySelector('.custom-chatbot');if(!c)return;const msgs=c.querySelectorAll('[data-role\\=\"user\"], .message.user');msgs.forEach(function(e){if(e.innerText.trim().startsWith(t.trim())){e.scrollIntoView({behavior:'smooth',block:'start'});}});};}</script>"
+        return gr.update(), gr.update(value=history), gr.update(choices=prompts, value=None)
     else:
         print(f"[DEBUG] No valid game to restore, returning empty")
     
-    return gr.update(), gr.update()
+    return gr.update(), gr.update(), gr.update()
 
 
 def auto_unlock_interface(access_state):
@@ -407,6 +505,7 @@ def auto_unlock_interface(access_state):
     return (
          msg_update,
          gr.update(choices=updated_games, visible=show_user),  # game_dropdown
+         gr.update(visible=show_user),  # prompt_accordion
          gr.update(visible=show_user),  # model_accordion
          gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
          gr.update(visible=show_user),  # model_dropdown

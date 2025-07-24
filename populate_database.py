@@ -124,10 +124,26 @@ def add_to_chroma(chunks: List[Document]) -> bool:
 
     if len(new_chunks):
         print(f"👉 Adding new documents: {len(new_chunks)}")
-        new_chunk_ids = [chunk.metadata["id"] for chunk in new_chunks]
+        from itertools import islice
+
+        def batched(it, n=100):
+            """Yield *n*-sized batches from *it*."""
+            it = iter(it)
+            while True:
+                batch = list(islice(it, n))
+                if not batch:
+                    break
+                yield batch
+
         try:
-            db.add_documents(new_chunks, ids=new_chunk_ids)
-            print("✅ Documents added successfully")
+            total_new = len(new_chunks)
+            batches = batched(new_chunks, 100)
+            for idx, batch in enumerate(batches, start=1):
+                batch_ids = [chunk.metadata["id"] for chunk in batch]
+                db.add_documents(batch, ids=batch_ids)
+                print(f"   ✅ Added batch {idx}: {len(batch)} chunks")
+
+            print(f"✅ Documents added successfully – {total_new} new chunks")
 
             # With PersistentClient, persistence is automatic
             print("📝 Using PersistentClient - auto-persistence enabled")

@@ -110,6 +110,38 @@ THEME_CSS = """
 
 }
 
+/* Prompt list styling */
+#prompt-radio input[type="radio"] {
+    /* hide native circle */
+    display: none;
+}
+
+#prompt-radio label {
+    display: block;
+    width: 100%;
+    padding: 6px 10px;
+    margin: 4px 0;
+    border: 1px solid rgba(255,255,255,0.6);
+    border-radius: 4px;
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #fff;
+    box-sizing: border-box;
+}
+
+#prompt-radio label:hover,
+#prompt-radio input[type="radio"]:checked + label {
+    background: rgba(255,255,255,0.15);
+}
+
+    .custom-chatbot .message { 
+        font-size: 12px;
+    }
+
 .input-row {
     margin-top: 10px;
 }
@@ -158,7 +190,8 @@ def get_config_info():
 """
 
 def create_theme():
-    """Create and return the Gradio theme."""
+    """Create and return the Gradio theme with smaller base text size."""
     return gr.themes.Default(
-        font=[gr.themes.GoogleFont("Georgia"), "Arial", "sans-serif"]
+        font=[gr.themes.GoogleFont("Georgia"), "Arial", "sans-serif"],
+        text_size="sm",
     ) 
