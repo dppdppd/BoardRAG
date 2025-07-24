@@ -370,7 +370,6 @@ def get_available_games() -> List[str]:
     Returns:
         List[str]: List of game names (e.g., ['Monopoly', 'Up Front', 'Ticket to Ride'])
     """
-    print(f"🎯 [DEBUG] get_available_games() called")
     try:
         # Connect to the database
         embedding_function = get_embedding_function()
@@ -382,7 +381,6 @@ def get_available_games() -> List[str]:
 
         # Get all documents to extract filenames
         all_docs = db.get()
-        print(f"🎯 [DEBUG] ChromaDB query returned {len(all_docs['ids'])} documents")
 
         # Extract unique filenames from source paths
         filenames = set()
@@ -392,20 +390,15 @@ def get_available_games() -> List[str]:
             if ":" in doc_id:
                 # Format: "data/monopoly.pdf:6:2" or "data\\monopoly.pdf:6:2" on Windows
                 source_path = doc_id.split(":")[0]
-                print(f"🎯 [DEBUG] Processing doc_id: {doc_id} -> source_path: {source_path}")
                 # Handle both Windows (\) and Unix (/) path separators
                 if "/" in source_path or "\\" in source_path:
                     # Use os.path.basename to handle both path separators correctly
                     filename = os.path.basename(source_path)
                     if filename.endswith(".pdf"):
                         filenames.add(filename)
-                        print(f"🎯 [DEBUG]   Extracted filename: {filename}")
-
-        print(f"🎯 [DEBUG] Extracted filenames: {sorted(filenames)}")
 
         # Get stored game names (fast lookup, no LLM calls)
         stored_names = get_stored_game_names()
-        print(f"🎯 [DEBUG] Stored game names: {stored_names}")
 
         # Build games list using stored names
         games = []
@@ -423,7 +416,6 @@ def get_available_games() -> List[str]:
                 proper_name = extract_and_store_game_name(filename)
 
             simple_name = filename.replace(".pdf", "").split()[0].lower()
-            print(f"🎯 [DEBUG] {filename} -> proper_name: '{proper_name}', simple_name: '{simple_name}'")
 
             # Deduplicate visible game names
             if proper_name not in games:
@@ -432,15 +424,11 @@ def get_available_games() -> List[str]:
             # Build list of simple filenames per game
             game_to_files.setdefault(proper_name, []).append(simple_name)
 
-        print(f"🎯 [DEBUG] Final games list: {games}")
-        print(f"🎯 [DEBUG] Game to files mapping: {game_to_files}")
-
         # Store the mapping for use in filtering (game -> list of simple filenames)
         get_available_games._filename_mapping = game_to_files
 
         return sorted(games)
     except Exception as e:
-        print(f"🎯 [DEBUG] Error in get_available_games: {e}")
         if VERBOSE_LOGGING:
             print(f"Error getting available games: {e}")
         return []
@@ -600,26 +588,7 @@ def query_rag(
         Dict: The response from the RAG model.
     """
     
-    # Add extensive debug output
-    print(f"🔍 [DEBUG] query_rag called with:")
-    print(f"🔍 [DEBUG]   query_text: '{query_text}'")
-    print(f"🔍 [DEBUG]   selected_game: '{selected_game}'")
-    print(f"🔍 [DEBUG]   game_names: {game_names}")
-    print(f"🔍 [DEBUG]   CHROMA_PATH: '{CHROMA_PATH}'")
-    print(f"🔍 [DEBUG]   DATA_PATH: '{DATA_PATH}'")
-    
-    # Check if paths exist
-    print(f"🔍 [DEBUG] Path existence check:")
-    print(f"🔍 [DEBUG]   CHROMA_PATH exists: {os.path.exists(CHROMA_PATH)}")
-    print(f"🔍 [DEBUG]   DATA_PATH exists: {os.path.exists(DATA_PATH)}")
-    
-    if os.path.exists(DATA_PATH):
-        pdf_files = list(Path(DATA_PATH).rglob("*.pdf"))
-        print(f"🔍 [DEBUG]   Found {len(pdf_files)} PDFs in DATA_PATH:")
-        for pdf in pdf_files[:10]:  # Show first 10
-            print(f"🔍 [DEBUG]     - {pdf}")
-        if len(pdf_files) > 10:
-            print(f"🔍 [DEBUG]     ... and {len(pdf_files) - 10} more")
+    # Query RAG system
 
     # Connect to the database
     print("🔗 Connecting to the database...")
@@ -630,31 +599,7 @@ def query_rag(
         )
         db = Chroma(client=persistent_client, embedding_function=embedding_function)
 
-    # Debug: Show what's in the database
-    try:
-        all_docs = db.get()
-        print(f"🔍 [DEBUG] ChromaDB contains {len(all_docs['ids'])} documents")
-        
-        # Extract source paths from document IDs
-        source_paths = set()
-        for doc_id in all_docs["ids"][:20]:  # Check first 20
-            if ":" in doc_id:
-                source_path = doc_id.split(":")[0]
-                source_paths.add(source_path)
-        
-        print(f"🔍 [DEBUG] Sample source paths in ChromaDB:")
-        for path in sorted(list(source_paths)[:10]):
-            print(f"🔍 [DEBUG]   - {path}")
-            # Check if the referenced file actually exists
-            if os.path.exists(path):
-                print(f"🔍 [DEBUG]     ✅ File exists")
-            else:
-                print(f"🔍 [DEBUG]     ❌ File NOT found")
-        
-        if len(source_paths) > 10:
-            print(f"🔍 [DEBUG]   ... and {len(source_paths) - 10} more")
-    except Exception as e:
-        print(f"🔍 [DEBUG] Error accessing ChromaDB: {e}")
+    # Database connection successful
 
     # Prepare search query – include chat history to give the retriever more context for follow-up questions
     search_query = (
@@ -666,20 +611,7 @@ def query_rag(
     if selected_game:
         print(f"  Filtering by game: '{selected_game}'")
 
-    # Test embedding generation
-    try:
-        test_embedding = embedding_function.embed_query(search_query)
-        print(f"  Generated embedding dimensions: {len(test_embedding)}")
-        print(f"  First few embedding values: {test_embedding[:3]}")
-    except Exception as e:
-        print(f"  ❌ Embedding generation failed: {e}")
-        return {
-            "response_text": "Error generating embeddings",
-            "sources": [],
-            "context": "",
-            "prompt": "",
-            "original_query": query_text,
-        }
+
 
     # Get results from database (more if filtering is needed)
     k_results = (
@@ -691,22 +623,14 @@ def query_rag(
     if selected_game:
         # selected_game can be a list of filter strings or a single string
         filters = selected_game if isinstance(selected_game, list) else [selected_game]
-        
-        print(f"🔍 [DEBUG] Applying game filter: {filters}")
 
         filtered_results = []
         for doc, score in all_results:
             source = doc.metadata.get("source", "").lower()
-            print(f"🔍 [DEBUG] Checking document source: '{source}' against filters: {filters}")
-            
             if any(f in source for f in filters):
                 filtered_results.append((doc, score))
-                print(f"🔍 [DEBUG]   ✅ MATCH! Including document (score: {score:.4f})")
-                print(f"🔍 [DEBUG]   Content preview: {doc.page_content[:100]}...")
                 if len(filtered_results) >= 40:  # Increased to maintain context
                     break
-            else:
-                print(f"🔍 [DEBUG]   ❌ No match, skipping")
 
         results = filtered_results
         print(
@@ -717,23 +641,12 @@ def query_rag(
     print(f"  Found {len(results)} results")
     if results:
         print(f"  Best match score: {results[0][1]:.4f}")
-        print(f"  Best match content preview: {results[0][0].page_content[:100]}...")
         # Show which games the results come from
         sources = [doc.metadata.get("source", "unknown") for doc, _ in results[:3]]
         unique_sources = list(set([Path(s).name for s in sources if s != "unknown"]))
         print(f"  Top sources: {', '.join(unique_sources[:3])}")
-        
-        # Debug: Show all result sources
-        print(f"🔍 [DEBUG] All result sources:")
-        for i, (doc, score) in enumerate(results[:10]):
-            source = doc.metadata.get("source", "unknown")
-            print(f"🔍 [DEBUG]   {i+1}. {source} (score: {score:.4f})")
     else:
-        print("  No results found in similarity search")
-        print("🔍 [DEBUG] This likely means:")
-        print("🔍 [DEBUG]   1. No documents in ChromaDB match the filter")
-        print("🔍 [DEBUG]   2. The filter strings don't match the source paths")
-        print("🔍 [DEBUG]   3. The database is empty or corrupted")
+        print("  ⚠️ No results found - check if database contains relevant documents")
 
     # Supplement with live web search results (optional)
     effective_web_search = ENABLE_WEB_SEARCH if enable_web is None else enable_web
