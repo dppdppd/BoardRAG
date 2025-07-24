@@ -415,7 +415,7 @@ def get_available_games() -> List[str]:
                 print(f"⚠️ Game name not found in storage, extracting for: '{filename}'")
                 proper_name = extract_and_store_game_name(filename)
 
-            simple_name = filename.replace(".pdf", "").split()[0].lower()
+            simple_name = filename.replace(".pdf", "").lower().replace(" ", "_")
 
             # Deduplicate visible game names
             if proper_name not in games:
