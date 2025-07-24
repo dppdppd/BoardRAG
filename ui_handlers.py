@@ -86,13 +86,25 @@ def rebuild_library_handler():
         documents = []
         for pdf_file in Path(data_path).rglob("*.pdf"):
             print(f"Processing: {pdf_file}")
+            print(f"🔧 [DEBUG] Processing PDF: {pdf_file}")
+            print(f"🔧 [DEBUG]   Absolute path: {pdf_file.absolute()}")
+            print(f"🔧 [DEBUG]   String representation: {str(pdf_file)}")
+            
             loader = PyPDFLoader(str(pdf_file))
             docs = loader.load()
-            for doc in docs:
+            print(f"🔧 [DEBUG]   Loaded {len(docs)} documents from PDF")
+            
+            for i, doc in enumerate(docs):
+                print(f"🔧 [DEBUG]   Document {i} metadata before: {doc.metadata}")
+                
                 source_parts = str(pdf_file).split(os.sep)
                 if len(source_parts) >= 2:
                     game_name = source_parts[-2]
                     doc.metadata["game"] = game_name
+                    print(f"🔧 [DEBUG]   Set game metadata to: {game_name}")
+                
+                print(f"🔧 [DEBUG]   Document {i} metadata after: {doc.metadata}")
+                print(f"🔧 [DEBUG]   Document {i} source in metadata: {doc.metadata.get('source', 'NO SOURCE!')}")
                 documents.extend([doc])
 
         if not documents:
@@ -109,7 +121,14 @@ def rebuild_library_handler():
         from query import get_chromadb_settings, suppress_chromadb_telemetry
         from itertools import islice
 
+        print(f"🔧 [DEBUG] About to add {len(split_documents)} document chunks to ChromaDB")
+        for i, chunk in enumerate(split_documents[:5]):  # Show first 5 chunks
+            print(f"🔧 [DEBUG] Chunk {i}:")
+            print(f"🔧 [DEBUG]   metadata: {chunk.metadata}")
+            print(f"🔧 [DEBUG]   content preview: {chunk.page_content[:100]}...")
+
         def batched(it, n=100):
+            """Yield n-sized batches from it."""
             it = iter(it)
             while True:
                 batch = list(islice(it, n))
@@ -124,8 +143,11 @@ def rebuild_library_handler():
                 client_settings=get_chromadb_settings(),
             )
 
-        for chunk_batch in batched(split_documents, 100):
+        # Add documents in batches to avoid token limits
+        for i, chunk_batch in enumerate(batched(split_documents, 100)):
+            print(f"🔧 [DEBUG] Adding batch {i+1} with {len(chunk_batch)} chunks")
             db.add_documents(chunk_batch)
+            print(f"🔧 [DEBUG] Batch {i+1} added successfully")
 
         # Refresh available games
         available_games = get_available_games()

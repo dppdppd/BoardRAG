@@ -54,8 +54,14 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     for game in selected_games_list:
         mapped = mapping.get(game)
         game_filter.extend(mapped if mapped else [game.lower()])
+    
+    print(f"🎮 [DEBUG] Game filtering:")
+    print(f"🎮 [DEBUG]   selected_games_list: {selected_games_list}")
+    print(f"🎮 [DEBUG]   filename_mapping: {mapping}")
+    print(f"🎮 [DEBUG]   final game_filter: {game_filter}")
 
     if not game_filter:
+        print(f"🎮 [DEBUG] No game filter - this will return no results!")
         yield "", chat_history, gr.update(visible=False), gr.update()
         return
 

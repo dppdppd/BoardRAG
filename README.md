@@ -128,3 +128,21 @@ EMBEDDER_MODEL = "text-embedding-3-small"
 EVAL_TEMPLATE_PATH = "eval_prompt_tests.txt"
 JINJA_TEMPLATE_PATH = "rag_query_pixegami.txt"
 ```
+
+## Hugging Face Spaces - PDF Renaming
+
+If you're running BoardRAG on Hugging Face Spaces with persistent storage and you rename PDF files:
+
+1. **The issue**: The ChromaDB database contains references to the old filenames, so renamed PDFs won't appear in the game list even though the files exist.
+
+2. **The solution**: After renaming PDFs in the persistent storage, you must rebuild the library:
+   - Go to the "Technical Info" section (requires admin access)
+   - Click "🔄 Rebuild Library" to reprocess all PDFs with their new names
+   - This will update the ChromaDB database and game name mappings
+
+3. **Why this happens**: 
+   - ChromaDB stores document references using the original filenames
+   - The game name mappings are stored separately and reference the old filenames
+   - On HF Spaces, persistent storage preserves the old database even after file renames
+
+4. **Prevention**: Use the built-in rename functionality in the UI instead of manually renaming files, or always rebuild after manual renames.
