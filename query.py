@@ -702,26 +702,39 @@ def query_rag(
     except Exception:
         prompt = load_jinja2_prompt(context=context_text, question=composite_question)
 
-    print("🍳 Generating the response...")
+    print("🍳 Generating the response (streaming)…")
+
+    # Prepare streaming callback to flush tokens to stdout immediately.
+    try:
+        from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+
+        callbacks = [StreamingStdOutCallbackHandler()]
+    except Exception:
+        # Fallback: no streaming callback available
+        callbacks = None
+
     # Temperature is fixed to 0 for deterministic answers that are easier to test.
+    model_kwargs = {
+        "callbacks": callbacks,
+        "streaming": True,
+    }
 
     if LLM_PROVIDER.lower() == "ollama":
         # Import here to avoid requiring Ollama for OpenAI users.
         from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
 
-        model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL)
+        model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL, **model_kwargs)
     elif LLM_PROVIDER.lower() == "anthropic":
-        model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0)
+        model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0, **model_kwargs)
     elif LLM_PROVIDER.lower() == "openai":
         # o3 model only supports temperature=1, others use 0
-        if GENERATOR_MODEL == "o3":
-            model = ChatOpenAI(model=GENERATOR_MODEL, temperature=1)
-        else:
-            model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
+        temp = 1 if GENERATOR_MODEL == "o3" else 0
+        model = ChatOpenAI(model=GENERATOR_MODEL, temperature=temp, **model_kwargs)
     else:
         raise ValueError(
             f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
         )
+
     response_raw = model.invoke(prompt)
     # Convert LangChain message objects to string content when necessary.
     if hasattr(response_raw, "content"):
@@ -739,6 +752,121 @@ def query_rag(
     }
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# Streaming variant – yields tokens incrementally for UI streaming
+# ---------------------------------------------------------------------------
+
+
+def stream_query_rag(
+    query_text: str,
+    selected_game: Optional[str] = None,
+    chat_history: Optional[str] = None,
+    game_names: Optional[List[str]] = None,
+    enable_web: Optional[bool] = None,
+):
+    """Same as query_rag but returns a (token_generator, metadata) tuple.
+
+    The *token_generator* yields strings (token chunks). *metadata* is a dict
+    identical to the non-streaming response (minus *response_text*).
+    """
+
+    # ---- Build prompt and retrieve context (reuse logic from query_rag) ----
+
+    embedding_function = get_embedding_function()
+    with suppress_chromadb_telemetry():
+        persistent_client = chromadb.PersistentClient(
+            path=CHROMA_PATH, settings=get_chromadb_settings()
+        )
+        db = Chroma(client=persistent_client, embedding_function=embedding_function)
+
+    search_query = f"{chat_history}\n\n{query_text}" if chat_history else query_text
+
+    # Fetch DB results (same k logic)
+    k_results = 75 if selected_game else 40
+    all_results = db.similarity_search_with_score(search_query, k=k_results)
+
+    # Apply optional game filter
+    if selected_game:
+        filters = [selected_game] if isinstance(selected_game, str) else selected_game
+        filtered_results = []
+        for doc, score in all_results:
+            source = doc.metadata.get("source", "").lower()
+            if any(f in source for f in filters):
+                filtered_results.append((doc, score))
+                if len(filtered_results) >= 40:
+                    break
+        results = filtered_results
+    else:
+        results = all_results
+
+    # Supplement with web search if enabled
+    effective_web_search = ENABLE_WEB_SEARCH if enable_web is None else enable_web
+    if effective_web_search:
+        quoted_game = f'"{game_names[0]}" ' if game_names else ""
+        pre_query = f"{quoted_game}{query_text}"
+        web_query = rewrite_search_query(pre_query)
+        web_docs = perform_web_search(web_query, k=WEB_SEARCH_RESULTS)
+        if web_docs:
+            results.extend([(doc, 0.0) for doc in web_docs])
+
+    # Build prompt
+    context_text = "\n\n---\n\n".join([doc.page_content for doc, _ in results])
+
+    composite_question = (
+        f"Previous conversation (for context):\n{chat_history}\n\nUser's latest question: {query_text}"
+        if chat_history
+        else query_text
+    )
+
+    try:
+        prompt = load_jinja2_prompt(
+            context=context_text,
+            question=composite_question,
+            template_name="rag_query_improved.txt",
+        )
+    except Exception:
+        prompt = load_jinja2_prompt(context=context_text, question=composite_question)
+
+    # ---- Create LLM (streaming enabled) ----
+
+    model_kwargs = {"streaming": True}
+    if LLM_PROVIDER.lower() == "ollama":
+        from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
+
+        model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL, **model_kwargs)
+    elif LLM_PROVIDER.lower() == "anthropic":
+        model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0, **model_kwargs)
+    elif LLM_PROVIDER.lower() == "openai":
+        temp = 1 if GENERATOR_MODEL == "o3" else 0
+        model = ChatOpenAI(model=GENERATOR_MODEL, temperature=temp, **model_kwargs)
+    else:
+        raise ValueError("Unsupported LLM_PROVIDER: " + LLM_PROVIDER)
+
+    # ---- Token generator ----
+
+    def _token_gen():
+        for chunk in model.stream(prompt):
+            # chunk can be ChatGenerationChunk or similar; extract text portion
+            text_part = getattr(chunk, "content", None)
+            if text_part is None and hasattr(chunk, "message"):
+                text_part = getattr(chunk.message, "content", "")
+            if text_part is None:
+                text_part = str(chunk)
+            if text_part:
+                yield text_part
+
+    sources = [doc.metadata.get("id", None) for doc, _ in results]
+
+    meta = {
+        "sources": sources,
+        "context": context_text,
+        "prompt": prompt,
+        "original_query": query_text,
+    }
+
+    return _token_gen(), meta
 
 
 def main():

@@ -304,33 +304,20 @@ def upload_pdf_handler(pdf_file):
 
 
 def query_interface(message, selected_games, include_web, chat_history, selected_model):
-    """
-    Queries the RAG model with the given query and returns the response.
+    """Stream RAG answer; third output controls Cancel button visibility."""
 
-    Args:
-        message (str): The query to be passed to the RAG model.
-        selected_games (List[str]): The selected games to filter results by.
-        chat_history (str): The chat history.
-        selected_model (str): The selected model to use for the query.
-
-    Returns:
-        str: The response from the RAG model.
-        List: The chat history, with the new message and response appended.
-    """
-
-    # Check if a game is selected
+    # Basic validation --------------------------------------------------
     if not message.strip():
-        return "", chat_history
+        yield "", chat_history, gr.update(visible=False)
+        return
 
-    # Validate game selection – must choose at least one
     if not selected_games:
-        error_message = (
-            "⚠️ Please select a specific game from the dropdown before asking questions."
-        )
+        error_message = "⚠️ Please select a specific game from the dropdown before asking questions."
         chat_history.append((message, error_message))
-        return "", chat_history
+        yield "", chat_history, gr.update(visible=False)
+        return
 
-    # Update model/provider based on user selection
+    # Update provider based on dropdown --------------------------------
     if selected_model:
         model_lower = selected_model.lower()
         if "claude" in model_lower:
@@ -341,95 +328,80 @@ def query_interface(message, selected_games, include_web, chat_history, selected
             config.LLM_PROVIDER = "openai"
         config.GENERATOR_MODEL = selected_model
 
-    # Normalise to list (Dropdown multiselect returns list; but handle stray string just in case)
+    # Normalise to list --------------------------------------------------
     if isinstance(selected_games, str):
-        selected_games = [selected_games]
+        selected_games_list = [selected_games]
+    else:
+        selected_games_list = selected_games or []
 
-    # Build a list of simple filename filters for the selected games
+    # Map to filename filters -------------------------------------------
     mapping = getattr(get_available_games, "_filename_mapping", {})
     game_filter: List[str] = []
-    for game in selected_games:
+    for game in selected_games_list:
         mapped = mapping.get(game)
-        if mapped:
-            game_filter.extend(mapped)
-        else:
-            game_filter.append(game.lower())
+        game_filter.extend(mapped if mapped else [game.lower()])
 
-    # Format chat history for conversational context (limit to last 10 turns to keep prompt size manageable)
+    # Prepare chat history snippet --------------------------------------
     history_snippets = chat_history[-10:] if chat_history else []
     formatted_history = "\n".join([
-        f"User: {user_msg}\nAssistant: {bot_msg}" for user_msg, bot_msg in history_snippets
+        f"User: {u}\nAssistant: {b}" for u, b in history_snippets
     ])
 
-    resp = query_rag(
+    # Placeholder bot msg ----------------------------------------------
+    chat_history.append((message, ""))
+    yield "", chat_history, gr.update(visible=True)
+
+    # Stream generation -------------------------------------------------
+    from query import stream_query_rag  # local import to avoid cycles
+
+    token_generator, meta = stream_query_rag(
         message,
         game_filter,
         formatted_history,
-        game_names=selected_games,
+        game_names=selected_games_list,
         enable_web=include_web,
     )
 
-    # Get fresh available games list to ensure we have the latest data
-    invalidate_games_cache()
-    available_games = cached_games()
+    bot_response = ""
+    for token in token_generator:
+        bot_response += token
+        chat_history[-1] = (message, bot_response)
+        yield "", chat_history, gr.update(visible=True)
 
-    # Determine proper game name - use selected game if available, otherwise extract from sources
-    if selected_games:
-        game_name = ", ".join(selected_games)
-    elif resp["sources"] and resp["sources"][0]:
-        # Try to find matching game from available games based on source
-        source_file = Path(resp["sources"][0]).name.lower()
-        game_name = "Game"  # fallback
-        for available_game in available_games:
-            # Check if any part of the available game name is in the source filename
-            if any(word.lower() in source_file for word in available_game.split()):
-                game_name = available_game
-                break
-        # If no match found, use first word capitalized as fallback
-        if game_name == "Game":
-            game_name = Path(resp["sources"][0]).name.split()[0].capitalize()
-    else:
-        game_name = "Game"
+    # After stream finishes, compute source citations -------------------
+    sources = meta.get("sources", [])
 
-    # Create clean source citations (PDF pages or web URLs)
-    if resp["sources"]:
+    if sources:
         pdf_info = {}
         url_sources = []
 
-        for source in resp["sources"]:
+        for source in sources:
             if source is None:
                 continue
-            if source.startswith("http"):
+            if isinstance(source, str) and source.startswith("http"):
                 url_sources.append(source)
-            elif ":" in source:
+            elif isinstance(source, str) and ":" in source:
                 parts = source.split(":")
                 if len(parts) >= 2:
-                    filepath = parts[0]
-                    page_num = parts[1]
+                    filepath, page_num = parts[0], parts[1]
                     filename = Path(filepath).name
-
-                    if filename not in pdf_info:
-                        pdf_info[filename] = set()
-                    # Guard against non-int page numbers (web chunks etc.)
+                    pdf_info.setdefault(filename, set())
                     try:
                         pdf_info[filename].add(int(page_num))
                     except ValueError:
                         pass
 
-        clean_citations = []
-
-        # Add up to 2 PDFs citations
-        for filename, pages in list(pdf_info.items())[:2]:
-            sorted_pages = sorted(pages)
-            if len(sorted_pages) == 1:
-                page_ref = f"p. {sorted_pages[0]}"
-            elif len(sorted_pages) <= 3:
-                page_ref = f"pp. {', '.join(map(str, sorted_pages))}"
+        clean_citations: List[str] = []
+        for fname, pages in list(pdf_info.items())[:2]:
+            pages_sorted = sorted(pages)
+            if len(pages_sorted) == 1:
+                page_ref = f"p. {pages_sorted[0]}"
+            elif len(pages_sorted) <= 3:
+                page_ref = "pp. " + ", ".join(map(str, pages_sorted))
             else:
-                page_ref = f"pp. {sorted_pages[0]}-{sorted_pages[-1]}"
-            clean_citations.append(f"{filename} ({page_ref})")
+                page_ref = f"pp. {pages_sorted[0]}-{pages_sorted[-1]}"
+            clean_citations.append(f"{fname} ({page_ref})")
 
-        # Add up to 2 web URLs
         for url in url_sources[:2]:
             clean_citations.append(url)
 
@@ -437,10 +409,9 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     else:
         sources_str = "N/A"
 
-    # Just provide the direct answer with source citation
-    bot_message = f"{resp['response_text']}\n\n**Source:** {sources_str}"
-    chat_history.append((message, bot_message))
-    return "", chat_history
+    final_msg = f"{bot_response}\n\n**Source:** {sources_str}"
+    chat_history[-1] = (message, final_msg)
+    yield "", chat_history, gr.update(visible=False)
 
 
 def refresh_games_handler():
@@ -538,12 +509,16 @@ def refresh_games_handler():
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 
 
+# -----------------------------------------------------------------------------
+# Rebuild the entire library (clears DB and reprocesses all PDFs)
+# -----------------------------------------------------------------------------
+
 def rebuild_library_handler():
     """Rebuild the entire library by processing all PDFs in the data directory."""
     try:
         from pathlib import Path
-        
-        status_messages = []
+
+        status_messages: list[str] = []
         status_messages.append("🗑️ Clearing existing database …")
 
         # Reset the entire Chroma database so removed PDFs disappear
@@ -558,44 +533,48 @@ def rebuild_library_handler():
                 status_messages.append(f"❌ Error resetting database: {e}")
 
         status_messages.append("🔄 Starting library rebuild …")
-        
+
         # Get list of PDFs in data directory
         data_path = Path(config.DATA_PATH)
         pdf_files = list(data_path.glob("*.pdf"))
-        
+
         if not pdf_files:
             return "📄 No PDFs found in data directory", gr.update()
-        
+
         status_messages.append(f"📄 Found {len(pdf_files)} PDFs to process...")
-        
+
         # Process each PDF individually to avoid token limits
         total_processed = 0
         for pdf_file in pdf_files:
             try:
                 # Process the PDF
                 chunks = process_single_pdf(str(pdf_file))
-                
+
                 # Add to database in smaller batches
                 batch_size = 50  # Process in batches of 50 chunks
                 total_added = 0
-                
+
                 for i in range(0, len(chunks), batch_size):
                     batch_chunks = chunks[i : i + batch_size]
                     success = add_chunks_to_database(batch_chunks)
                     if success:
                         total_added += len(batch_chunks)
-                
+
                 if total_added > 0:
                     status_messages.append(
                         f"✅ Processed {pdf_file.name} ({total_added} chunks)"
                     )
                     total_processed += 1
                 else:
-                    status_messages.append(f"⚠️ {pdf_file.name} - no new content added")
-                    
+                    status_messages.append(
+                        f"⚠️ {pdf_file.name} - no new content added"
+                    )
+
             except Exception as e:
-                status_messages.append(f"❌ Error processing {pdf_file.name}: {str(e)}")
-        
+                status_messages.append(
+                    f"❌ Error processing {pdf_file.name}: {str(e)}"
+                )
+
         # Refresh the games list
         invalidate_games_cache()
         available_games = cached_games()
@@ -603,10 +582,10 @@ def rebuild_library_handler():
             f"🎯 Library rebuild complete! {total_processed} PDFs processed."
         )
         status_messages.append(f"📚 Total games available: {len(available_games)}")
-        
+
         final_status = "\n".join(status_messages)
         return final_status, gr.update(choices=available_games)
-        
+
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 
@@ -658,11 +637,19 @@ with gr.Blocks(
             # Input section - move here for better mobile UX
             with gr.Row(elem_classes=["input-row"]):
                 msg = gr.Textbox(
-                    placeholder="First select a game above, then ask your question...", 
+                    placeholder="First select a game above, then ask your question...",
                     lines=1,  # single line so Enter submits (use Shift+Enter for newline)
                     max_lines=4,  # prevent it from growing too tall on mobile
-                    scale=9,
+                    scale=8,
                     container=False,
+                )
+
+                # Cancel button positioned to the right of the textbox
+                cancel_btn = gr.Button(
+                    "⏹️",
+                    variant="stop",
+                    scale=1,
+                    visible=False,
                 )
         
         with gr.Column(scale=1, elem_classes=["sidebar"]):
@@ -683,17 +670,17 @@ with gr.Blocks(
             # Web search toggle (hidden until unlocked)
             include_web_cb = gr.Checkbox(
                 label="Include Web Search",
-                value=True,
+                value=config.ENABLE_WEB_SEARCH,
                 visible=False,
             )
 
             # Game selection (hidden until unlocked)
             game_dropdown = gr.Dropdown(
                 choices=game_choices,
-                value=[],
-                multiselect=True,  # Allow selecting several games at once
-                label="Select Game(s) (Required)",
-                info="Choose one or more games to constrain the answer",
+                value=None,
+                multiselect=False,  # Single selection only
+                label="Select Game (Required)",
+                info="Choose one game to constrain the answer",
                 visible=False,
             )
 
@@ -752,10 +739,18 @@ with gr.Blocks(
                     placeholder="Click 'Rebuild Library' to process all PDFs or 'Process New PDFs' to add only new ones",
                 )
 
-    msg.submit(
+    msg_submit_event = msg.submit(
         query_interface,
         [msg, game_dropdown, include_web_cb, chatbot, model_dropdown],
-        [msg, chatbot],
+        [msg, chatbot, cancel_btn],
+    )
+
+    # Cancel button hides itself and aborts the running job
+    cancel_btn.click(
+        lambda: gr.update(visible=False),
+        [],
+        [cancel_btn],
+        cancels=[msg_submit_event],
     )
 
     # Connect rebuild library button

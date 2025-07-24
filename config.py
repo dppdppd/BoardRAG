@@ -119,7 +119,7 @@ EVALUATOR_MODEL = os.getenv("EVALUATOR_MODEL", _config["evaluator"])
 # Enable or disable supplementary web search results in responses.
 # Set ENABLE_WEB_SEARCH=true (or 1/yes) in the environment to turn this on.
 
-ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "True").lower() in {
+ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "False").lower() in {
     "1",
     "true",
     "yes",
