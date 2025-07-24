@@ -67,8 +67,18 @@ def rebuild_library_handler():
         chroma_path = "chroma"
         data_path = "data"
 
+        # Clean existing vector store safely (avoids Windows file-lock errors)
+        import chromadb
         if os.path.exists(chroma_path):
-            shutil.rmtree(chroma_path)
+            try:
+                print("[DEBUG] Resetting existing Chroma DB via PersistentClient.reset()")
+                chromadb.PersistentClient(path=chroma_path).reset()
+            except Exception as e:
+                print(f"[DEBUG] Failed reset with {e}, attempting rmtree fallback")
+                try:
+                    shutil.rmtree(chroma_path)
+                except Exception as e2:
+                    return f"❌ Error removing old Chroma DB: {e2}", gr.update()
 
         if not os.path.exists(data_path):
             return "❌ No data directory found", gr.update()

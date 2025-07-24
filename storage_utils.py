@@ -2,12 +2,13 @@
 
 from pathlib import Path
 import json
+import config
 
 
 def get_pdf_storage_usage():
     """Calculate total disk space used by PDF files."""
     try:
-        pdf_dir = Path("data")
+        pdf_dir = Path(config.DATA_PATH)
         if not pdf_dir.exists():
             return 0, 0, "PDF directory not found"
         
