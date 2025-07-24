@@ -242,10 +242,14 @@ ARGILLA_API_URL = os.getenv("ARGILLA_API_URL")
 ARGILLA_API_KEY = os.getenv("ARGILLA_API_KEY")
 
 # ---------------------------------------------------------------------------
-# API Keys (loaded from .env)
+# API Keys and Security (loaded from .env)
 # ---------------------------------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+# Access control passwords (set in environment)
+USER_PW = os.getenv("USER_PW")
+ADMIN_PW = os.getenv("ADMIN_PW")
 
 
 def validate_config():
