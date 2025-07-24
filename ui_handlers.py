@@ -48,7 +48,7 @@ def unlock_handler(password, session_id):
 
     # Updates for original UI structure
     return (
-        gr.update(value=level),  # access_state
+        level,  # access_state
         gr.update(value=msg, visible=True),  # access_msg
         gr.update(choices=updated_games, visible=show_user),  # game_dropdown
         gr.update(visible=show_user),  # model_accordion
@@ -65,7 +65,7 @@ def rebuild_library_handler():
     """Rebuild the library from scratch."""
     try:
         chroma_path = "chroma"
-        data_path = "data"
+        data_path = config.DATA_PATH
 
         # Clean existing vector store safely (avoids Windows file-lock errors)
         import chromadb
@@ -74,11 +74,7 @@ def rebuild_library_handler():
                 print("[DEBUG] Resetting existing Chroma DB via PersistentClient.reset()")
                 chromadb.PersistentClient(path=chroma_path).reset()
             except Exception as e:
-                print(f"[DEBUG] Failed reset with {e}, attempting rmtree fallback")
-                try:
-                    shutil.rmtree(chroma_path)
-                except Exception as e2:
-                    return f"❌ Error removing old Chroma DB: {e2}", gr.update()
+                return f"❌ Error resetting Chroma DB: {e}", gr.update()
 
         if not os.path.exists(data_path):
             return "❌ No data directory found", gr.update()
@@ -123,7 +119,7 @@ def rebuild_library_handler():
 def refresh_games_handler():
     """Refresh games by processing new PDFs only."""
     try:
-        data_path = "data"
+        data_path = config.DATA_PATH
         chroma_path = "chroma"
 
         if not os.path.exists(data_path):
@@ -195,7 +191,7 @@ def upload_with_status_update(pdf_files):
         )
 
     try:
-        data_path = Path("data")
+        data_path = Path(config.DATA_PATH)
         data_path.mkdir(exist_ok=True)
 
         uploaded_count = 0
@@ -233,48 +229,84 @@ def upload_with_status_update(pdf_files):
 
 
 def delete_game_handler(game_to_delete):
-    """Delete selected game and its files."""
+    """Delete selected game and its files (fuzzy match)."""
     if not game_to_delete:
         return "❌ Please select a game to delete", gr.update()
 
+    data_root = Path(config.DATA_PATH)
+    if not data_root.exists():
+        return "❌ Data directory not found", gr.update()
+
+    candidate = data_root / game_to_delete
+    if not candidate.is_dir():
+        # try case-insensitive match
+        for p in data_root.iterdir():
+            if p.is_dir() and p.name.lower() == game_to_delete.lower():
+                candidate = p
+                break
+
+    print(f"[DEBUG] delete_game_handler requested='{game_to_delete}', matched_dir='{candidate}'")
+
+    if not candidate.is_dir():
+        avail = [p.name for p in data_root.iterdir() if p.is_dir()]
+        print(f"[DEBUG] Available dirs: {avail}")
+        empty_upd = gr.update()
+        return f"❌ Game '{game_to_delete}' not found", empty_upd, empty_upd, empty_upd
+
     try:
-        data_path = Path("data") / game_to_delete
-        if data_path.exists():
-            shutil.rmtree(data_path)
-
-        # Rebuild library to remove from vector store
+        shutil.rmtree(candidate)
         rebuild_library_handler()
-        
         available_games = get_available_games()
-        return f"✅ Deleted game '{game_to_delete}' successfully", gr.update(choices=available_games)
+        upd_games = gr.update(choices=available_games)
+        upd_pdfs = gr.update(choices=get_pdf_dropdown_choices())
+        return f"✅ Deleted game '{candidate.name}' successfully", upd_games, upd_games, upd_pdfs
     except Exception as e:
-        return f"❌ Error deleting game: {str(e)}", gr.update()
+        empty_upd = gr.update()
+        return f"❌ Error deleting game: {e}", empty_upd, empty_upd, empty_upd
 
 
-def rename_game_handler(old_name, new_name):
-    """Rename a game directory."""
-    if not old_name or not new_name:
-        return "❌ Please provide both old and new names", gr.update()
+def rename_game_handler(selected_entry, new_name):
+    """Assign or re-assign a single PDF to *new_name*.
+
+    The dropdown entry comes in the form "<current_game> - <filename>.pdf".
+    We only need the *filename* (the ID in game_names) to update the mapping.
+    """
+
+    if not selected_entry or not new_name:
+        return "❌ Please select a PDF and enter a new name", gr.update(), gr.update(), gr.update()
+
+    # Extract filename from "Game - filename.pdf" pattern
+    if " - " in selected_entry:
+        _, filename = selected_entry.split(" - ", 1)
+        filename = filename.strip()
+    else:
+        filename = selected_entry.strip()
+
+    print(f"[DEBUG] rename_game_handler: filename='{filename}', new_name='{new_name}'")
 
     try:
-        old_path = Path("data") / old_name
-        new_path = Path("data") / new_name
-        
-        if not old_path.exists():
-            return f"❌ Game '{old_name}' not found", gr.update()
-        
-        if new_path.exists():
-            return f"❌ Game '{new_name}' already exists", gr.update()
+        import chromadb
+        from query import get_chromadb_settings, suppress_chromadb_telemetry
 
-        old_path.rename(new_path)
-        
-        # Rebuild library to update game names in vector store
-        rebuild_library_handler()
-        
+        with suppress_chromadb_telemetry():
+            client = chromadb.PersistentClient(path="chroma", settings=get_chromadb_settings())
+
+        collection = client.get_or_create_collection("game_names")
+
+        # Upsert the new mapping for this single PDF
+        collection.upsert(ids=[filename], documents=[new_name])
+        print("[DEBUG] Upserted new mapping in game_names collection")
+
+        # Refresh dropdowns
         available_games = get_available_games()
-        return f"✅ Renamed '{old_name}' to '{new_name}' successfully", gr.update(choices=available_games)
+        upd_games = gr.update(choices=available_games)
+        upd_pdfs = gr.update(choices=get_pdf_dropdown_choices())
+
+        return f"✅ Assigned '{filename}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs
     except Exception as e:
-        return f"❌ Error renaming game: {str(e)}", gr.update()
+        print(f"[DEBUG] Error in rename_game_handler: {e}")
+        empty_upd = gr.update()
+        return f"❌ Error assigning PDF: {e}", empty_upd, empty_upd, empty_upd
 
 
 def set_session_storage(session_id):
@@ -383,3 +415,31 @@ def auto_unlock_interface(access_state):
          gr.update(visible=show_admin),  # rename_accordion
          gr.update(visible=show_admin),  # tech_accordion
     ) 
+
+
+def get_pdf_dropdown_choices():
+    """Return list like 'Game Name - filename.pdf' for all PDFs."""
+    pdf_files = Path(config.DATA_PATH).rglob('*.pdf')
+    name_map = get_stored_game_names()
+    choices = []
+    for p in pdf_files:
+        fname = p.name
+        game_name = name_map.get(fname, fname)
+        choices.append(f"{game_name} - {fname}")
+    return sorted(choices) 
+
+
+# ------------------------------------------------------------
+# UI helpers
+# ------------------------------------------------------------
+
+
+def update_chatbot_label(selected_game: str):
+    """Return an updated gr.Chatbot label reflecting *selected_game*.
+
+    If *selected_game* is falsy, we keep the default "Chatbot" label so the
+    component still renders nicely when no game has been chosen yet.
+    """
+    label = selected_game if selected_game else "Chatbot"
+    print(f"[DEBUG] Updating chatbot label to '{label}'")
+    return gr.update(label=label) 

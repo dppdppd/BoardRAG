@@ -106,6 +106,8 @@ THEME_CSS = """
 .custom-chatbot {
     border-radius: 10px;
     border: 1px solid #e1e5e9;
+    font-size: 12px;  
+
 }
 
 .input-row {

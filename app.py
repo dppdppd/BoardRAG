@@ -26,9 +26,10 @@ except Exception as e:
 # Import modular components
 from config_ui import INTRO_STRING, THEME_CSS, get_config_info, create_theme
 from ui_handlers import (
-    unlock_handler, rebuild_library_handler, refresh_games_handler, 
+    unlock_handler, rebuild_library_handler, refresh_games_handler,
     wipe_chat_history_handler, refresh_storage_handler, upload_with_status_update,
-    delete_game_handler, rename_game_handler,
+    delete_game_handler, rename_game_handler, get_pdf_dropdown_choices,
+    update_chatbot_label,
     load_history, auto_load_on_session_ready, auto_unlock_interface
 )
 from ui_components import query_interface
@@ -99,17 +100,18 @@ with gr.Blocks(
     with gr.Row(elem_classes=["main-content"]):
         with gr.Column(scale=3, elem_classes=["chat-column"]):
             chatbot = gr.Chatbot(
-                height="80vh", 
-                show_copy_button=True, 
+                height="80vh",
+                show_copy_button=True,
                 elem_classes=["custom-chatbot"],
                 render_markdown=True,
-                type='messages'
+                type="messages",
+                label="Chatbot",
             )
             
             # Simple processing indicator
             with gr.Row(visible=False) as progress_row:
                 gr.HTML(
-                    value='<div style="text-align: center; padding: 8px; color: #666; font-size: 14px;">Processing...</div>',
+                    value='<div style="text-align: center; padding: 8px; color: #666; font-size: 12px;">Processing...</div>',
                     elem_classes=["progress-indicator"]
                 )
             
@@ -186,7 +188,7 @@ with gr.Blocks(
                 "✏️ Assign PDF", open=False, visible=False
             ) as rename_accordion:
                 rename_game_dropdown = gr.Dropdown(
-                    choices=game_choices, label="Select Game"
+                    choices=get_pdf_dropdown_choices(), label="Select PDF"
                 )
                 new_name_tb = gr.Textbox(label="New Name")
                 rename_button = gr.Button("Rename", variant="primary")
@@ -256,6 +258,14 @@ with gr.Blocks(
         load_history,
         inputs=[game_dropdown, session_state],
         outputs=[chatbot],
+    )
+
+    # Update Chatbot panel title when game changes
+    game_dropdown.change(
+        update_chatbot_label,
+        inputs=[game_dropdown],
+        outputs=[chatbot],
+        queue=False,
     )
     
     # Auto-load conversation when session becomes available
@@ -331,14 +341,14 @@ with gr.Blocks(
     delete_button.click(
         delete_game_handler,
         inputs=[delete_game_dropdown],
-        outputs=[delete_status, game_dropdown],
+        outputs=[delete_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     )
 
     # Connect rename game button
     rename_button.click(
         rename_game_handler,
         inputs=[rename_game_dropdown, new_name_tb],
-        outputs=[rename_status, game_dropdown],
+        outputs=[rename_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     )
 
 if __name__ == "__main__":
