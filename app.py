@@ -6,6 +6,22 @@ import gradio as gr
 import config
 import uuid
 from query import get_available_games
+import os
+import pathlib
+
+# Debug: show data directory contents on startup
+print(f"[DEBUG] Runtime cwd: {os.getcwd()}")
+print(f"[DEBUG] config.DATA_PATH = {config.DATA_PATH}")
+try:
+    if os.path.exists(config.DATA_PATH):
+        files = list(pathlib.Path(config.DATA_PATH).rglob('*.pdf'))
+        print(f"[DEBUG] Found {len(files)} PDF(s) under {config.DATA_PATH}")
+        for f in files[:20]:
+            print(f"[DEBUG]  - {f}")
+    else:
+        print(f"[DEBUG] DATA_PATH does not exist on this environment")
+except Exception as e:
+    print(f"[DEBUG] Error while scanning PDFs: {e}")
 
 # Import modular components
 from config_ui import INTRO_STRING, THEME_CSS, get_config_info, create_theme
@@ -123,29 +139,26 @@ with gr.Blocks(
             )
             access_msg = gr.Markdown("", visible=False)
 
-            # Model selection (hidden until unlocked)
-            model_dropdown = gr.Dropdown(
-                choices=["claude-4-sonnet", "o3"],
-                value="o3",
-                label="Model",
-                visible=False,
-            )
-
-            # Web search toggle (hidden until unlocked)
-            include_web_cb = gr.Checkbox(
-                label="Include Web Search",
-                value=config.ENABLE_WEB_SEARCH,
-                visible=False,
-            )
-
-            # Game selection (hidden until unlocked)
+            # Game selector (always visible once unlocked)
             game_dropdown = gr.Dropdown(
                 choices=game_choices,
                 value=None,
-                multiselect=False,  # Single selection only
-                label="Select Game",
+                multiselect=False,
+                label="Game",
                 visible=False,
             )
+
+            # Model settings panel (optional)
+            with gr.Accordion("🤖 Options", open=False, visible=False) as model_accordion:
+                model_dropdown = gr.Dropdown(
+                    choices=["claude-4-sonnet", "o3"],
+                    value="o3",
+                    label="Model",
+                )
+                include_web_cb = gr.Checkbox(
+                    label="Include Web Search",
+                    value=config.ENABLE_WEB_SEARCH,
+                )
 
             # Add PDF upload section in expanding panel
             with gr.Accordion(
@@ -257,7 +270,9 @@ with gr.Blocks(
         auto_unlock_interface,
         inputs=[access_state],
         outputs=[
+            access_msg,
             game_dropdown,
+            model_accordion,
             include_web_cb,
             model_dropdown,
             upload_accordion,
@@ -275,6 +290,7 @@ with gr.Blocks(
             access_state,
             access_msg,
             game_dropdown,
+            model_accordion,
             include_web_cb,
             model_dropdown,
             upload_accordion,

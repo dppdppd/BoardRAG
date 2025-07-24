@@ -48,9 +48,10 @@ def unlock_handler(password, session_id):
 
     # Updates for original UI structure
     return (
-        level,  # access_state
-        gr.update(value=msg, visible=True),  # access_msg markdown
+        gr.update(value=level),  # access_state
+        gr.update(value=msg, visible=True),  # access_msg
         gr.update(choices=updated_games, visible=show_user),  # game_dropdown
+        gr.update(visible=show_user),  # model_accordion
         gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
         gr.update(visible=show_user),  # model_dropdown
         gr.update(visible=show_user),  # upload_accordion
@@ -356,15 +357,19 @@ def auto_unlock_interface(access_state):
 
     if show_user:
         print(f"[DEBUG] Auto-unlocking {access_state} interface from storage")
+        msg_update = gr.update(value=f"### ✅ Auto-restored {access_state} access", visible=True)
     else:
         print(f"[DEBUG] Keeping interface locked – no valid access restored")
+        msg_update = gr.update(visible=False)
 
     return (
-        gr.update(choices=updated_games, visible=show_user),  # game_dropdown
-        gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
-        gr.update(visible=show_user),  # model_dropdown
-        gr.update(visible=show_user),  # upload_accordion
-        gr.update(visible=show_admin),  # delete_accordion
-        gr.update(visible=show_admin),  # rename_accordion
-        gr.update(visible=show_admin),  # tech_accordion
+         msg_update,
+         gr.update(choices=updated_games, visible=show_user),  # game_dropdown
+         gr.update(visible=show_user),  # model_accordion
+         gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
+         gr.update(visible=show_user),  # model_dropdown
+         gr.update(visible=show_user),  # upload_accordion
+         gr.update(visible=show_admin),  # delete_accordion
+         gr.update(visible=show_admin),  # rename_accordion
+         gr.update(visible=show_admin),  # tech_accordion
     ) 
