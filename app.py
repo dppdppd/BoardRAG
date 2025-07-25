@@ -188,14 +188,14 @@ with gr.Blocks(
         # Right sidebar for controls and settings
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Prompt history – starts open and is shown once unlocked
-            with gr.Accordion("🔖 Bookmarks", open=True, visible=False) as prompt_accordion:
+            with gr.Accordion("🔖 Questions", open=True, visible=False) as prompt_accordion:
                 prompt_radio = gr.Radio(value=None, choices=[], label="", interactive=True, elem_id="prompt-radio")
                 # Hidden component to pass user index to JavaScript
                 user_index_hidden = gr.Number(value=-1, visible=False)
 
-            # Manage bookmarks accordion
-            with gr.Accordion("🗑️ Manage Bookmarks", open=False, visible=False) as delete_bookmark_accordion:
-                delete_bookmark_btn = gr.Button("Delete selected bookmark", variant="stop", interactive=False)
+            # Manage Questions accordion
+            with gr.Accordion("🗑️ Manage Questions", open=False, visible=False) as delete_bookmark_accordion:
+                delete_bookmark_btn = gr.Button("Delete selected question", variant="stop", interactive=False)
 
             # Model settings panel (optional)
             with gr.Accordion("⚙️ Options", open=False, visible=False) as model_accordion:
