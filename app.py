@@ -48,10 +48,17 @@ function(prompt_text) {
 
   const msgs = wrapper.querySelectorAll('[data-role="user"], .message.user');
   const txt = prompt_text.trim();
+  
+  // Find the LAST occurrence instead of first (most recent duplicate)
   let target = null;
   msgs.forEach(m => {
-    if (!target && m.innerText.trim().startsWith(txt)) target = m;
+    const msgText = m.innerText.trim();
+    // Use exact match for truncated prompts or startsWith for full prompts
+    if (msgText === txt || msgText.startsWith(txt)) {
+      target = m; // This will keep the last match
+    }
   });
+  
   if (!target) return;
 
   // Find nearest scrollable ancestor (including wrapper)

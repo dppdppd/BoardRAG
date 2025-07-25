@@ -24,6 +24,25 @@ def invalidate_games_cache():
     pass
 
 
+def build_deduplicated_prompt_list(history):
+    """Build a deduplicated list of user prompts with their indices for scrolling."""
+    prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
+    
+    # Deduplicate prompts while preserving latest occurrence index
+    seen_prompts = {}
+    unique_prompts = []
+    
+    for i, prompt in enumerate(prompts):
+        if prompt not in seen_prompts:
+            seen_prompts[prompt] = i
+            unique_prompts.append(prompt)
+        else:
+            # Update index to latest occurrence
+            seen_prompts[prompt] = i
+    
+    return unique_prompts, seen_prompts
+
+
 def unlock_handler(password, session_id):
     """Handle password unlock functionality."""
     if config.ADMIN_PW and password == config.ADMIN_PW:
@@ -451,9 +470,9 @@ def load_history(selected_game, session_id):
     if history:
         print(f"[DEBUG] First message preview: {history[0]}")
 
-    # Build prompt list for radio component
-    prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
-    display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in prompts]
+    # Build deduplicated prompt list for radio component
+    unique_prompts, prompt_indices = build_deduplicated_prompt_list(history)
+    display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in unique_prompts]
     return gr.update(value=history), gr.update(choices=display_prompts, value=None)
 
 
@@ -486,38 +505,16 @@ def auto_load_on_session_ready(session_id, current_game_selection):
         # Restore the last selected game and its conversation
         history = load_conv(session_id, last_game)
         print(f"[DEBUG] ✅ Restoring last game '{last_game}' with {len(history)} messages")
-        # Build prompt list
-        prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
-        if prompts:
-            import html as _html
-            items = []
-            for p in prompts:
-                disp = (p[:60] + "…") if len(p) > 60 else p
-                items.append(f"<div class='prompt-item' onclick=\"scrollPrompt('{_html.escape(p)}')\">{_html.escape(disp)}</div>")
-            css = "<style>#prompt-list .prompt-item{display:block;padding:4px 8px;margin:3px 0;border:1px solid #ddd;border-radius:4px;background:#f7f7f7;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}#prompt-list .prompt-item:hover{background:#eaeaea;}</style>"
-            html_value = css + "".join(items)
-        else:
-            html_value = "<em>No prompts yet</em>"
-        script = "<script>if(typeof scrollPrompt!=='function'){window.scrollPrompt = function(t){const c=document.querySelector('.custom-chatbot');if(!c)return;const msgs=c.querySelectorAll('[data-role\\=\"user\"], .message.user');msgs.forEach(function(e){if(e.innerText.trim().startsWith(t.trim())){e.scrollIntoView({behavior:'smooth',block:'start'});}});};}</script>"
-        return gr.update(value=last_game), gr.update(value=history), gr.update(choices=prompts, value=None)
+        # Build deduplicated prompt list
+        unique_prompts, prompt_indices = build_deduplicated_prompt_list(history)
+        return gr.update(value=last_game), gr.update(value=history), gr.update(choices=unique_prompts, value=None)
     elif current_game_selection and session_id:
         # Load conversation for currently selected game
         history = load_conv(session_id, current_game_selection)
         print(f"[DEBUG] Loading current game '{current_game_selection}' with {len(history)} messages")
-        # Build prompt list for current selection
-        prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
-        if prompts:
-            import html as _html
-            items = []
-            for p in prompts:
-                disp = (p[:60] + "…") if len(p) > 60 else p
-                items.append(f"<div class='prompt-item' onclick=\"scrollPrompt('{_html.escape(p)}')\">{_html.escape(disp)}</div>")
-            css = "<style>#prompt-list .prompt-item{display:block;padding:4px 8px;margin:3px 0;border:1px solid #ddd;border-radius:4px;background:#f7f7f7;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}#prompt-list .prompt-item:hover{background:#eaeaea;}</style>"
-            html_value = css + "".join(items)
-        else:
-            html_value = "<em>No prompts yet</em>"
-        script = "<script>if(typeof scrollPrompt!=='function'){window.scrollPrompt = function(t){const c=document.querySelector('.custom-chatbot');if(!c)return;const msgs=c.querySelectorAll('[data-role\\=\"user\"], .message.user');msgs.forEach(function(e){if(e.innerText.trim().startsWith(t.trim())){e.scrollIntoView({behavior:'smooth',block:'start'});}});};}</script>"
-        return gr.update(), gr.update(value=history), gr.update(choices=prompts, value=None)
+        # Build deduplicated prompt list for current selection
+        unique_prompts, prompt_indices = build_deduplicated_prompt_list(history)
+        return gr.update(), gr.update(value=history), gr.update(choices=unique_prompts, value=None)
     else:
         print(f"[DEBUG] No valid game to restore, returning empty")
     

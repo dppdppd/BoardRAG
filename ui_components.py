@@ -13,8 +13,11 @@ def query_interface(message, selected_games, include_web, chat_history, selected
 
     def _prompt_update(history):
         """Return a gradio update for the prompt radio component."""
-        prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
-        display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in prompts]
+        # Import here to avoid circular imports
+        from ui_handlers import build_deduplicated_prompt_list
+        
+        unique_prompts, _ = build_deduplicated_prompt_list(history)
+        display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in unique_prompts]
         return gr.update(choices=display_prompts, value=None)
 
     # Basic validation --------------------------------------------------
