@@ -100,12 +100,10 @@ THEME_CSS = """
 }
 
 .chat-column {
-    min-height: 600px;
+/*    min-height: 600px;*/
 }
 
 .custom-chatbot {
-    border-radius: 10px;
-    border: 1px solid #e1e5e9;
     font-size: 12px;  
 
 }
@@ -138,6 +136,57 @@ THEME_CSS = """
     background: rgba(255,255,255,0.15);
 }
 
+/* Ensure selected radio stays highlighted */
+#prompt-radio label:has(input:checked),
+#prompt-radio input[type="radio"]:checked + label {
+    background: rgba(255,255,255,0.25);
+}
+
+/* Bookmarks panel with height limit and scrolling */
+#prompt-radio {
+    max-height: 800px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Custom scrollbar styling for bookmarks panel */
+#prompt-radio::-webkit-scrollbar {
+    width: 6px;
+}
+
+#prompt-radio::-webkit-scrollbar-track {
+    background: rgba(255,255,255,0.1);
+    border-radius: 3px;
+}
+
+#prompt-radio::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.3);
+    border-radius: 3px;
+}
+
+#prompt-radio::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.5);
+}
+
+/* Custom scrollbar styling for chat box */
+.custom-chatbot::-webkit-scrollbar {
+    width: 6px;
+}
+
+.custom-chatbot::-webkit-scrollbar-track {
+    background: rgba(255,255,255,0.1);
+    border-radius: 3px;
+}
+
+.custom-chatbot::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,0.3);
+    border-radius: 3px;
+}
+
+.custom-chatbot::-webkit-scrollbar-thumb:hover {
+    background: rgba(255,255,255,0.5);
+}
+
     .custom-chatbot .message { 
         font-size: 12px;
     }
@@ -165,6 +214,23 @@ THEME_CSS = """
     }*/
 }
 
+/* ------------------------------------------------------------------
+   Disable Gradio "processing" flash on the bookmarks accordion only
+   ------------------------------------------------------------------*/
+#prompt-radio[aria-busy="true"],
+.gr-accordion:has(#prompt-radio)[aria-busy="true"] {
+    opacity: 1 !important; /* cancel dimming */
+    animation: none !important; /* cancel pulse */
+}
+
+#prompt-radio .gr-skeleton,
+#prompt-radio .animate-pulse {
+    display: none !important; /* hide shimmer bar */
+}
+
+#prompt-radio > .absolute.inset-0 {
+    display: none !important; /* remove click-blocking overlay */
+} 
 
 """
 
@@ -189,9 +255,11 @@ def get_config_info():
 **ADMIN_PW:** {"✅ Set" if config.ADMIN_PW else "❌ Missing"}  
 """
 
+
 def create_theme():
     """Create and return the Gradio theme with smaller base text size."""
     return gr.themes.Default(
         font=[gr.themes.GoogleFont("Georgia"), "Arial", "sans-serif"],
-        text_size="sm",
+        spacing_size=gr.themes.sizes.spacing_sm,
+        radius_size=gr.themes.sizes.radius_none,
     ) 

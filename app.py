@@ -39,6 +39,15 @@ from storage_utils import format_storage_info
 # JavaScript helper – scroll Chatbot to a user prompt selected
 # -------------------------------------------------------------
 
+def _prompt_update_app(history):
+    """Update prompt radio component after streaming is complete."""
+    # Import here to avoid circular imports
+    from ui_handlers import build_indexed_prompt_list, format_prompt_choices
+    
+    indexed_prompts = build_indexed_prompt_list(history)
+    display_prompts = format_prompt_choices(indexed_prompts)
+    return gr.update(choices=display_prompts, value=None)
+
 SCROLL_TO_PROMPT_JS = '''
 function(userMessageIndex) {
   if (userMessageIndex < 0 || isNaN(userMessageIndex)) return;
@@ -179,10 +188,14 @@ with gr.Blocks(
         # Right sidebar for controls and settings
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Prompt history – starts open and is shown once unlocked
-            with gr.Accordion("📝 Chat History", open=True, visible=False) as prompt_accordion:
+            with gr.Accordion("🔖 Bookmarks", open=True, visible=False) as prompt_accordion:
                 prompt_radio = gr.Radio(value=None, choices=[], label="", interactive=True, elem_id="prompt-radio")
                 # Hidden component to pass user index to JavaScript
                 user_index_hidden = gr.Number(value=-1, visible=False)
+
+            # Manage bookmarks accordion
+            with gr.Accordion("🗑️ Manage Bookmarks", open=False, visible=False) as delete_bookmark_accordion:
+                delete_bookmark_btn = gr.Button("Delete selected bookmark", variant="stop", interactive=False)
 
             # Model settings panel (optional)
             with gr.Accordion("⚙️ Options", open=False, visible=False) as model_accordion:
@@ -283,15 +296,21 @@ with gr.Blocks(
     msg_submit_event = msg.submit(
         query_interface,
         [msg, game_dropdown, include_web_cb, chatbot, model_dropdown, session_state],
-        [msg, chatbot, cancel_btn, prompt_radio],
-        show_progress="full",  # This enables the processing overlay on all outputs
+        [msg, chatbot, cancel_btn, msg],  # Fourth output controls msg interactivity
+        show_progress=False,  # No global progress - use gr.Progress() in function instead
+    ).then(
+        # Update prompt_radio after streaming is complete
+        lambda history: _prompt_update_app(history),
+        inputs=[chatbot],
+        outputs=[prompt_radio],
+        show_progress=False  # Prevent flashing on bookmarks panel
     )
 
-    # Cancel button hides itself and aborts the running job
+    # Cancel button hides itself and aborts the running job, re-enables text input
     cancel_btn.click(
-        lambda: gr.update(visible=False),
+        lambda: (gr.update(visible=False), gr.update(interactive=True)),
         [],
-        [cancel_btn],
+        [cancel_btn, msg],
         cancels=[msg_submit_event],
     )
 
@@ -347,6 +366,7 @@ with gr.Blocks(
         outputs=[
             game_dropdown,
             prompt_accordion,
+            delete_bookmark_accordion,
             model_accordion,
             include_web_cb,
             model_dropdown,
@@ -366,6 +386,7 @@ with gr.Blocks(
             access_state,
             game_dropdown,
             prompt_accordion,
+            delete_bookmark_accordion,
             model_accordion,
             include_web_cb,
             model_dropdown,
@@ -418,6 +439,27 @@ with gr.Blocks(
         rename_game_handler,
         inputs=[rename_game_dropdown, new_name_tb],
         outputs=[rename_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
+    )
+
+    # -----------------------------------------------
+    # Bookmark deletion wiring
+    # -----------------------------------------------
+    # Enable delete button based on selection
+    prompt_radio.change(
+        lambda choice: gr.update(interactive=bool(choice)),
+        inputs=[prompt_radio],
+        outputs=[delete_bookmark_btn],
+        show_progress=False,
+    )
+
+    # Delete bookmark click
+    from ui_handlers import delete_bookmark as _delete_bookmark_handler
+
+    delete_bookmark_btn.click(
+        _delete_bookmark_handler,
+        inputs=[prompt_radio, chatbot, game_dropdown, session_state],
+        outputs=[chatbot, prompt_radio, delete_bookmark_btn],
+        show_progress=False,
     )
 
     # Attach JS scroll on selection

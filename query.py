@@ -627,7 +627,12 @@ def query_rag(
         filtered_results = []
         for doc, score in all_results:
             source = doc.metadata.get("source", "").lower()
-            if any(f in source for f in filters):
+            # Normalize source filename the same way we create filter names
+            import os
+            source_filename = os.path.basename(source)
+            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_")
+            
+            if any(f in normalized_source for f in filters):
                 filtered_results.append((doc, score))
                 if len(filtered_results) >= 40:  # Increased to maintain context
                     break
@@ -762,8 +767,18 @@ def stream_query_rag(
     identical to the non-streaming response (minus *response_text*).
     """
 
+    print("\n" + "="*80)
+    print("🔍 STREAM_QUERY_RAG DEBUG START")
+    print("="*80)
+    print(f"📝 Query text: '{query_text}'")
+    print(f"🎮 Selected game: {selected_game}")
+    print(f"🎮 Game names: {game_names}")
+    print(f"💬 Chat history length: {len(chat_history) if chat_history else 0}")
+    print(f"🌐 Web search enabled: {enable_web}")
+
     # ---- Build prompt and retrieve context (reuse logic from query_rag) ----
 
+    print("🔗 Connecting to the database...")
     embedding_function = get_embedding_function()
     with suppress_chromadb_telemetry():
         persistent_client = chromadb.PersistentClient(
@@ -772,64 +787,141 @@ def stream_query_rag(
         db = Chroma(client=persistent_client, embedding_function=embedding_function)
 
     search_query = f"{chat_history}\n\n{query_text}" if chat_history else query_text
+    
+    print("🔍 Searching in the database…")
+    print(f"  Search query (first 500 chars): '{search_query[:500]}'")
+    if len(search_query) > 500:
+        print(f"  ... (truncated, full length: {len(search_query)} chars)")
+    if selected_game:
+        print(f"  Filtering by game: '{selected_game}'")
 
     # Fetch DB results (same k logic)
     k_results = 75 if selected_game else 40
+    print(f"🔎 Fetching {k_results} results from database...")
     all_results = db.similarity_search_with_score(search_query, k=k_results)
+    print(f"📊 Database returned {len(all_results)} total results")
+
+    if len(all_results) == 0:
+        print("❌ ERROR: No results from database! This will cause 'I don't know' response")
+        print("  Check if:")
+        print("  - Database has been populated")
+        print("  - Embedding function is working")
+        print("  - Query is not too specific")
 
     # Apply optional game filter
     if selected_game:
         filters = [selected_game] if isinstance(selected_game, str) else selected_game
+        print(f"🎯 Applying game filter: {filters}")
         filtered_results = []
-        for doc, score in all_results:
+        for i, (doc, score) in enumerate(all_results):
             source = doc.metadata.get("source", "").lower()
-            if any(f in source for f in filters):
+            # Normalize source filename the same way we create filter names
+            # Extract just the filename from the path and normalize it
+            import os
+            source_filename = os.path.basename(source)
+            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_")
+            
+            print(f"  Result {i+1}: source='{source}', normalized='{normalized_source}', score={score:.4f}")
+            if any(f in normalized_source for f in filters):
                 filtered_results.append((doc, score))
+                print(f"    ✅ PASSED filter ('{normalized_source}' contains: {[f for f in filters if f in normalized_source]})")
                 if len(filtered_results) >= 40:
+                    print(f"    🛑 Reached limit of 40 filtered results")
                     break
+            else:
+                print(f"    ❌ FAILED filter ('{normalized_source}' doesn't contain any of: {filters})")
         results = filtered_results
+        print(f"📊 After filtering: {len(results)} results remain")
+        
+        if len(results) == 0:
+            print("❌ ERROR: No results after game filtering! This will cause 'I don't know' response")
+            print("  Check if:")
+            print("  - Game filter matches actual source filenames")
+            print("  - Documents were ingested with correct source metadata")
+            print("  - Filter is not too restrictive")
     else:
         results = all_results
+        print(f"📊 Using all {len(results)} results (no game filter)")
+
+    # Show final results summary
+    print(f"\n📋 FINAL RESULTS SUMMARY:")
+    print(f"  Total results for context: {len(results)}")
+    if results:
+        print("  Top 5 results:")
+        for i, (doc, score) in enumerate(results[:5]):
+            source = doc.metadata.get("source", "unknown")
+            content_preview = doc.page_content[:100].replace('\n', ' ')
+            print(f"    {i+1}. Score: {score:.4f}, Source: {source}")
+            print(f"       Content: '{content_preview}...'")
+    else:
+        print("  ❌ NO RESULTS - This will definitely cause 'I don't know' response!")
 
     # Supplement with web search if enabled
     effective_web_search = ENABLE_WEB_SEARCH if enable_web is None else enable_web
+    print(f"\n🌐 Web search check: effective_web_search={effective_web_search}")
     if effective_web_search:
         quoted_game = f'"{game_names[0]}" ' if game_names else ""
         pre_query = f"{quoted_game}{query_text}"
         web_query = rewrite_search_query(pre_query)
+        print(f"🌐 Web search enabled – fetching top {WEB_SEARCH_RESULTS} snippets with query: {web_query!r}…")
         web_docs = perform_web_search(web_query, k=WEB_SEARCH_RESULTS)
+        print(f"🌐 Retrieved {len(web_docs)} web snippets")
         if web_docs:
             results.extend([(doc, 0.0) for doc in web_docs])
+            print(f"📊 Total results after adding web: {len(results)}")
+        else:
+            print("⚠️ No web results found")
 
     # Build prompt
+    print("🔮 Building the prompt …")
     context_text = "\n\n---\n\n".join([doc.page_content for doc, _ in results])
+    print(f"📏 Context length: {len(context_text)} characters")
+    if len(context_text) == 0:
+        print("❌ ERROR: Empty context! This will cause 'I don't know' response")
+    else:
+        print(f"📄 Context preview (first 300 chars): '{context_text[:300]}...'")
 
     composite_question = (
         f"Previous conversation (for context):\n{chat_history}\n\nUser's latest question: {query_text}"
         if chat_history
         else query_text
     )
+    print(f"❓ Composite question length: {len(composite_question)} characters")
 
     try:
+        print("📝 Loading improved prompt template...")
         prompt = load_jinja2_prompt(
             context=context_text,
             question=composite_question,
             template_name="rag_query_improved.txt",
         )
-    except Exception:
+        print("✅ Loaded improved template successfully")
+    except Exception as e:
+        print(f"⚠️ Failed to load improved template: {e}")
+        print("📝 Falling back to default template...")
         prompt = load_jinja2_prompt(context=context_text, question=composite_question)
+        print("✅ Loaded default template successfully")
+
+    print(f"📏 Final prompt length: {len(prompt)} characters")
+    print(f"📄 Prompt preview (first 500 chars): '{prompt[:500]}...'")
 
     # ---- Create LLM (streaming enabled) ----
+
+    print("🍳 Generating the response (streaming)…")
+    print(f"🤖 Using LLM Provider: {LLM_PROVIDER}")
+    print(f"🤖 Using Model: {GENERATOR_MODEL}")
 
     model_kwargs = {"streaming": True}
     if LLM_PROVIDER.lower() == "ollama":
         from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
-
+        print(f"🤖 Creating Ollama model with base_url: {OLLAMA_URL}")
         model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL, **model_kwargs)
     elif LLM_PROVIDER.lower() == "anthropic":
+        print("🤖 Creating Anthropic model...")
         model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0, **model_kwargs)
     elif LLM_PROVIDER.lower() == "openai":
         temp = 1 if GENERATOR_MODEL == "o3" else 0
+        print(f"🤖 Creating OpenAI model with temperature: {temp}")
         model = ChatOpenAI(model=GENERATOR_MODEL, temperature=temp, **model_kwargs)
     else:
         raise ValueError("Unsupported LLM_PROVIDER: " + LLM_PROVIDER)
@@ -837,17 +929,22 @@ def stream_query_rag(
     # ---- Token generator ----
 
     def _token_gen():
-        for chunk in model.stream(prompt):
-            # chunk can be ChatGenerationChunk or similar; extract text portion
-            text_part = getattr(chunk, "content", None)
-            if text_part is None and hasattr(chunk, "message"):
-                text_part = getattr(chunk.message, "content", "")
-            if text_part is None:
-                text_part = str(chunk)
-            if text_part:
-                yield text_part
+        try:
+            for chunk in model.stream(prompt):
+                # chunk can be ChatGenerationChunk or similar; extract text portion
+                text_part = getattr(chunk, "content", None)
+                if text_part is None and hasattr(chunk, "message"):
+                    text_part = getattr(chunk.message, "content", "")
+                if text_part is None:
+                    text_part = str(chunk)
+                if text_part:
+                    yield text_part
+        except Exception as e:
+            print(f"❌ ERROR during token generation: {e}")
+            raise
 
     sources = [doc.metadata.get("id", None) for doc, _ in results]
+    print(f"📚 Final sources: {sources}")
 
     meta = {
         "sources": sources,
@@ -855,6 +952,10 @@ def stream_query_rag(
         "prompt": prompt,
         "original_query": query_text,
     }
+
+    print("="*80)
+    print("🔍 STREAM_QUERY_RAG DEBUG END")
+    print("="*80 + "\n")
 
     return _token_gen(), meta
 

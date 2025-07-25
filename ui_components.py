@@ -9,27 +9,18 @@ from conversation_store import save as save_conv
 
 
 def query_interface(message, selected_games, include_web, chat_history, selected_model, session_id):
-    """Stream RAG answer; third output controls Cancel button visibility; fourth output updates the prompt history list."""
-
-    def _prompt_update(history):
-        """Return a gradio update for the prompt radio component."""
-        # Import here to avoid circular imports
-        from ui_handlers import build_indexed_prompt_list, format_prompt_choices
-        
-        indexed_prompts = build_indexed_prompt_list(history)
-        display_prompts = format_prompt_choices(indexed_prompts)
-        return gr.update(choices=display_prompts, value=None)
+    """Stream RAG answer; first output clears msg, second updates chatbot, third controls Cancel button visibility, fourth controls msg interactivity."""
 
     # Basic validation --------------------------------------------------
     if not message.strip():
-        yield "", chat_history, gr.update(visible=False), gr.update()
+        yield "", chat_history, gr.update(visible=False), gr.update(interactive=True)
         return
 
     if not selected_games:
         error_message = "⚠️ Please select a specific game from the dropdown before asking questions."
         chat_history.append({"role": "user", "content": message})
         chat_history.append({"role": "assistant", "content": error_message})
-        yield "", chat_history, gr.update(visible=False), gr.update()
+        yield "", chat_history, gr.update(visible=False), gr.update(interactive=True)
         return
 
     # Update provider based on dropdown --------------------------------
@@ -65,7 +56,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
 
     if not game_filter:
         print(f"🎮 [DEBUG] No game filter - this will return no results!")
-        yield "", chat_history, gr.update(visible=False), gr.update()
+        yield "", chat_history, gr.update(visible=False), gr.update(interactive=True)
         return
 
     # Get recent conversation history for context -----------------------
@@ -73,31 +64,13 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     formatted_history = "\n".join([
         f"{msg['role'].capitalize()}: {msg['content']}" for msg in history_snippets
     ])
-
-    # Placeholder bot msg ----------------------------------------------
+    # Add user message but wait for content before showing assistant response
     chat_history.append({"role": "user", "content": message})
-    chat_history.append({"role": "assistant", "content": ""})
-    yield "", chat_history, gr.update(visible=True), gr.update()
+    yield "", chat_history, gr.update(visible=True), gr.update(interactive=False)
 
     # Stream generation with progress feedback -------------------------
     from query import stream_query_rag  # local import to avoid cycles
     
-    start_time = time.time()
-    
-    # Show initial processing message
-    processing_msgs = [
-        "🤖 Processing your request...",
-        "📚 Searching through game documents...",
-        "🧠 Generating response...",
-        "✍️ Streaming answer..."
-    ]
-    
-    progress_msg = processing_msgs[0]
-    chat_history[-1] = {"role": "assistant", "content": progress_msg}
-    yield "", chat_history, gr.update(visible=True), gr.update()
-    
-    time.sleep(0.5)  # Brief pause to show initial message
-
     token_generator, meta = stream_query_rag(
         message,
         game_filter,
@@ -107,26 +80,20 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     )
 
     bot_response = ""
-    token_count = 0
-    last_progress_update = time.time()
+    assistant_message_added = False
     
     for token in token_generator:
         bot_response += token
-        token_count += 1
-        current_time = time.time()
-        elapsed = current_time - start_time
         
-        # Update progress message every 2 seconds if no tokens are coming
-        if current_time - last_progress_update > 2.0 and token_count < 10:
-            progress_idx = min(int(elapsed / 3), len(processing_msgs) - 1)
-            timer_text = f" (⏱️ {elapsed:.1f}s)"
-            progress_with_timer = processing_msgs[progress_idx] + timer_text
-            chat_history[-1] = {"role": "assistant", "content": progress_with_timer}
-            yield "", chat_history, gr.update(visible=True), gr.update()
-            last_progress_update = current_time
-        elif bot_response.strip():  # Once we have actual content, show it
+        # Only add assistant message when we have actual content
+        if bot_response.strip() and not assistant_message_added:
+            chat_history.append({"role": "assistant", "content": bot_response})
+            assistant_message_added = True
+            yield "", chat_history, gr.update(visible=True), gr.update(interactive=False)
+        elif assistant_message_added:
+            # Update existing assistant message
             chat_history[-1] = {"role": "assistant", "content": bot_response}
-            yield "", chat_history, gr.update(visible=True), gr.update()
+            yield "", chat_history, gr.update(visible=True), gr.update(interactive=False)
 
     # After stream finishes, compute source citations -------------------
     sources = meta.get("sources", [])
@@ -187,6 +154,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
 
     final_msg = f"{bot_response}\n\n**Source:** {sources_str}"
     chat_history[-1] = {"role": "assistant", "content": final_msg}
+    
     # Persist conversation
     if selected_games_list and session_id:
         print(f"[DEBUG] Saving conversation for game '{selected_games_list[0]}' and session '{session_id}' with {len(chat_history)} messages")
@@ -194,7 +162,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     else:
         print(f"[DEBUG] NOT saving conversation - selected_games_list: {selected_games_list}, session_id: '{session_id}'")
 
-    yield "", chat_history, gr.update(visible=False), _prompt_update(chat_history) 
+    yield "", chat_history, gr.update(visible=False), gr.update(interactive=True) 
 
 
 def create_password_interface():
