@@ -23,39 +23,85 @@ def invalidate_games_cache():
     """Clear any cached games - for this simplified version, just pass."""
     pass
 
+# Global mapping from choice index to user message index
+_prompt_choice_to_user_index = {}
 
-def build_deduplicated_prompt_list(history):
-    """Build a deduplicated list of user prompts with their indices for scrolling."""
-    prompts = [m.get("content", "") for m in history if m.get("role") == "user"]
+
+def build_indexed_prompt_list(history):
+    """Build a list of user prompts with their actual positions in the chat for precise scrolling."""
+    user_prompts = []
+    user_message_index = 0  # Tracks which user message this is (0, 1, 2...)
     
-    # Deduplicate prompts while preserving latest occurrence index
-    seen_prompts = {}
-    unique_prompts = []
+    for message in history:
+        if message.get("role") == "user":
+            prompt_text = message.get("content", "")
+            # Store prompt text and its position among user messages for accurate scrolling
+            user_prompts.append((prompt_text, user_message_index))
+            user_message_index += 1
     
-    for i, prompt in enumerate(prompts):
-        if prompt not in seen_prompts:
-            seen_prompts[prompt] = i
-            unique_prompts.append(prompt)
+    return user_prompts
+
+
+def format_prompt_choices(indexed_prompts):
+    """Format indexed prompts for display in Gradio Radio component."""
+    global _prompt_choice_to_user_index
+    _prompt_choice_to_user_index = {}  # Reset mapping
+    
+    # First pass: count occurrences of each prompt text
+    prompt_counts = {}
+    display_texts = []
+    
+    for prompt, user_index in indexed_prompts:
+        display_text = (prompt[:60] + "…") if len(prompt) > 60 else prompt
+        display_texts.append(display_text)
+        prompt_counts[display_text] = prompt_counts.get(display_text, 0) + 1
+    
+    # Second pass: add numbering only for duplicates
+    prompt_instance_counts = {}
+    choices = []
+    
+    for i, (prompt, user_index) in enumerate(indexed_prompts):
+        display_text = display_texts[i]
+        
+        # Track which instance of this prompt we're on
+        prompt_instance_counts[display_text] = prompt_instance_counts.get(display_text, 0) + 1
+        current_instance = prompt_instance_counts[display_text]
+        
+        # Only add numbering if there are multiple instances
+        if prompt_counts[display_text] > 1:
+            if current_instance == 1:
+                # First instance gets no number
+                final_display = display_text
+            else:
+                # Subsequent instances get numbered
+                final_display = f"{display_text} {current_instance}"
         else:
-            # Update index to latest occurrence
-            seen_prompts[prompt] = i
+            # Unique prompts get no numbering
+            final_display = display_text
+        
+        # Store mapping from choice text to user message index
+        _prompt_choice_to_user_index[final_display] = user_index
+        choices.append(final_display)
     
-    return unique_prompts, seen_prompts
+    return choices
+
+
+def get_user_index_for_choice(choice_text):
+    """Get the user message index for a given choice text for scrolling."""
+    global _prompt_choice_to_user_index
+    return _prompt_choice_to_user_index.get(choice_text, -1)
 
 
 def unlock_handler(password, session_id):
     """Handle password unlock functionality."""
     if config.ADMIN_PW and password == config.ADMIN_PW:
         level = "admin"
-        msg = "### ✅ Admin access granted"
         print(f"[DEBUG] Admin password correct - unlocking interface")
     elif config.USER_PW and password == config.USER_PW:
         level = "user"
-        msg = "### ✅ User access granted"
         print(f"[DEBUG] User password correct - unlocking interface")
     else:
         level = "none"
-        msg = "### ❌ Invalid access code"
 
     # Determine visibilities
     show_user = level in {"user", "admin"}
@@ -65,10 +111,12 @@ def unlock_handler(password, session_id):
     invalidate_games_cache()
     updated_games = get_available_games() if show_user else []
 
+    # Hide access panel after successful login
+    show_access_panel = level == "none"
+
     # Updates for original UI structure (added prompt accordion)
     return (
         level,  # access_state
-        gr.update(value=msg, visible=True),  # access_msg
         gr.update(choices=updated_games, visible=show_user),  # game_dropdown
         gr.update(visible=show_user),  # prompt_accordion
         gr.update(visible=show_user),  # model_accordion
@@ -78,6 +126,7 @@ def unlock_handler(password, session_id):
         gr.update(visible=show_admin),  # delete_accordion
         gr.update(visible=show_admin),  # rename_accordion
         gr.update(visible=show_admin),  # tech_accordion
+        gr.update(visible=show_access_panel),  # password_tb
     )
 
 
@@ -470,9 +519,9 @@ def load_history(selected_game, session_id):
     if history:
         print(f"[DEBUG] First message preview: {history[0]}")
 
-    # Build deduplicated prompt list for radio component
-    unique_prompts, prompt_indices = build_deduplicated_prompt_list(history)
-    display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in unique_prompts]
+    # Build indexed prompt list for radio component
+    indexed_prompts = build_indexed_prompt_list(history)
+    display_prompts = format_prompt_choices(indexed_prompts)
     return gr.update(value=history), gr.update(choices=display_prompts, value=None)
 
 
@@ -505,16 +554,18 @@ def auto_load_on_session_ready(session_id, current_game_selection):
         # Restore the last selected game and its conversation
         history = load_conv(session_id, last_game)
         print(f"[DEBUG] ✅ Restoring last game '{last_game}' with {len(history)} messages")
-        # Build deduplicated prompt list
-        unique_prompts, prompt_indices = build_deduplicated_prompt_list(history)
-        return gr.update(value=last_game), gr.update(value=history), gr.update(choices=unique_prompts, value=None)
+        # Build indexed prompt list
+        indexed_prompts = build_indexed_prompt_list(history)
+        prompt_choices = format_prompt_choices(indexed_prompts)
+        return gr.update(value=last_game), gr.update(value=history), gr.update(choices=prompt_choices, value=None)
     elif current_game_selection and session_id:
         # Load conversation for currently selected game
         history = load_conv(session_id, current_game_selection)
         print(f"[DEBUG] Loading current game '{current_game_selection}' with {len(history)} messages")
-        # Build deduplicated prompt list for current selection
-        unique_prompts, prompt_indices = build_deduplicated_prompt_list(history)
-        return gr.update(), gr.update(value=history), gr.update(choices=unique_prompts, value=None)
+        # Build indexed prompt list for current selection
+        indexed_prompts = build_indexed_prompt_list(history)
+        prompt_choices = format_prompt_choices(indexed_prompts)
+        return gr.update(), gr.update(value=history), gr.update(choices=prompt_choices, value=None)
     else:
         print(f"[DEBUG] No valid game to restore, returning empty")
     
@@ -532,15 +583,15 @@ def auto_unlock_interface(access_state):
     from query import get_available_games
     updated_games = get_available_games() if show_user else []
 
+    # Hide access panel if user is logged in
+    show_access_panel = access_state == "none"
+
     if show_user:
         print(f"[DEBUG] Auto-unlocking {access_state} interface from storage")
-        msg_update = gr.update(value=f"### ✅ Auto-restored {access_state} access", visible=True)
     else:
         print(f"[DEBUG] Keeping interface locked – no valid access restored")
-        msg_update = gr.update(visible=False)
 
     return (
-         msg_update,
          gr.update(choices=updated_games, visible=show_user),  # game_dropdown
          gr.update(visible=show_user),  # prompt_accordion
          gr.update(visible=show_user),  # model_accordion
@@ -550,6 +601,7 @@ def auto_unlock_interface(access_state):
          gr.update(visible=show_admin),  # delete_accordion
          gr.update(visible=show_admin),  # rename_accordion
          gr.update(visible=show_admin),  # tech_accordion
+         gr.update(visible=show_access_panel),  # password_tb
     ) 
 
 

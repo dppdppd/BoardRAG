@@ -14,10 +14,10 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     def _prompt_update(history):
         """Return a gradio update for the prompt radio component."""
         # Import here to avoid circular imports
-        from ui_handlers import build_deduplicated_prompt_list
+        from ui_handlers import build_indexed_prompt_list, format_prompt_choices
         
-        unique_prompts, _ = build_deduplicated_prompt_list(history)
-        display_prompts = [(p[:60] + "…") if len(p) > 60 else p for p in unique_prompts]
+        indexed_prompts = build_indexed_prompt_list(history)
+        display_prompts = format_prompt_choices(indexed_prompts)
         return gr.update(choices=display_prompts, value=None)
 
     # Basic validation --------------------------------------------------
@@ -229,13 +229,13 @@ def create_interface_components():
     )
     
     chat_interface = gr.Chatbot(
-        height="80vh", 
+        height="50vh", 
         show_copy_button=True, 
         render_markdown=True,
         type='messages'
     )
     
-    history_display = gr.Markdown("Chat History", visible=False)
+    history_display = gr.Markdown("Bookmarks", visible=False)
     
     upload_area = gr.File(
         file_types=[".pdf"],

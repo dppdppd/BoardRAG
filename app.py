@@ -29,7 +29,7 @@ from ui_handlers import (
     unlock_handler, rebuild_library_handler, refresh_games_handler,
     wipe_chat_history_handler, refresh_storage_handler, upload_with_status_update,
     delete_game_handler, rename_game_handler, get_pdf_dropdown_choices,
-    update_chatbot_label,
+    update_chatbot_label, get_user_index_for_choice,
     load_history, auto_load_on_session_ready, auto_unlock_interface
 )
 from ui_components import query_interface
@@ -40,40 +40,41 @@ from storage_utils import format_storage_info
 # -------------------------------------------------------------
 
 SCROLL_TO_PROMPT_JS = '''
-function(prompt_text) {
-  if (!prompt_text) return;
+function(userMessageIndex) {
+  if (userMessageIndex < 0 || isNaN(userMessageIndex)) return;
 
   const wrapper = document.querySelector('.custom-chatbot');
   if (!wrapper) return;
 
-  const msgs = wrapper.querySelectorAll('[data-role="user"], .message.user');
-  const txt = prompt_text.trim();
+  // Find all user messages in the chat
+  const userMsgs = wrapper.querySelectorAll('[data-role="user"], .message.user');
   
-  // Find the LAST occurrence instead of first (most recent duplicate)
-  let target = null;
-  msgs.forEach(m => {
-    const msgText = m.innerText.trim();
-    // Use exact match for truncated prompts or startsWith for full prompts
-    if (msgText === txt || msgText.startsWith(txt)) {
-      target = m; // This will keep the last match
-    }
-  });
+  // Get the specific user message by its index
+  const target = userMsgs[userMessageIndex];
   
   if (!target) return;
 
-  // Find nearest scrollable ancestor (including wrapper)
-  let scrollParent = target.parentElement;
-  while (scrollParent && scrollParent !== document.body) {
-    const style = getComputedStyle(scrollParent);
-    if (/(auto|scroll)/.test(style.overflowY)) break;
-    scrollParent = scrollParent.parentElement;
+  // Find nearest scrollable ancestor
+  let scrollParent = wrapper;
+  let current = target;
+  while (current && current !== document.body) {
+    const style = getComputedStyle(current);
+    if (/(auto|scroll)/.test(style.overflowY) && current.scrollHeight > current.clientHeight) {
+      scrollParent = current;
+      break;
+    }
+    current = current.parentElement;
   }
-  if (!scrollParent) scrollParent = wrapper;
 
+  // Calculate position and scroll
   const parentRect = scrollParent.getBoundingClientRect();
   const targetRect = target.getBoundingClientRect();
-  const offset = targetRect.top - parentRect.top + scrollParent.scrollTop - 6; // small padding
-  scrollParent.scrollTo({ top: offset, behavior: 'smooth' });
+  const offset = targetRect.top - parentRect.top + scrollParent.scrollTop - 20; // padding for visibility
+  
+  scrollParent.scrollTo({ 
+    top: Math.max(0, offset), 
+    behavior: 'smooth' 
+  });
 }
 '''
 # -----------------------------------------------------------------------------
@@ -180,6 +181,8 @@ with gr.Blocks(
             # Prompt history – starts open and is shown once unlocked
             with gr.Accordion("📝 Chat History", open=True, visible=False) as prompt_accordion:
                 prompt_radio = gr.Radio(value=None, choices=[], label="", interactive=True, elem_id="prompt-radio")
+                # Hidden component to pass user index to JavaScript
+                user_index_hidden = gr.Number(value=-1, visible=False)
 
             # Model settings panel (optional)
             with gr.Accordion("⚙️ Options", open=False, visible=False) as model_accordion:
@@ -271,7 +274,6 @@ with gr.Blocks(
                 placeholder="🔐 Enter Access Code",
                 label="Access"
             )
-            access_msg = gr.Markdown("", visible=False)
 
     # --------------------------------------------------------------
     # Event handlers
@@ -303,20 +305,19 @@ with gr.Blocks(
     # Hook into chatbot changes to detect when it's been cleared via the built-in button
     def detect_chatbot_clear(chat_history, selected_game, session_id):
         """Detect if chatbot was cleared and sync the stored conversation."""
-        print(f"🚨 CHATBOT CHANGE DETECTED! chat_history length: {len(chat_history) if chat_history else 0}")
-        print(f"[DEBUG] selected_game: '{selected_game}', session_id: '{session_id}'")
-        
-        # If chatbot is empty but we have a game and session, clear stored conversation
+        # Only act if chatbot is empty but we have a game and session
         if (not chat_history or len(chat_history) == 0) and selected_game and session_id:
-            print(f"[DEBUG] Chatbot appears to be cleared - clearing stored conversation")
-            from conversation_store import save as save_conv
-            save_conv(session_id, selected_game, [])
-            print(f"[DEBUG] Stored conversation cleared for game '{selected_game}'")
-            # Also clear the prompt radio
-            return gr.update(choices=[], value=None)
-        else:
-            print(f"[DEBUG] Chatbot not empty or missing game/session - no action taken")
-            return gr.update()
+            from conversation_store import save as save_conv, get as load_conv
+            
+            # Check if we actually had stored conversation before clearing
+            stored_history = load_conv(session_id, selected_game)
+            if stored_history and len(stored_history) > 0:
+                print(f"[DEBUG] Chatbot cleared - clearing stored conversation for '{selected_game}'")
+                save_conv(session_id, selected_game, [])
+                # Also clear the prompt radio
+                return gr.update(choices=[], value=None)
+        
+        return gr.update()
     
     chatbot.change(
         detect_chatbot_clear,
@@ -344,7 +345,6 @@ with gr.Blocks(
         auto_unlock_interface,
         inputs=[access_state],
         outputs=[
-            access_msg,
             game_dropdown,
             prompt_accordion,
             model_accordion,
@@ -354,6 +354,7 @@ with gr.Blocks(
             delete_accordion,
             rename_accordion,
             tech_accordion,
+            password_tb,
         ],
     )
 
@@ -363,7 +364,6 @@ with gr.Blocks(
         inputs=[password_tb, session_state],
         outputs=[
             access_state,
-            access_msg,
             game_dropdown,
             prompt_accordion,
             model_accordion,
@@ -373,6 +373,7 @@ with gr.Blocks(
             delete_accordion,
             rename_accordion,
             tech_accordion,
+            password_tb,
         ],
     )
 
@@ -420,7 +421,18 @@ with gr.Blocks(
     )
 
     # Attach JS scroll on selection
-    prompt_radio.change(fn=None, inputs=[prompt_radio], outputs=[], js=SCROLL_TO_PROMPT_JS)
+    prompt_radio.change(
+        fn=get_user_index_for_choice,
+        inputs=[prompt_radio], 
+        outputs=[user_index_hidden]
+    )
+    
+    user_index_hidden.change(
+        fn=None,
+        inputs=[user_index_hidden],
+        outputs=[],
+        js=SCROLL_TO_PROMPT_JS
+    )
 
 if __name__ == "__main__":
     demo.launch(

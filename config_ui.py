@@ -156,13 +156,13 @@ THEME_CSS = """
         padding: 10px;
     }
     
-    .chat-column {
+/*    .chat-column {
         min-height: 400px;
     }
     
     .custom-chatbot {
         height: 60vh !important;
-    }
+    }*/
 }
 
 
