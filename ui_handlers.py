@@ -248,6 +248,7 @@ def unlock_handler(password, session_id):
         level,  # access_state
         gr.update(choices=updated_games, visible=show_user),  # game_dropdown
         gr.update(visible=show_user),  # prompt_accordion
+        gr.update(visible=show_user),  # delete_bookmark_accordion
         gr.update(visible=show_user),  # model_accordion
         gr.update(value=config.ENABLE_WEB_SEARCH, visible=show_user),  # include_web_cb
         gr.update(visible=show_user),  # model_dropdown

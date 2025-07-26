@@ -160,7 +160,7 @@ with gr.Blocks(
             )
 
             chatbot = gr.Chatbot(
-                height="80vh",
+                height="60vh",
                 show_copy_button=True,
                 elem_classes=["custom-chatbot"],
                 render_markdown=True,

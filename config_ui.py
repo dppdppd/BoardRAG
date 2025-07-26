@@ -187,9 +187,26 @@ THEME_CSS = """
     background: rgba(255,255,255,0.5);
 }
 
-    .custom-chatbot .message { 
-        font-size: 12px;
+    /* Force bubble padding & gap overrides */
+    .custom-chatbot .message {
+        padding: 4px 8px !important;
     }
+
+    /* Gradio 4 puts text into .markdown-body; tighten that too */
+    .custom-chatbot .markdown-body {
+        font-size: 12px !important;
+        line-height: 1.3 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+
+    /* Ensure container gap override sticks even with Tailwind gap utilities */
+    .custom-chatbot > div {
+        gap: 4px !important;
+    }
+
+    /* Uncomment next rule to visually verify selector hits (add red outline) */
+    /* .custom-chatbot .message { outline: 1px solid red; } */
 
 .input-row {
     margin-top: 10px;
@@ -202,16 +219,9 @@ THEME_CSS = """
 /* Mobile responsive adjustments */
 @media (max-width: 768px) {
     .main-content {
-        padding: 10px;
+        padding: 2px;
     }
     
-/*    .chat-column {
-        min-height: 400px;
-    }
-    
-    .custom-chatbot {
-        height: 60vh !important;
-    }*/
 }
 
 /* ------------------------------------------------------------------
