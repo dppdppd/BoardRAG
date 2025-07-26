@@ -424,7 +424,7 @@ with gr.Blocks(
     upload_files.upload(
         upload_with_status_update,
         inputs=[upload_files],
-        outputs=[upload_status, game_dropdown],
+        outputs=[upload_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     ).then(lambda: gr.update(visible=True), outputs=[upload_status])
 
     # Connect delete game button

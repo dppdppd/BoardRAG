@@ -501,23 +501,27 @@ def upload_with_status_update(pdf_files):
                 uploaded_count += 1
 
         if uploaded_count > 0:
-            available_games = get_available_games()
+            # Automatically process the newly uploaded PDFs so they are instantly usable
+            process_msg, updated_dropdown = refresh_games_handler()
+            # Combine messages for clarity
+            combined_msg = (
+                f"✅ Uploaded {uploaded_count} PDF(s) successfully!\n" + process_msg
+            )
             return (
-                gr.update(
-                    value=f"✅ Uploaded {uploaded_count} PDF(s) successfully! Use 'Process New PDFs' to add them to the library.",
-                    visible=True
-                ),
-                gr.update(choices=available_games),
+                gr.update(value=combined_msg, visible=True),
+                updated_dropdown,  # game_dropdown
+                updated_dropdown,  # delete_game_dropdown
+                updated_dropdown,  # rename_game_dropdown
             )
         else:
             return (
                 gr.update(value="❌ No valid PDF files found", visible=True),
-                gr.update(),
+                gr.update(), gr.update(), gr.update(),
             )
     except Exception as e:
         return (
             gr.update(value=f"❌ Upload failed: {str(e)}", visible=True),
-            gr.update(),
+            gr.update(), gr.update(), gr.update(),
         )
 
 
