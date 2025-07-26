@@ -200,18 +200,18 @@ THEME_CSS = """
 .custom-chatbot .md {
     font-size: 14px !important;
     line-height: 3 !important;
-    padding: 0 !important;
+    padding: 4 !important;
     margin: 0 !important;
 }
 
 .custom-chatbot .bubble {
-    margin: 2px 2px !important;
+    margin: 4px 4px !important;
 }
 
 .custom-chatbot .bot-row {
     width: 96% !important;
     max-width: 96% !important;
-    margin: 2px 2px !important;
+    margin: 4px 4px !important;
 }
 
 
