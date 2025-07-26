@@ -187,26 +187,50 @@ THEME_CSS = """
     background: rgba(255,255,255,0.5);
 }
 
-    /* Force bubble padding & gap overrides */
-    .custom-chatbot .message {
-        padding: 4px 8px !important;
-    }
+/* Force bubble padding & gap overrides */
+.custom-chatbot .message {
+    padding: 0px 0px !important;
+}
 
-    /* Gradio 4 puts text into .markdown-body; tighten that too */
-    .custom-chatbot .markdown-body {
-        font-size: 12px !important;
-        line-height: 1.3 !important;
-        padding: 0 !important;
-        margin: 0 !important;
-    }
+.custom-chatbot .message-content {
+    margin: 0px 0px !important;
+}
 
-    /* Ensure container gap override sticks even with Tailwind gap utilities */
-    .custom-chatbot > div {
-        gap: 4px !important;
-    }
+/* Gradio 4 puts text into .md; tighten that too */
+.custom-chatbot .md {
+    font-size: 14px !important;
+    line-height: 3 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
 
-    /* Uncomment next rule to visually verify selector hits (add red outline) */
-    /* .custom-chatbot .message { outline: 1px solid red; } */
+.custom-chatbot .bubble {
+    margin: 2px 2px !important;
+}
+
+.custom-chatbot .bot-row {
+    width: 96% !important;
+    max-width: 96% !important;
+    margin: 2px 2px !important;
+}
+
+
+/* Ensure container gap override sticks even with Tailwind gap utilities */
+.custom-chatbot > div {
+    gap: 0px !important;
+}
+
+/* Remove left/right padding that Gradio adds around the scroll area */
+.custom-chatbot > div:first-child {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+
+/* Remove default horizontal margins on each bubble */
+.custom-chatbot .message {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+}
 
 .input-row {
     margin-top: 10px;
