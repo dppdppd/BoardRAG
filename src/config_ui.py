@@ -189,11 +189,11 @@ THEME_CSS = """
 
 /* Force bubble padding & gap overrides */
 .custom-chatbot .message {
-    padding: 0px 0px !important;
+    padding: 2px 2px !important;
 }
 
 .custom-chatbot .message-content {
-    margin: 0px 0px !important;
+    margin: 2px 2px !important;
 }
 
 /* Gradio 4 puts text into .md; tighten that too */
@@ -201,7 +201,7 @@ THEME_CSS = """
     font-size: 14px !important;
     line-height: 3 !important;
     padding: 4 !important;
-    margin: 0 !important;
+    margin: 2 !important;
 }
 
 .custom-chatbot .bubble {

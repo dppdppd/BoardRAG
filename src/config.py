@@ -85,7 +85,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 
 # LLM Provider selection: "openai", "anthropic", or "ollama"
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
 
 # Model configurations by provider
 MODEL_CONFIGS = {
