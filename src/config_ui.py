@@ -228,8 +228,8 @@ THEME_CSS = """
 
 /* Remove default horizontal margins on each bubble */
 .custom-chatbot .message {
-    margin-left: 0 !important;
-    margin-right: 0 !important;
+    margin-left: 2 !important;
+    margin-right: 2 !important;
 }
 
 .input-row {
