@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import json
-import config
+from . import config
 
 
 def get_pdf_storage_usage():

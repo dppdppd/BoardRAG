@@ -4,8 +4,8 @@ import time
 from pathlib import Path
 import gradio as gr
 
-from query import stream_query_rag
-from conversation_store import save as save_conv
+from .query import stream_query_rag
+from .conversation_store import save as save_conv
 
 
 def query_interface(message, selected_games, include_web, chat_history, selected_model, session_id):
@@ -42,7 +42,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
         selected_games_list = selected_games or []
 
     # Map to filename filters -------------------------------------------
-    from query import get_available_games
+    from .query import get_available_games
     mapping = getattr(get_available_games, "_filename_mapping", {})
     game_filter = []
     for game in selected_games_list:
@@ -69,7 +69,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     yield "", chat_history, gr.update(visible=True), gr.update(interactive=False)
 
     # Stream generation with progress feedback -------------------------
-    from query import stream_query_rag  # local import to avoid cycles
+    from .query import stream_query_rag  # local import to avoid cycles
     
     token_generator, meta = stream_query_rag(
         message,
@@ -184,7 +184,7 @@ def create_password_interface():
 
 def create_interface_components():
     """Create the main interface components."""
-    from query import get_available_games
+    from .query import get_available_games
     
     # Get available games for the dropdown
     available_games = get_available_games()

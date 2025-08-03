@@ -270,7 +270,7 @@ THEME_CSS = """
 
 def get_config_info():
     """Get configuration information for display."""
-    import config
+    from . import config
     return f"""
 ## ⚙️ Configuration
 

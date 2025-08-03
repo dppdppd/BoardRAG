@@ -3,9 +3,9 @@ Refactored Gradio app for running the RAG model with a modular interface.
 """
 
 import gradio as gr
-import config
+from src import config
 import uuid
-from query import get_available_games
+from src.query import get_available_games
 import os
 import pathlib
 
@@ -24,16 +24,16 @@ except Exception as e:
     print(f"[DEBUG] Error while scanning PDFs: {e}")
 
 # Import modular components
-from config_ui import INTRO_STRING, THEME_CSS, get_config_info, create_theme
-from ui_handlers import (
+from src.config_ui import INTRO_STRING, THEME_CSS, get_config_info, create_theme
+from src.handlers import (
     unlock_handler, rebuild_library_handler, refresh_games_handler,
     wipe_chat_history_handler, refresh_storage_handler, upload_with_status_update,
     delete_game_handler, rename_game_handler, get_pdf_dropdown_choices,
     update_chatbot_label, get_user_index_for_choice,
     load_history, auto_load_on_session_ready, auto_unlock_interface
 )
-from ui_components import query_interface
-from storage_utils import format_storage_info
+from src.ui_components import query_interface
+from src.storage_utils import format_storage_info
 
 # -------------------------------------------------------------
 # JavaScript helper – scroll Chatbot to a user prompt selected
@@ -42,7 +42,7 @@ from storage_utils import format_storage_info
 def _prompt_update_app(history):
     """Update prompt radio component after streaming is complete."""
     # Import here to avoid circular imports
-    from ui_handlers import build_indexed_prompt_list, format_prompt_choices
+    from src.handlers import build_indexed_prompt_list, format_prompt_choices
     
     indexed_prompts = build_indexed_prompt_list(history)
     display_prompts = format_prompt_choices(indexed_prompts)
@@ -98,6 +98,11 @@ def cached_games():
     if _cached_games is None:
         _cached_games = get_available_games()
     return _cached_games
+
+def clear_games_cache():
+    """Clear the cached games list to force refresh."""
+    global _cached_games
+    _cached_games = None
 
 # -----------------------------------------------------------------------------
 # Main Gradio interface
@@ -326,7 +331,7 @@ with gr.Blocks(
         """Detect if chatbot was cleared and sync the stored conversation."""
         # Only act if chatbot is empty but we have a game and session
         if (not chat_history or len(chat_history) == 0) and selected_game and session_id:
-            from conversation_store import save as save_conv, get as load_conv
+            from src.conversation_store import save as save_conv, get as load_conv
             
             # Check if we actually had stored conversation before clearing
             stored_history = load_conv(session_id, selected_game)
@@ -453,7 +458,7 @@ with gr.Blocks(
     )
 
     # Delete bookmark click
-    from ui_handlers import delete_bookmark as _delete_bookmark_handler
+    from src.handlers import delete_bookmark as _delete_bookmark_handler
 
     delete_bookmark_btn.click(
         _delete_bookmark_handler,

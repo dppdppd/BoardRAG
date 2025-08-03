@@ -12,7 +12,7 @@ the same.
 from langchain_openai import OpenAIEmbeddings
 
 # Project configuration
-from config import LLM_PROVIDER, EMBEDDER_MODEL, OLLAMA_URL
+from .config import LLM_PROVIDER, EMBEDDER_MODEL, OLLAMA_URL
 
 
 def get_embedding_function():

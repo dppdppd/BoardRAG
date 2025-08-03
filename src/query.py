@@ -31,7 +31,7 @@ from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.schema.document import Document
 # config imports extended
-from config import (
+from .config import (
     CHROMA_PATH,
     GENERATOR_MODEL,
     LLM_PROVIDER,
@@ -48,7 +48,7 @@ from config import (
     ENABLE_SEARCH_REWRITE,
     SEARCH_REWRITE_MODEL,
 )
-from embedding_function import get_embedding_function
+from .embedding_function import get_embedding_function
 from templates.load_jinja_template import load_jinja2_prompt
 
 # Optional import for web search; only loaded when enabled to avoid extra dependency at runtime
@@ -60,7 +60,7 @@ if ENABLE_WEB_SEARCH:
 
 # Global config ----------------------------------------------------------------
 # Importing here to avoid circular deps and keep single source of truth.
-from config import (
+from .config import (
     CHROMA_PATH,
     GENERATOR_MODEL,
     LLM_PROVIDER,
@@ -201,7 +201,7 @@ def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
     pdf_context = ""
     try:
         # Construct full path to PDF
-        from config import DATA_PATH
+        from .config import DATA_PATH
 
         pdf_path = Path(DATA_PATH) / filename
 
