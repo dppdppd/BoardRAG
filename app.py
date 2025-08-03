@@ -117,19 +117,48 @@ with gr.Blocks(
     session_state = gr.State(value="")  # holds session_id
     browser_state = gr.BrowserState([
         "",  # session_id
-        "none"  # access_state
+        "none",  # access_state
+        "{}"  # conversations JSON string
     ], storage_key="boardrag_state", secret="v1")
 
     # Restore or create session on page load
     def restore_session(saved):
-        saved_session, saved_access = (saved or [None, None]) if isinstance(saved, list) else (None, None)
+        # Expecting list [session_id, access_state, conversations]
+        if isinstance(saved, list) and len(saved) >= 3:
+            saved_session, saved_access, saved_convs_serialized = saved[0], saved[1], saved[2]
+            import json
+            try:
+                saved_convs = json.loads(saved_convs_serialized) if isinstance(saved_convs_serialized, str) else {}
+            except Exception as e:
+                print(f"[DEBUG] Could not parse saved conversations JSON: {e}")
+                saved_convs = {}
+        else:
+            saved_session, saved_access, saved_convs = None, None, {}
+
         if not saved_session:
             saved_session = str(uuid.uuid4())
             print(f"[DEBUG] Generated new session id: {saved_session}")
         else:
             print(f"[DEBUG] Restored existing session id from browser storage: {saved_session}")
         print(f"[DEBUG] Restored access state: {saved_access}")
-        return saved_session, saved_access or "none", [saved_session, saved_access or "none"]
+        print(f"[DEBUG] Restored conversations keys: {list(saved_convs.keys()) if isinstance(saved_convs, dict) else 'N/A'}")
+
+        # Prime the in-memory store with conversations from the browser
+        try:
+            from src import conversation_store as _cs
+            for game, hist in (saved_convs or {}).items():
+                _cs.save(saved_session, game, hist)
+        except Exception as e:
+            print(f"[DEBUG] Failed priming in-memory conversations: {e}")
+
+        import json
+        try:
+            convs_serialized_out = json.dumps(saved_convs, ensure_ascii=False)
+        except Exception as e:
+            print(f"[DEBUG] Failed to serialize conversations for BrowserState on load: {e}")
+            convs_serialized_out = "{}"
+
+        return saved_session, saved_access or "none", [saved_session, saved_access or "none", convs_serialized_out]
 
     demo.load(
         fn=restore_session,
@@ -139,7 +168,21 @@ with gr.Blocks(
 
     # Keep browser_state in sync whenever either value changes
     def persist_to_browser(sid, acc):
-        return [sid, acc]
+        # Assemble current conversations for this session id
+        import json
+        try:
+            from src import conversation_store as _cs
+            convs = _cs._STORE.get(sid, {}) if sid else {}
+        except Exception as e:
+            print(f"[DEBUG] Error collecting conversations for browser persist: {e}")
+            convs = {}
+        # Serialize conversations to JSON string for safe BrowserState storage
+        try:
+            convs_serialized = json.dumps(convs, ensure_ascii=False)
+        except Exception as e:
+            print(f"[DEBUG] Failed to JSON-serialize conversations: {e}")
+            convs_serialized = "{}"
+        return [sid, acc, convs_serialized]
 
     gr.on([
         session_state.change,
@@ -309,6 +352,11 @@ with gr.Blocks(
         inputs=[chatbot],
         outputs=[prompt_radio],
         show_progress=False  # Prevent flashing on bookmarks panel
+    ).then(
+        persist_to_browser,
+        inputs=[session_state, access_state],
+        outputs=[browser_state],
+        show_progress=False
     )
 
     # Cancel button hides itself and aborts the running job, re-enables text input
@@ -418,7 +466,12 @@ with gr.Blocks(
         wipe_chat_history_handler,
         inputs=[game_dropdown, session_state],
         outputs=[rebuild_status, chatbot, prompt_radio]
-    ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
+    ).then(lambda: gr.update(visible=True), outputs=[rebuild_status]).then(
+        persist_to_browser,
+        inputs=[session_state, access_state],
+        outputs=[browser_state],
+        show_progress=False
+    )
 
     # Connect refresh storage button
     refresh_storage_button.click(
@@ -465,6 +518,11 @@ with gr.Blocks(
         inputs=[prompt_radio, chatbot, game_dropdown, session_state],
         outputs=[chatbot, prompt_radio, delete_bookmark_btn],
         show_progress=False,
+    ).then(
+        persist_to_browser,
+        inputs=[session_state, access_state],
+        outputs=[browser_state],
+        show_progress=False
     )
 
     # Attach JS scroll on selection

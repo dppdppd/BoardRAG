@@ -25,7 +25,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
 
     # Update provider based on dropdown --------------------------------
     if selected_model:
-        import config
+        from . import config
         model_lower = selected_model.lower()
         if "claude" in model_lower:
             config.LLM_PROVIDER = "anthropic"

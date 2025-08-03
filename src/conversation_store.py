@@ -23,14 +23,7 @@ _STORE_PATH = Path("conversations.json")
 _LOCK = threading.Lock()
 
 # In-memory cache -----------------------------------------------------------
-_STORE: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
-if _STORE_PATH.exists():
-    try:
-        _STORE = json.loads(_STORE_PATH.read_text(encoding="utf-8"))
-        # Validate and clean up any old tuple format data
-        _cleanup_old_format()
-    except Exception:
-        _STORE = {}
+_STORE: Dict[str, Dict[str, List[Dict[str, str]]]] = {}  # pure in-memory – nothing is loaded from disk
 
 def _cleanup_old_format() -> None:
     """Remove any conversations using the old tuple format."""
@@ -54,10 +47,11 @@ def _cleanup_old_format() -> None:
         _flush()
 
 def _flush() -> None:
-    """Write the in-memory store to disk atomically."""
-    tmp_path = _STORE_PATH.with_suffix(".tmp")
-    tmp_path.write_text(json.dumps(_STORE, ensure_ascii=False), encoding="utf-8")
-    tmp_path.replace(_STORE_PATH)
+    """No-op flush – browser stores state in IndexedDB now."""
+    # Previously this wrote to a conversations.json file on disk, but we no longer
+    # persist any conversation data server-side. State is kept in memory only for
+    # the lifetime of the request so nothing to do here.
+    pass
 
 def get(session_id: str, game: str) -> List[Dict[str, str]]:
     """Return saved history in messages format or empty list."""
@@ -67,34 +61,24 @@ def get(session_id: str, game: str) -> List[Dict[str, str]]:
 def get_last_game(session_id: str) -> str | None:
     """Return the last selected game for this user, or None."""
     with _LOCK:
-        if session_id not in _STORE and _STORE_PATH.exists():
-            try:
-                fresh = json.loads(_STORE_PATH.read_text(encoding="utf-8"))
-                _STORE.update(fresh)
-            except Exception as e:
-                print(f"[DEBUG] Could not reload conversations.json: {e}")
+
         return _STORE.get(session_id, {}).get("_last_game")
 
 def save(session_id: str, game: str, history: List[Dict[str, str]]) -> None:
     """Persist *history* for (*session_id*, *game*) in messages format."""
     print(f"[DEBUG] conversation_store.save called: session_id='{session_id}', game='{game}', history_length={len(history)}")
+    # We keep conversations only in memory while the user session is active
+    # (no server-side disk storage). This still allows the running Python
+    # process to access recent history during the interaction lifecycle.
     with _LOCK:
         user_data = _STORE.setdefault(session_id, {})
         user_data[game] = history
-        # Track the last selected game for this user
         user_data["_last_game"] = game
-        print(f"[DEBUG] Updated _STORE for session '{session_id}', now has games: {list(user_data.keys())}")
-        _flush()
-        print(f"[DEBUG] Conversation saved and flushed to disk")
 
 def wipe_all() -> None:
     """Delete all stored conversations."""
     with _LOCK:
         _STORE.clear()
-        _flush()
-        # Also remove the file
-        if _STORE_PATH.exists():
-            _STORE_PATH.unlink()
 
 def ensure_session(session_val: str | None) -> str:
     """Return *session_val* or generate & return a new UUID string."""
