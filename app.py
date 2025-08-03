@@ -248,8 +248,8 @@ with gr.Blocks(
             # Model settings panel (optional)
             with gr.Accordion("⚙️ Options", open=False, visible=False) as model_accordion:
                 model_dropdown = gr.Dropdown(
-                    choices=["claude-sonnet-4-20250514", "o3"],
-                    value="claude-sonnet-4-20250514",
+                    choices=["[Anthropic] Claude Sonnet 4", "[OpenAI] o3"],
+                    value="[Anthropic] Claude Sonnet 4",
                     label="Model",
                 )
                 include_web_cb = gr.Checkbox(
