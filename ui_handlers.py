@@ -263,7 +263,7 @@ def unlock_handler(password, session_id):
 def rebuild_library_handler():
     """Rebuild the library from scratch."""
     try:
-        chroma_path = "chroma"
+        chroma_path = config.CHROMA_PATH
         data_path = config.DATA_PATH
 
         # Clean existing vector store safely (avoids Windows file-lock errors)
@@ -359,14 +359,20 @@ def refresh_games_handler():
     """Refresh games by processing new PDFs only."""
     try:
         data_path = config.DATA_PATH
-        chroma_path = "chroma"
+        chroma_path = config.CHROMA_PATH
 
         if not os.path.exists(data_path):
             return "❌ No data directory found", gr.update()
 
         stored_games_dict = get_stored_game_names()
         stored_games = set(stored_games_dict.values())  # existing game names
-        all_game_dirs = {p.name for p in Path(data_path).iterdir() if p.is_dir()}
+        # Exclude the Chroma persistence directory if it lives inside DATA_PATH
+        chroma_dir_name = Path(config.CHROMA_PATH).name
+        all_game_dirs = {
+            p.name
+            for p in Path(data_path).iterdir()
+            if p.is_dir() and p.name != chroma_dir_name
+        }
         new_games = all_game_dirs - stored_games
 
         if not new_games:
