@@ -14,6 +14,7 @@ from langchain_chroma import Chroma
 try:
     # When run as a module (python -m src.visualize_db_argilla)
     from .config import (
+        CHROMA_PATH as DEFAULT_CHROMA_PATH,
         disable_chromadb_telemetry,
         get_chromadb_settings,
         suppress_chromadb_telemetry,
@@ -26,6 +27,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     
     from src.config import (
+        CHROMA_PATH as DEFAULT_CHROMA_PATH,
         disable_chromadb_telemetry,
         get_chromadb_settings,
         suppress_chromadb_telemetry,
@@ -41,7 +43,8 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 load_dotenv()
 ARGILLA_API_URL = os.getenv("ARGILLA_API_URL")
 ARGILLA_API_KEY = os.getenv("ARGILLA_API_KEY")
-CHROMA_PATH = os.getenv("CHROMA_PATH")
+# Resolve vector DB directory – allow override via env var but fall back to config default
+CHROMA_PATH = os.getenv("CHROMA_PATH", DEFAULT_CHROMA_PATH)
 
 
 def get_all_instances_database() -> dict:

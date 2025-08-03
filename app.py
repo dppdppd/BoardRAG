@@ -257,6 +257,10 @@ with gr.Blocks(
                     value=config.ENABLE_WEB_SEARCH,
                 )
 
+                # Download all conversations (markdown)
+                download_conv_btn = gr.Button("⬇️ Download All Conversations")
+                download_conv_file = gr.File(label="All Conversations", visible=False)
+
             # Add PDF upload section in expanding panel
             with gr.Accordion(
                 "📤 Add New Game", open=False, visible=False
@@ -490,6 +494,48 @@ with gr.Blocks(
         delete_game_handler,
         inputs=[delete_game_dropdown],
         outputs=[delete_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
+    )
+
+    # Export all conversations as markdown
+    def _export_all_conversations(session_id):
+        import os, tempfile, textwrap
+        from src import conversation_store as _cs
+        import gradio as _gr
+
+        conversations = _cs._STORE.get(session_id, {}) if session_id else {}
+        if not conversations:
+            return _gr.update(visible=False)
+
+        lines: list[str] = ["# BoardRAG Conversations", ""]
+        for game, history in conversations.items():
+            if game.startswith("_"):
+                continue  # skip metadata
+            lines.append(f"## {game}\n")
+            for msg in history:
+                role = msg.get("role", "").capitalize()
+                content = msg.get("content", "")
+                # Indent assistant replies
+                if role == "Assistant":
+                    prefix = "> "  # blockquote for assistant
+                    wrapped = textwrap.fill(content, width=100)
+                    indented = "\n".join(prefix + line for line in wrapped.splitlines())
+                    lines.append(indented + "\n")
+                else:
+                    lines.append(f"**{role}:** {content}\n")
+            lines.append("\n")
+
+        md_content = "\n".join(lines)
+        tmp_dir = tempfile.gettempdir()
+        file_path = os.path.join(tmp_dir, f"boardrag_conversations_{session_id}.md")
+        with open(file_path, "w", encoding="utf-8") as fp:
+            fp.write(md_content)
+        return _gr.update(value=file_path, visible=True)
+
+    download_conv_btn.click(
+        _export_all_conversations,
+        inputs=[session_state],
+        outputs=[download_conv_file],
+        show_progress=False,
     )
 
     # Connect rename game button

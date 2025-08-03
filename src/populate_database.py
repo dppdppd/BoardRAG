@@ -9,6 +9,7 @@ import argparse
 import os
 import shutil
 import warnings
+import re
 from typing import List
 
 import chromadb
@@ -99,14 +100,72 @@ def load_documents(target_paths: List[str] | None = None):
 
 
 def split_documents(documents: List[Document]):
-    text_splitter = RecursiveCharacterTextSplitter(
+    """
+    Perform section-aware chunking of PDF pages.
+
+    1. Each PDF *page* is scanned for rule-style headers (e.g. "1. SETUP").
+    2. Pages are first split on those headers into smaller *section* documents.
+    3. Any resulting section that is still larger than CHUNK_SIZE is further
+       divided by `RecursiveCharacterTextSplitter` while preserving paragraph
+       boundaries ("\n\n", "\n", " ").
+
+    This keeps logical rule sections together and dramatically improves RAG
+    retrieval quality compared with naive fixed-width splitting.
+    """
+
+    HEADER_RE = re.compile(r"^\s*(?:\d+\.)?\s*[A-Z][A-Z0-9 &'\-/]{2,}\s*$")
+
+    def _split_on_headers(page_doc: Document) -> List[Document]:
+        """Split a single PDF page into sections based on detected headers."""
+        lines = page_doc.page_content.splitlines()
+        current_header = "intro"
+        buffer: list[str] = []
+        out: List[Document] = []
+
+        def _flush(buf: list[str], header: str):
+            if not buf:
+                return
+            content = "\n".join(buf).strip()
+            if content:
+                meta = dict(page_doc.metadata)
+                meta["section"] = header
+                out.append(Document(page_content=content, metadata=meta))
+
+        for line in lines:
+            if HEADER_RE.match(line):
+                _flush(buffer, current_header)
+                buffer = []
+                current_header = line.strip()
+            else:
+                buffer.append(line)
+        _flush(buffer, current_header)
+
+        # If no headers were found, return the original page so that downstream
+        # logic still sees it.
+        return out or [page_doc]
+
+    # 1️⃣ First pass – header splitting
+    section_docs: List[Document] = []
+    for page in documents:
+        section_docs.extend(_split_on_headers(page))
+
+    # 2️⃣ Second pass – character splitting only when needed
+    char_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", " "],
         length_function=len,
         is_separator_regex=False,
     )
 
-    return text_splitter.split_documents(documents)
+    final_chunks: List[Document] = []
+    for sec in section_docs:
+        if len(sec.page_content) <= CHUNK_SIZE:
+            final_chunks.append(sec)
+        else:
+            final_chunks.extend(char_splitter.split_documents([sec]))
+
+    return final_chunks
 
 
 def add_to_chroma(chunks: List[Document]) -> bool:
