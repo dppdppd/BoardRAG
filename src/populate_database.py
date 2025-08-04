@@ -279,6 +279,13 @@ def calc_chunk_ids(chunks: List[Document]) -> List[Document]:
         # Add it to the page meta-data.
         chunk.metadata["id"] = chunk_id
 
+        # Derive a simple game identifier from the PDF filename (e.g. "dixit")
+        if source and isinstance(source, str):
+            import os
+            pdf_name = os.path.basename(source)
+            # Store helper metadata fields
+            chunk.metadata["pdf_filename"] = pdf_name.lower()  # for fast server-side filtering
+
     return chunks
 
 
@@ -296,6 +303,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--reset", action="store_true", help="Reset the database.")
+    parser.add_argument(
+        "--skip-name-extraction",
+        action="store_true",
+        help="Skip extracting and storing game names for PDFs.",
+    )
 
     # Optional positional paths (files or directories) to process. If omitted,
     # the entire DATA_PATH will be processed (original behaviour).
@@ -317,6 +329,27 @@ def main() -> None:
     documents = load_documents(args.paths)
     chunks = split_documents(documents)
     add_to_chroma(chunks)
+
+    # ---------------------------------------------
+    # Optional: Extract & store official game names
+    # ---------------------------------------------
+    if not args.skip_name_extraction:
+        try:
+            from src.query import extract_and_store_game_name  # local import to avoid circular deps
+        except ImportError:
+            from query import extract_and_store_game_name  # fallback when running as module
+
+        import os
+        filenames = {
+            os.path.basename(doc.metadata.get("source", ""))
+            for doc in documents
+        }
+        print(f"🔤 Extracting game names for {len(filenames)} PDFs …")
+        for fname in filenames:
+            if fname:
+                extract_and_store_game_name(fname)
+    else:
+        print("⚠️  Skipped game-name extraction as requested")
 
 
 if __name__ == "__main__":

@@ -177,8 +177,7 @@ def rename_game_handler(selected_entry, new_name):
 
         # Reprocess library to ensure new game name reflected everywhere
         from ..handlers.library import refresh_games_handler as _refresh_games
-        _msg, upd_games = _refresh_games()
-        upd_pdfs = gr.update(choices=get_pdf_dropdown_choices())
+        _msg, upd_games, upd_pdfs = _refresh_games()
 
         print(f"[DEBUG] Library reprocessed after rename; dropdowns updated")
         return f"✅ Assigned '{filename}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs

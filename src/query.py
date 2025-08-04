@@ -614,35 +614,61 @@ def query_rag(
 
 
     # Get results from database (more if filtering is needed)
-    k_results = (
-        75 if selected_game else 40
-    )  # Increased to maintain context with smaller chunks
-    all_results = db.similarity_search_with_score(search_query, k=k_results)
-
-    # Apply game filter if specified
+    k_results = 1000 if selected_game else 40  # larger pool so game-specific chunks are included
+            # Try server-side metadata filtering first (if supported)
+    metadata_filter = None
     if selected_game:
-        # selected_game can be a list of filter strings or a single string
-        filters = selected_game if isinstance(selected_game, list) else [selected_game]
+        # Debug: normalize selected_game input
+        def _normalize_game_input(game_input):
+            """Convert game input to normalized string."""
+            if isinstance(game_input, list):
+                normalized = game_input[0].strip() if game_input else ""
+            elif isinstance(game_input, str):
+                normalized = game_input.strip()
+            else:
+                normalized = str(game_input).strip()
+            print(f"🎮 Game input normalization: {game_input!r} → {normalized!r}")
+            return normalized.lower()
+        
+        game_key = _normalize_game_input(selected_game)
+        stored_map = get_stored_game_names()
+        
+        # Debug: show what's in the mapping
+        print(f"📚 Current game mappings ({len(stored_map)} entries):")
+        for fname, gname in sorted(stored_map.items()):
+            print(f"  '{fname}' → '{gname}'")
+        
+        import os
+        # Try matching by game name first, then by filename if that fails
+        target_files = {os.path.basename(fname).lower() for fname, gname in stored_map.items() if gname.lower() == game_key}
+        
+        if not target_files:
+            # Fallback: try matching by filename (for UI compatibility)
+            target_files = {os.path.basename(fname).lower() for fname in stored_map.keys() if os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == game_key}
+        
+        print(f"🔍 Looking for game: '{game_key}'")
+        print(f"📂 Found {len(target_files)} matching PDFs: {sorted(target_files)}")
+        
+        if not target_files:
+            available_games = sorted(set(gname.lower() for gname in stored_map.values()))
+            raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
+        metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
+    try:
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
+    except TypeError:
+            # langchain-chroma version without 'filter' kwarg
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
 
-        filtered_results = []
-        for doc, score in all_results:
-            source = doc.metadata.get("source", "").lower()
-            # Normalize source filename the same way we create filter names
-            import os
-            source_filename = os.path.basename(source)
-            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_").lower()
-            
-            if any(f in normalized_source for f in filters):
-                filtered_results.append((doc, score))
-                if len(filtered_results) >= 40:  # Increased to maintain context
-                    break
-
-        results = filtered_results
-        print(
-            f"  Filtered from {len(all_results)} to {len(results)} results for game '{selected_game}'"
-        )
-    else:
-        results = all_results
+    # Server-side filtering already handled game selection
+    results = all_results
     print(f"  Found {len(results)} results")
     if results:
         print(f"  Best match score: {results[0][1]:.4f}")
@@ -811,9 +837,59 @@ def stream_query_rag(
         print(f"  Filtering by game: '{selected_game}'")
 
     # Fetch DB results (same k logic)
-    k_results = 75 if selected_game else 40
+    k_results = 1000 if selected_game else 40  # larger pool so game-specific chunks are kept in initial set
     print(f"🔎 Fetching {k_results} results from database...")
-    all_results = db.similarity_search_with_score(search_query, k=k_results)
+            # Try server-side metadata filtering first (if supported)
+    metadata_filter = None
+    if selected_game:
+        # Debug: normalize selected_game input
+        def _normalize_game_input(game_input):
+            """Convert game input to normalized string."""
+            if isinstance(game_input, list):
+                normalized = game_input[0].strip() if game_input else ""
+            elif isinstance(game_input, str):
+                normalized = game_input.strip()
+            else:
+                normalized = str(game_input).strip()
+            print(f"🎮 Game input normalization: {game_input!r} → {normalized!r}")
+            return normalized.lower()
+        
+        game_key = _normalize_game_input(selected_game)
+        stored_map = get_stored_game_names()
+        
+        # Debug: show what's in the mapping
+        print(f"📚 Current game mappings ({len(stored_map)} entries):")
+        for fname, gname in sorted(stored_map.items()):
+            print(f"  '{fname}' → '{gname}'")
+        
+        import os
+        # Try matching by game name first, then by filename if that fails
+        target_files = {os.path.basename(fname).lower() for fname, gname in stored_map.items() if gname.lower() == game_key}
+        
+        if not target_files:
+            # Fallback: try matching by filename (for UI compatibility)
+            target_files = {os.path.basename(fname).lower() for fname in stored_map.keys() if os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == game_key}
+        
+        print(f"🔍 Looking for game: '{game_key}'")
+        print(f"📂 Found {len(target_files)} matching PDFs: {sorted(target_files)}")
+        
+        if not target_files:
+            available_games = sorted(set(gname.lower() for gname in stored_map.values()))
+            raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
+        metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
+    try:
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
+    except TypeError:
+            # langchain-chroma version without 'filter' kwarg
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
     print(f"📊 Database returned {len(all_results)} total results")
 
     if len(all_results) == 0:
@@ -823,40 +899,9 @@ def stream_query_rag(
         print("  - Embedding function is working")
         print("  - Query is not too specific")
 
-    # Apply optional game filter
-    if selected_game:
-        filters = [selected_game] if isinstance(selected_game, str) else selected_game
-        print(f"🎯 Applying game filter: {filters}")
-        filtered_results = []
-        for i, (doc, score) in enumerate(all_results):
-            source = doc.metadata.get("source", "").lower()
-            # Normalize source filename the same way we create filter names
-            # Extract just the filename from the path and normalize it
-            import os
-            source_filename = os.path.basename(source)
-            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_").lower()
-            
-            print(f"  Result {i+1}: source='{source}', normalized='{normalized_source}', score={score:.4f}")
-            if any(f in normalized_source for f in filters):
-                filtered_results.append((doc, score))
-                print(f"    ✅ PASSED filter ('{normalized_source}' contains: {[f for f in filters if f in normalized_source]})")
-                if len(filtered_results) >= 40:
-                    print(f"    🛑 Reached limit of 40 filtered results")
-                    break
-            else:
-                print(f"    ❌ FAILED filter ('{normalized_source}' doesn't contain any of: {filters})")
-        results = filtered_results
-        print(f"📊 After filtering: {len(results)} results remain")
-        
-        if len(results) == 0:
-            print("❌ ERROR: No results after game filtering! This will cause 'I don't know' response")
-            print("  Check if:")
-            print("  - Game filter matches actual source filenames")
-            print("  - Documents were ingested with correct source metadata")
-            print("  - Filter is not too restrictive")
-    else:
-        results = all_results
-        print(f"📊 Using all {len(results)} results (no game filter)")
+    # Server-side filtering already handled game selection perfectly
+    results = all_results
+    print(f"📊 Using {len(results)} results from server-side filter")
 
     # Show final results summary
     print(f"\n📋 FINAL RESULTS SUMMARY:")
