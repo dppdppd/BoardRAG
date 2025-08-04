@@ -181,7 +181,26 @@ def rebuild_selected_game_handler(selected_game: str):
         return f"❌ No PDFs found for '{selected_game}'", empty, empty, empty
 
     data_root = Path(config.DATA_PATH)
-    pdf_paths = [data_root / f"{sf}.pdf" for sf in simple_files]
+
+    # Resolve each simple filename to the *actual* file on disk in a
+    # case-insensitive way so that systems with case-sensitive paths
+    # (Linux, HF Spaces) work even when the real PDF name contains
+    # capital letters.
+    def _find_pdf(simple_name: str):
+        """Return Path to the PDF whose stem matches *simple_name* (case-insensitive)."""
+        target = f"{simple_name}.pdf"
+        # First, quick exact match
+        exact = data_root / target
+        if exact.exists():
+            return exact
+        # Fall back to case-insensitive scan of DATA_PATH
+        for p in data_root.glob("*.pdf"):
+            if p.stem.lower() == simple_name.lower():
+                return p
+        # As a last resort, return the expected path (will trigger load_documents skip msg)
+        return exact
+
+    pdf_paths = [_find_pdf(sf) for sf in simple_files]
 
     # ---- 1️⃣ Remove existing chunks for these PDFs ----
     try:
