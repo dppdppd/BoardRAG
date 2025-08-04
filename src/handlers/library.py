@@ -14,6 +14,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from .. import config
 from ..embedding_function import get_embedding_function
 from ..query import get_available_games, get_stored_game_names
+from ..handlers.game import get_pdf_dropdown_choices
 
 
 def rebuild_library_handler():
@@ -88,6 +89,10 @@ def rebuild_library_handler():
         )
         split_documents = text_splitter.split_documents(documents)
 
+        # Assign deterministic IDs so games can be detected later
+        from ..populate_database import calc_chunk_ids  # Re-use existing helper
+        split_documents = calc_chunk_ids(split_documents)
+
         from ..query import get_chromadb_settings, suppress_chromadb_telemetry
         from itertools import islice
 
@@ -116,7 +121,8 @@ def rebuild_library_handler():
         # Add documents in batches to avoid token limits
         for i, chunk_batch in enumerate(batched(split_documents, 100)):
             print(f"🔧 [DEBUG] Adding batch {i+1} with {len(chunk_batch)} chunks")
-            db.add_documents(chunk_batch)
+            batch_ids = [chunk.metadata.get("id") for chunk in chunk_batch]
+            db.add_documents(chunk_batch, ids=batch_ids)
             print(f"🔧 [DEBUG] Batch {i+1} added successfully")
 
         # Clear the app-level cache to ensure fresh games list
@@ -132,6 +138,101 @@ def rebuild_library_handler():
         return f"✅ Library rebuilt successfully! {len(split_documents)} chunks from {len(documents)} documents", gr.update(choices=available_games)
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
+
+
+def rebuild_selected_game_handler(selected_game: str):
+    """Re-ingest the PDF(s) that belong to *selected_game* only.
+
+    We drop any existing Chroma docs that originate from the PDFs that map to
+    the provided *selected_game*, then load/split them again using the same
+    logic as *populate_database.py* so that changes to splitting parameters
+    immediately take effect.
+    """
+    import os
+    from pathlib import Path
+    import chromadb
+    import traceback
+    import gradio as gr
+
+    from .. import config
+    from ..embedding_function import get_embedding_function
+    from ..populate_database import load_documents, split_documents as split_docs_func, add_to_chroma
+    from ..query import (
+        get_available_games,
+        get_chromadb_settings,
+        suppress_chromadb_telemetry,
+    )
+    from .game import get_pdf_dropdown_choices
+
+    if not selected_game:
+        empty = gr.update()
+        return "❌ Please select a game", empty, empty, empty
+
+    # Resolve PDF filenames mapped to this game
+    mapping = getattr(get_available_games, "_filename_mapping", None)
+    if mapping is None or selected_game not in mapping:
+        # Rebuild mapping once
+        get_available_games()
+        mapping = getattr(get_available_games, "_filename_mapping", {})
+
+    simple_files = mapping.get(selected_game, [])
+    if not simple_files:
+        empty = gr.update()
+        return f"❌ No PDFs found for '{selected_game}'", empty, empty, empty
+
+    data_root = Path(config.DATA_PATH)
+    pdf_paths = [data_root / f"{sf}.pdf" for sf in simple_files]
+
+    # ---- 1️⃣ Remove existing chunks for these PDFs ----
+    try:
+        with suppress_chromadb_telemetry():
+            client = chromadb.PersistentClient(path=config.CHROMA_PATH, settings=get_chromadb_settings())
+            db = chromadb.Client(client_settings=get_chromadb_settings()) if hasattr(chromadb, 'Client') else None
+    except Exception:
+        client = None
+    try:
+        from langchain_chroma import Chroma
+        db = Chroma(client=client, embedding_function=get_embedding_function())
+        all_docs = db.get()
+        ids_to_delete = []
+        for doc_id in all_docs["ids"]:
+            source_path = doc_id.split(":")[0]
+            norm_source = source_path.replace("\\", "/")
+            for pdf in pdf_paths:
+                if str(pdf).replace("\\", "/") in norm_source:
+                    ids_to_delete.append(doc_id)
+                    break
+        if ids_to_delete:
+            db.delete(ids=ids_to_delete)
+            print(f"[DEBUG] Removed {len(ids_to_delete)} existing chunks before rebuild of '{selected_game}'")
+    except Exception as e:
+        print(f"[WARN] Could not clean existing docs for '{selected_game}': {e}")
+        traceback.print_exc()
+
+    # ---- 2️⃣ Load & split documents ----
+    docs = load_documents([str(p) for p in pdf_paths])
+    if not docs:
+        empty = gr.update()
+        return f"❌ Failed to load PDFs for '{selected_game}'", empty, empty, empty
+
+    split_docs = split_docs_func(docs)
+    add_to_chroma(split_docs)
+
+    # ---- 3️⃣ Refresh caches and UI ----
+    if hasattr(get_available_games, '_filename_mapping'):
+        delattr(get_available_games, '_filename_mapping')
+
+    try:
+        import app
+        app.clear_games_cache()
+    except Exception:
+        pass
+
+    available_games = get_available_games()
+    pdf_choices = get_pdf_dropdown_choices()
+
+    status_msg = f"✅ Rebuilt '{selected_game}' – {len(split_docs)} chunks processed"
+    return status_msg, gr.update(choices=available_games), gr.update(choices=pdf_choices), gr.update(choices=pdf_choices)
 
 
 def refresh_games_handler():
@@ -155,7 +256,12 @@ def refresh_games_handler():
 
         if not new_pdf_files:
             available_games = get_available_games()
-            return "ℹ️ No new PDFs to process", gr.update(choices=available_games)
+            pdf_choices = get_pdf_dropdown_choices()
+            return (
+                "ℹ️ No new PDFs to process",
+                gr.update(choices=available_games),
+                gr.update(choices=pdf_choices),
+            )
 
         documents = []
         for pdf_filename in new_pdf_files:
@@ -203,9 +309,19 @@ def refresh_games_handler():
             pass  # If import fails, just continue
 
         available_games = get_available_games()
-        return f"✅ Added {len(new_pdf_files)} new PDF(s): {', '.join(new_pdf_files)}", gr.update(choices=available_games)
+        pdf_choices = get_pdf_dropdown_choices()
+        return (
+            f"✅ Added {len(new_pdf_files)} new PDF(s): {', '.join(new_pdf_files)}",
+            gr.update(choices=available_games),
+            gr.update(choices=pdf_choices),
+        )
     except Exception as e:
-        return f"❌ Error processing new games: {str(e)}", gr.update()
+        pdf_choices = get_pdf_dropdown_choices()
+        return (
+            f"❌ Error processing new games: {str(e)}",
+            gr.update(),
+            gr.update(choices=pdf_choices),
+        )
 
 
 def upload_with_status_update(pdf_files):
@@ -232,16 +348,17 @@ def upload_with_status_update(pdf_files):
 
         if uploaded_count > 0:
             # Automatically process the newly uploaded PDFs so they are instantly usable
-            process_msg, updated_dropdown = refresh_games_handler()
+            process_msg, updated_game_dropdown, pdf_choices_update = refresh_games_handler()
+            
             # Combine messages for clarity
             combined_msg = (
                 f"✅ Uploaded {uploaded_count} PDF(s) successfully!\n" + process_msg
             )
             return (
                 gr.update(value=combined_msg, visible=True),
-                updated_dropdown,  # game_dropdown
-                updated_dropdown,  # delete_game_dropdown
-                updated_dropdown,  # rename_game_dropdown
+                updated_game_dropdown,      # game_dropdown (games)
+                pdf_choices_update,          # delete_game_dropdown (PDFs)
+                pdf_choices_update,          # rename_game_dropdown (PDFs)
             )
         else:
             return (

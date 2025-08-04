@@ -83,11 +83,16 @@ def load_documents(target_paths: List[str] | None = None):
     documents: List[Document] = []
 
     for path in target_paths:
-        # Resolve path – support both relative (to DATA_PATH) and absolute
-        # inputs so callers have flexibility.
-        full_path = (
-            os.path.join(DATA_PATH, path) if not os.path.isabs(path) else path
-        )
+        
+        # Normalise path for safe comparisons on any OS
+        norm_path = os.path.normpath(path)
+
+        # If the caller already passed a full path (absolute **or** already under DATA_PATH)
+        # we leave it untouched. Otherwise we treat it as relative to DATA_PATH.
+        if os.path.isabs(norm_path) or norm_path.startswith(os.path.normpath(DATA_PATH)):
+            full_path = norm_path
+        else:
+            full_path = os.path.join(DATA_PATH, norm_path)
 
         if os.path.isdir(full_path):
             documents.extend(PyPDFDirectoryLoader(full_path).load())

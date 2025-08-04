@@ -2,7 +2,7 @@
 
 # Import all handler modules for easy access
 from .auth import unlock_handler, set_access_storage_handler, auto_unlock_interface
-from .library import rebuild_library_handler, refresh_games_handler, upload_with_status_update
+from .library import rebuild_library_handler, refresh_games_handler, upload_with_status_update, rebuild_selected_game_handler
 from .game import delete_game_handler, rename_game_handler, get_pdf_dropdown_choices, update_chatbot_label
 from .chat import (
     build_indexed_prompt_list, extract_title_from_response, format_prompt_choices,
@@ -20,7 +20,7 @@ __all__ = [
     # Auth handlers
     'unlock_handler', 'set_access_storage_handler', 'auto_unlock_interface',
     # Library handlers
-    'rebuild_library_handler', 'refresh_games_handler', 'upload_with_status_update',
+    'rebuild_library_handler', 'refresh_games_handler', 'upload_with_status_update', 'rebuild_selected_game_handler',
     # Game handlers
     'delete_game_handler', 'rename_game_handler', 'get_pdf_dropdown_choices', 'update_chatbot_label',
     # Chat handlers

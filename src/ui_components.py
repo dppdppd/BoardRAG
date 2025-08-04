@@ -106,52 +106,64 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     sources = meta.get("sources", [])
 
     if sources:
-        # Separate PDF and web sources
+        # Separate structured PDF sources and raw URLs
         pdf_info = {}
         url_sources = []
 
         for source in sources:
             if source is None:
                 continue
+
+            # 🌐 Web URL source
             if isinstance(source, str) and source.startswith("http"):
                 url_sources.append(source)
-            elif isinstance(source, str) and ":" in source:
-                parts = source.split(":")
+                continue
+
+            # 📄 Structured PDF source (dict with filepath/page/section)
+            if isinstance(source, dict):
+                filepath = source.get("filepath", "")
+                if not filepath:
+                    continue
+                filename = Path(filepath).name
+                page_num = source.get("page")
+                section = (source.get("section") or '').strip()
+                if page_num is None:
+                    continue
+
+                file_entry = pdf_info.setdefault(filename, {})
+                key = section if section else f"p.{page_num}"
+                # Keep earliest page if duplicates
+                if key not in file_entry or page_num < file_entry[key]:
+                    file_entry[key] = page_num
+                continue
+
+            # 🗄️  Legacy 'source:page:chunk' string
+            if isinstance(source, str) and ':' in source:
+                parts = source.split(':')
                 if len(parts) >= 2:
                     filepath, page_num = parts[0], parts[1]
                     filename = Path(filepath).name
-                    pdf_info.setdefault(filename, set())
                     try:
-                        pdf_info[filename].add(int(page_num))
+                        page_int = int(page_num)
                     except ValueError:
-                        pass
+                        continue
+                    file_entry = pdf_info.setdefault(filename, {})
+                    file_entry.setdefault(f"p.{page_int}", page_int)
 
-        # Format sources nicely
+        # Build human-friendly text
         sources_list = []
-        for filename, pages in pdf_info.items():
-            if pages:
-                page_list = sorted(list(pages))
-                if len(page_list) == 1:
-                    sources_list.append(f"📄 {filename} (page {page_list[0]})")
+        for filename, section_map in pdf_info.items():
+            # sort by page number
+            sorted_sections = sorted(section_map.items(), key=lambda kv: kv[1])
+            formatted_parts = []
+            for section_name, page_num in sorted_sections:
+                if section_name.startswith('p.'):
+                    formatted_parts.append(f"p. {page_num}")
                 else:
-                    page_ranges = []
-                    start = page_list[0]
-                    end = page_list[0]
-                    for i in range(1, len(page_list)):
-                        if page_list[i] == end + 1:
-                            end = page_list[i]
-                        else:
-                            if start == end:
-                                page_ranges.append(str(start))
-                            else:
-                                page_ranges.append(f"{start}-{end}")
-                            start = end = page_list[i]
-                    if start == end:
-                        page_ranges.append(str(start))
-                    else:
-                        page_ranges.append(f"{start}-{end}")
-                    sources_list.append(f"📄 {filename} (pages {', '.join(page_ranges)})")
+                    formatted_parts.append(f"{section_name} [p. {page_num}]")
+            sources_list.append(f"📄 {filename} ({'; '.join(formatted_parts)})")
 
+        # Append URLs
         for url in url_sources:
             sources_list.append(f"🌐 {url}")
 

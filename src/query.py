@@ -630,7 +630,7 @@ def query_rag(
             # Normalize source filename the same way we create filter names
             import os
             source_filename = os.path.basename(source)
-            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_")
+            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_").lower()
             
             if any(f in normalized_source for f in filters):
                 filtered_results.append((doc, score))
@@ -737,7 +737,22 @@ def query_rag(
     else:
         response_text = response_raw
 
-    sources = [doc.metadata.get("id", None) for doc, _score in results]
+    # Build structured source metadata for citations
+    sources = []
+    for doc, _score in results:
+        meta_doc = doc.metadata
+        src_path = meta_doc.get("source", "")
+        # Handle web results separately
+        if isinstance(src_path, str) and src_path.startswith("http"):
+            sources.append(src_path)
+            continue
+        sources.append(
+            {
+                "filepath": src_path,
+                "page": meta_doc.get("page"),
+                "section": meta_doc.get("section"),
+            }
+        )
     response = {
         "response_text": response_text,
         "sources": sources,
@@ -819,7 +834,7 @@ def stream_query_rag(
             # Extract just the filename from the path and normalize it
             import os
             source_filename = os.path.basename(source)
-            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_")
+            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_").lower()
             
             print(f"  Result {i+1}: source='{source}', normalized='{normalized_source}', score={score:.4f}")
             if any(f in normalized_source for f in filters):
@@ -943,7 +958,21 @@ def stream_query_rag(
             print(f"❌ ERROR during token generation: {e}")
             raise
 
-    sources = [doc.metadata.get("id", None) for doc, _ in results]
+    # Build structured source metadata for citations
+    sources = []
+    for doc, _ in results:
+        meta_doc = doc.metadata
+        src_path = meta_doc.get("source", "")
+        if isinstance(src_path, str) and src_path.startswith("http"):
+            sources.append(src_path)
+            continue
+        sources.append(
+            {
+                "filepath": src_path,
+                "page": meta_doc.get("page"),
+                "section": meta_doc.get("section"),
+            }
+        )
     print(f"📚 Final sources: {sources}")
 
     meta = {
@@ -994,8 +1023,13 @@ def main():
     response = query_rag(query_text, selected_game, game_names=args.game_names)
 
     # Extract game name from first source
-    if response["sources"] and response["sources"][0]:
-        game_name = os.path.basename(response["sources"][0]).split()[0].capitalize()
+    if response["sources"]:
+        first_src = response["sources"][0]
+        if isinstance(first_src, dict):
+            src_path = first_src.get("filepath", "")
+        else:
+            src_path = first_src
+        game_name = os.path.basename(src_path).split()[0].capitalize() if src_path else "Game"
     else:
         game_name = "Game"
 

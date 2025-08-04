@@ -26,7 +26,7 @@ except Exception as e:
 # Import modular components
 from src.config_ui import INTRO_STRING, THEME_CSS, get_config_info, create_theme
 from src.handlers import (
-    unlock_handler, rebuild_library_handler, refresh_games_handler,
+    unlock_handler, rebuild_library_handler, refresh_games_handler, rebuild_selected_game_handler,
     wipe_chat_history_handler, refresh_storage_handler, upload_with_status_update,
     delete_game_handler, rename_game_handler, get_pdf_dropdown_choices,
     update_chatbot_label, get_user_index_for_choice,
@@ -279,7 +279,7 @@ with gr.Blocks(
             with gr.Accordion(
                 "🗑️ Delete PDF", open=False, visible=False
             ) as delete_accordion:
-                delete_game_dropdown = gr.Dropdown(choices=game_choices, label="Select Game")
+                delete_game_dropdown = gr.Dropdown(choices=get_pdf_dropdown_choices(), label="Select PDF")
                 delete_button = gr.Button("Delete", variant="stop")
                 delete_status = gr.Textbox(interactive=False)
 
@@ -292,6 +292,16 @@ with gr.Blocks(
                 new_name_tb = gr.Textbox(label="New Name")
                 rename_button = gr.Button("Rename", variant="primary")
                 rename_status = gr.Textbox(interactive=False)
+
+            with gr.Accordion(
+                "🔄 Rebuild Selected Game", open=False, visible=False
+            ) as rebuild_game_accordion:
+                rebuild_game_dropdown = gr.Dropdown(
+                    choices=get_available_games(), label="Select Game"
+                )
+                rebuild_selected_button = gr.Button("Rebuild Game", variant="secondary")
+                rebuild_selected_status = gr.Textbox(interactive=False, visible=False)
+
 
             # Technical info (admin only)
             with gr.Accordion(
@@ -430,7 +440,8 @@ with gr.Blocks(
             upload_accordion,
             delete_accordion,
             rename_accordion,
-            tech_accordion,
+   rebuild_game_accordion,
+   tech_accordion,
             password_tb,
         ],
     )
@@ -450,7 +461,8 @@ with gr.Blocks(
             upload_accordion,
             delete_accordion,
             rename_accordion,
-            tech_accordion,
+   rebuild_game_accordion,
+   tech_accordion,
             password_tb,
         ],
     )
@@ -462,7 +474,9 @@ with gr.Blocks(
 
     # Connect process new PDFs button
     refresh_button.click(
-        refresh_games_handler, inputs=[], outputs=[rebuild_status, game_dropdown]
+        refresh_games_handler,
+        inputs=[],
+        outputs=[rebuild_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
 
     # Connect wipe chat history button
@@ -495,6 +509,13 @@ with gr.Blocks(
         inputs=[delete_game_dropdown],
         outputs=[delete_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     )
+
+    # Connect rebuild selected game button
+    rebuild_selected_button.click(
+        rebuild_selected_game_handler,
+        inputs=[rebuild_game_dropdown],
+        outputs=[rebuild_selected_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
+    ).then(lambda: gr.update(visible=True), outputs=[rebuild_selected_status])
 
     # Export all conversations as markdown
     def _export_all_conversations(session_id):
