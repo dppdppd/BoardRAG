@@ -33,6 +33,8 @@ from langchain.schema.document import Document
 # config imports extended
 from .config import (
     CHROMA_PATH,
+    CITATION_SCORE_THRESHOLD,
+    CITATION_MIN_SOURCES,
     GENERATOR_MODEL,
     LLM_PROVIDER,
     OLLAMA_URL,
@@ -614,15 +616,30 @@ def query_rag(
 
 
     # Get results from database (more if filtering is needed)
-    k_results = 1000 if selected_game else 40  # larger pool so game-specific chunks are included
+    k_results = 200 if selected_game else 40  # balanced pool size for game-specific searches
             # Try server-side metadata filtering first (if supported)
     metadata_filter = None
     if selected_game:
         # Debug: normalize selected_game input
         def _normalize_game_input(game_input):
             """Convert game input to normalized string."""
+            import os  # Import needed for basename function
             if isinstance(game_input, list):
-                normalized = game_input[0].strip() if game_input else ""
+                # Handle list of filenames - find the game they map to
+                if game_input:
+                    # Look up what game these filenames belong to
+                    stored_map = get_stored_game_names()
+                    for fname, gname in stored_map.items():
+                        # Check if any of the input filenames match this stored file
+                        fname_base = os.path.basename(fname).replace(".pdf", "").lower()
+                        if any(fname_base == item.strip().lower() for item in game_input):
+                            normalized = gname  # Use the mapped game name
+                            break
+                    else:
+                        # Fallback: use first item if no mapping found
+                        normalized = game_input[0].strip()
+                else:
+                    normalized = ""
             elif isinstance(game_input, str):
                 normalized = game_input.strip()
             else:
@@ -763,22 +780,59 @@ def query_rag(
     else:
         response_text = response_raw
 
-    # Build structured source metadata for citations
+    # Build structured source metadata for citations (filter by relevance)
     sources = []
-    for doc, _score in results:
+    qualifying_sources = []
+    all_pdf_sources = []
+    
+    for doc, score in results:
         meta_doc = doc.metadata
         src_path = meta_doc.get("source", "")
-        # Handle web results separately
+        
+        # Handle web results separately (always include regardless of score)
         if isinstance(src_path, str) and src_path.startswith("http"):
             sources.append(src_path)
             continue
-        sources.append(
-            {
-                "filepath": src_path,
-                "page": meta_doc.get("page"),
-                "section": meta_doc.get("section"),
-            }
-        )
+        
+        # Collect PDF source info
+        source_info = {
+            "filepath": src_path,
+            "page": meta_doc.get("page"),
+            "section": meta_doc.get("section"),
+            "score": score
+        }
+        all_pdf_sources.append(source_info)
+        
+        # Check if it meets the quality threshold (lower scores = better similarity)
+        if score <= CITATION_SCORE_THRESHOLD:
+            print(f"  📊 Including source in citation: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f})")
+            qualifying_sources.append(source_info)
+        else:
+            print(f"  📊 Source above threshold: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f} > threshold {CITATION_SCORE_THRESHOLD})")
+    
+    # Add qualifying sources
+    for source_info in qualifying_sources:
+        sources.append({
+            "filepath": source_info["filepath"],
+            "page": source_info["page"],
+            "section": source_info["section"],
+        })
+    
+    # If we don't have enough qualifying sources, add the best remaining ones
+    if len(qualifying_sources) < CITATION_MIN_SOURCES and len(all_pdf_sources) > len(qualifying_sources):
+        print(f"  📊 Only {len(qualifying_sources)} sources met threshold, adding {CITATION_MIN_SOURCES - len(qualifying_sources)} more from best available")
+        # Sort all sources by score (ascending - lower is better) and take the best remaining
+        remaining_sources = [s for s in all_pdf_sources if s not in qualifying_sources]
+        remaining_sources.sort(key=lambda x: x["score"])
+        
+        needed = CITATION_MIN_SOURCES - len(qualifying_sources)
+        for source_info in remaining_sources[:needed]:
+            print(f"  📊 Adding minimum source: {Path(source_info['filepath']).name if source_info['filepath'] else 'unknown'} (score: {source_info['score']:.4f})")
+            sources.append({
+                "filepath": source_info["filepath"],
+                "page": source_info["page"],
+                "section": source_info["section"],
+            })
     response = {
         "response_text": response_text,
         "sources": sources,
@@ -837,7 +891,7 @@ def stream_query_rag(
         print(f"  Filtering by game: '{selected_game}'")
 
     # Fetch DB results (same k logic)
-    k_results = 1000 if selected_game else 40  # larger pool so game-specific chunks are kept in initial set
+    k_results = 200 if selected_game else 40  # balanced pool size for game-specific searches
     print(f"🔎 Fetching {k_results} results from database...")
             # Try server-side metadata filtering first (if supported)
     metadata_filter = None
@@ -845,8 +899,23 @@ def stream_query_rag(
         # Debug: normalize selected_game input
         def _normalize_game_input(game_input):
             """Convert game input to normalized string."""
+            import os  # Import needed for basename function
             if isinstance(game_input, list):
-                normalized = game_input[0].strip() if game_input else ""
+                # Handle list of filenames - find the game they map to
+                if game_input:
+                    # Look up what game these filenames belong to
+                    stored_map = get_stored_game_names()
+                    for fname, gname in stored_map.items():
+                        # Check if any of the input filenames match this stored file
+                        fname_base = os.path.basename(fname).replace(".pdf", "").lower()
+                        if any(fname_base == item.strip().lower() for item in game_input):
+                            normalized = gname  # Use the mapped game name
+                            break
+                    else:
+                        # Fallback: use first item if no mapping found
+                        normalized = game_input[0].strip()
+                else:
+                    normalized = ""
             elif isinstance(game_input, str):
                 normalized = game_input.strip()
             else:
@@ -1003,21 +1072,60 @@ def stream_query_rag(
             print(f"❌ ERROR during token generation: {e}")
             raise
 
-    # Build structured source metadata for citations
+    # Build structured source metadata for citations (filter by relevance)
     sources = []
-    for doc, _ in results:
+    qualifying_sources = []
+    all_pdf_sources = []
+    
+    for doc, score in results:
         meta_doc = doc.metadata
         src_path = meta_doc.get("source", "")
+        
+        # Handle web results separately (always include regardless of score)
         if isinstance(src_path, str) and src_path.startswith("http"):
             sources.append(src_path)
             continue
-        sources.append(
-            {
-                "filepath": src_path,
-                "page": meta_doc.get("page"),
-                "section": meta_doc.get("section"),
-            }
-        )
+        
+        # Collect PDF source info
+        source_info = {
+            "filepath": src_path,
+            "page": meta_doc.get("page"),
+            "section": meta_doc.get("section"),
+            "score": score
+        }
+        all_pdf_sources.append(source_info)
+        
+        # Check if it meets the quality threshold (lower scores = better similarity)
+        if score <= CITATION_SCORE_THRESHOLD:
+            print(f"  📊 Including source in citation: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f})")
+            qualifying_sources.append(source_info)
+        else:
+            print(f"  📊 Source above threshold: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f} > threshold {CITATION_SCORE_THRESHOLD})")
+    
+    # Add qualifying sources
+    for source_info in qualifying_sources:
+        sources.append({
+            "filepath": source_info["filepath"],
+            "page": source_info["page"],
+            "section": source_info["section"],
+        })
+    
+    # If we don't have enough qualifying sources, add the best remaining ones
+    if len(qualifying_sources) < CITATION_MIN_SOURCES and len(all_pdf_sources) > len(qualifying_sources):
+        print(f"  📊 Only {len(qualifying_sources)} sources met threshold, adding {CITATION_MIN_SOURCES - len(qualifying_sources)} more from best available")
+        # Sort all sources by score (ascending - lower is better) and take the best remaining
+        remaining_sources = [s for s in all_pdf_sources if s not in qualifying_sources]
+        remaining_sources.sort(key=lambda x: x["score"])
+        
+        needed = CITATION_MIN_SOURCES - len(qualifying_sources)
+        for source_info in remaining_sources[:needed]:
+            print(f"  📊 Adding minimum source: {Path(source_info['filepath']).name if source_info['filepath'] else 'unknown'} (score: {source_info['score']:.4f})")
+            sources.append({
+                "filepath": source_info["filepath"],
+                "page": source_info["page"],
+                "section": source_info["section"],
+            })
+    
     print(f"📚 Final sources: {sources}")
 
     meta = {

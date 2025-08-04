@@ -106,17 +106,18 @@ def query_interface(message, selected_games, include_web, chat_history, selected
     sources = meta.get("sources", [])
 
     if sources:
-        # Separate structured PDF sources and raw URLs
-        pdf_info = {}
+        # Build detailed individual citations with deduplication
         url_sources = []
-
+        pdf_sources = {}  # key: (filename, page, section), value: citation info
+        
         for source in sources:
             if source is None:
                 continue
 
             # 🌐 Web URL source
             if isinstance(source, str) and source.startswith("http"):
-                url_sources.append(source)
+                if source not in url_sources:  # Simple dedup for URLs
+                    url_sources.append(f"🌐 Web: {source}")
                 continue
 
             # 📄 Structured PDF source (dict with filepath/page/section)
@@ -127,14 +128,31 @@ def query_interface(message, selected_games, include_web, chat_history, selected
                 filename = Path(filepath).name
                 page_num = source.get("page")
                 section = (source.get("section") or '').strip()
-                if page_num is None:
-                    continue
-
-                file_entry = pdf_info.setdefault(filename, {})
-                key = section if section else f"p.{page_num}"
-                # Keep earliest page if duplicates
-                if key not in file_entry or page_num < file_entry[key]:
-                    file_entry[key] = page_num
+                
+                # Create a unique key for deduplication (by section, not page)
+                dedup_key = (filename, section)
+                
+                # Build citation info
+                citation_info = {
+                    "filename": filename,
+                    "page_num": page_num,
+                    "section": section,
+                    "has_named_section": bool(section and not section.startswith('p.'))
+                }
+                
+                # Keep the best version (prefer named sections, then earliest page)
+                if dedup_key not in pdf_sources:
+                    pdf_sources[dedup_key] = citation_info
+                else:
+                    existing = pdf_sources[dedup_key]
+                    # Prefer named sections over generic page refs
+                    if citation_info["has_named_section"] and not existing["has_named_section"]:
+                        pdf_sources[dedup_key] = citation_info
+                    # For same section type, keep the earliest page
+                    elif (citation_info["has_named_section"] == existing["has_named_section"] and 
+                          page_num is not None and existing["page_num"] is not None and 
+                          page_num < existing["page_num"]):
+                        pdf_sources[dedup_key] = citation_info
                 continue
 
             # 🗄️  Legacy 'source:page:chunk' string
@@ -145,33 +163,85 @@ def query_interface(message, selected_games, include_web, chat_history, selected
                     filename = Path(filepath).name
                     try:
                         page_int = int(page_num)
+                        dedup_key = (filename, "")  # Empty section for legacy format
+                        citation_info = {
+                            "filename": filename,
+                            "page_num": page_int,
+                            "section": "",
+                            "has_named_section": False
+                        }
+                        
+                        # Keep earliest page for same section (empty section in this case)
+                        if dedup_key not in pdf_sources:
+                            pdf_sources[dedup_key] = citation_info
+                        elif page_int < pdf_sources[dedup_key]["page_num"]:
+                            pdf_sources[dedup_key] = citation_info
                     except ValueError:
-                        continue
-                    file_entry = pdf_info.setdefault(filename, {})
-                    file_entry.setdefault(f"p.{page_int}", page_int)
+                        pass
 
-        # Build human-friendly text
+        # Build final sources list from deduplicated data
         sources_list = []
-        for filename, section_map in pdf_info.items():
-            # sort by page number
-            sorted_sections = sorted(section_map.items(), key=lambda kv: kv[1])
-            formatted_parts = []
-            for section_name, page_num in sorted_sections:
-                if section_name.startswith('p.'):
-                    formatted_parts.append(f"p. {page_num}")
+        
+        # Add PDF sources (sort by filename, then page number)
+        sorted_pdf_sources = sorted(pdf_sources.values(), key=lambda x: (x["filename"], x["page_num"] or 0))
+        for citation_info in sorted_pdf_sources:
+            citation_parts = [f"📄 {citation_info['filename']}"]
+            
+            if citation_info["has_named_section"]:
+                # Named section with page number
+                section_name = citation_info['section']
+                if section_name.lower() == 'intro':
+                    section_display = "Page intro"  # More user-friendly than just "intro"
                 else:
-                    formatted_parts.append(f"{section_name} [p. {page_num}]")
-            sources_list.append(f"📄 {filename} ({'; '.join(formatted_parts)})")
+                    section_display = section_name
+                    
+                if citation_info["page_num"] is not None:
+                    # Convert 0-based page numbering to 1-based for user display
+                    display_page = citation_info['page_num'] + 1
+                    citation_parts.append(f"\"{section_display}\" (p. {display_page})")
+                else:
+                    citation_parts.append(f"\"{section_display}\"")
+            elif citation_info["page_num"] is not None:
+                # Page reference only - convert 0-based to 1-based
+                display_page = citation_info['page_num'] + 1
+                citation_parts.append(f"p. {display_page}")
+            
+            sources_list.append(" - ".join(citation_parts))
+        
+        # Add web sources
+        sources_list.extend(url_sources)
 
-        # Append URLs
-        for url in url_sources:
-            sources_list.append(f"🌐 {url}")
-
-        sources_str = " | ".join(sources_list)
+        # Format as a proper numbered list
+        if len(sources_list) == 1:
+            sources_str = sources_list[0]
+        elif len(sources_list) > 1:
+            numbered_sources = [f"{i+1}. {source}" for i, source in enumerate(sources_list)]
+            sources_str = "\n".join(numbered_sources)
+        else:
+            sources_str = "N/A"
     else:
         sources_str = "N/A"
 
-    final_msg = f"{bot_response}\n\n**Source:** {sources_str}"
+    # Don't show sources if the response indicates no good answer was found
+    if "I can't find a good answer" in bot_response or "can't find a good answer" in bot_response:
+        final_msg = bot_response  # No sources for unhelpful responses
+        print(f"[DEBUG] Detected unhelpful response - skipping sources")
+    else:
+        # Clean bot response - remove any LLM-generated sources to avoid duplicates
+        import re
+        
+        # Remove any existing Sources: sections from the LLM response
+        cleaned_response = re.sub(r'\n\n\*\*Sources?:\*\*.*$', '', bot_response, flags=re.DOTALL | re.MULTILINE)
+        cleaned_response = re.sub(r'\n\nSources?:.*$', '', cleaned_response, flags=re.DOTALL | re.MULTILINE)
+        cleaned_response = cleaned_response.strip()
+        
+        # Add our own properly formatted sources
+        if sources and len(sources) > 1:
+            final_msg = f"{cleaned_response}\n\n**Sources:**\n{sources_str}"
+        elif sources:
+            final_msg = f"{cleaned_response}\n\n**Source:** {sources_str}"
+        else:
+            final_msg = f"{cleaned_response}\n\n**Source:** {sources_str}"
     chat_history[-1] = {"role": "assistant", "content": final_msg}
     
     # Persist conversation

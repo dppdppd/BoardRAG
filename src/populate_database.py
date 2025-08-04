@@ -118,12 +118,18 @@ def split_documents(documents: List[Document]):
     retrieval quality compared with naive fixed-width splitting.
     """
 
-    HEADER_RE = re.compile(r"^\s*(?:\d+\.)?\s*[A-Z][A-Z0-9 &'\-/]{2,}\s*$")
+    HEADER_RE = re.compile(r"^\s*(?:[A-Z0-9]+(?:\.[A-Z0-9]+)*\.?)?\s*[A-Z][A-Z0-9 &'\-/]{2,}(?::\s*.*)?$")
 
-    def _split_on_headers(page_doc: Document) -> List[Document]:
-        """Split a single PDF page into sections based on detected headers."""
+    # Track section state across pages to handle continuations
+    last_section_on_previous_page = "intro"
+    
+    def _split_on_headers(page_doc: Document, inherited_section: str) -> tuple[List[Document], str]:
+        """Split a single PDF page into sections based on detected headers.
+        
+        Returns: (chunks, last_section_on_this_page)
+        """
         lines = page_doc.page_content.splitlines()
-        current_header = "intro"
+        current_header = inherited_section  # Start with inherited section, not always "intro"
         buffer: list[str] = []
         out: List[Document] = []
 
@@ -140,19 +146,30 @@ def split_documents(documents: List[Document]):
             if HEADER_RE.match(line):
                 _flush(buffer, current_header)
                 buffer = []
-                current_header = line.strip()
+                # Extract just the section title (before any colon)
+                header_text = line.strip()
+                if ':' in header_text:
+                    current_header = header_text.split(':', 1)[0].strip()
+                else:
+                    current_header = header_text
             else:
                 buffer.append(line)
         _flush(buffer, current_header)
 
         # If no headers were found, return the original page so that downstream
-        # logic still sees it.
-        return out or [page_doc]
+        # logic still sees it, but preserve the section state
+        final_chunks = out or [page_doc]
+        if not out and page_doc:
+            # Update the original page's section metadata to inherited section
+            page_doc.metadata["section"] = inherited_section
+        
+        return final_chunks, current_header
 
-    # 1️⃣ First pass – header splitting
+    # 1️⃣ First pass – header splitting with cross-page section tracking
     section_docs: List[Document] = []
     for page in documents:
-        section_docs.extend(_split_on_headers(page))
+        page_chunks, last_section_on_previous_page = _split_on_headers(page, last_section_on_previous_page)
+        section_docs.extend(page_chunks)
 
     # 2️⃣ Second pass – character splitting only when needed
     char_splitter = RecursiveCharacterTextSplitter(

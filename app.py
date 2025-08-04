@@ -146,8 +146,12 @@ with gr.Blocks(
         # Prime the in-memory store with conversations from the browser
         try:
             from src import conversation_store as _cs
-            for game, hist in (saved_convs or {}).items():
-                _cs.save(saved_session, game, hist)
+            # Restore all data directly to avoid triggering _last_game updates
+            with _cs._LOCK:
+                user_data = _cs._STORE.setdefault(saved_session, {})
+                for game, hist in (saved_convs or {}).items():
+                    user_data[game] = hist
+                    print(f"[DEBUG] Restored {game}: {len(hist) if isinstance(hist, list) else hist}")
         except Exception as e:
             print(f"[DEBUG] Failed priming in-memory conversations: {e}")
 
@@ -386,6 +390,11 @@ with gr.Blocks(
         load_history,
         inputs=[game_dropdown, session_state],
         outputs=[chatbot, prompt_radio],
+    ).then(
+        persist_to_browser,
+        inputs=[session_state, access_state],
+        outputs=[browser_state],
+        show_progress=False
     )
     
     # Hook into chatbot changes to detect when it's been cleared via the built-in button

@@ -81,16 +81,11 @@ def rebuild_library_handler():
         if not documents:
             return "❌ No PDF files found", gr.update()
 
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.CHUNK_SIZE,
-            chunk_overlap=config.CHUNK_OVERLAP,
-            length_function=len,
-            is_separator_regex=False,
-        )
-        split_documents = text_splitter.split_documents(documents)
+        # Use section-aware splitting to preserve rule structure and extract section names
+        from ..populate_database import split_documents as section_aware_split, calc_chunk_ids
+        split_documents = section_aware_split(documents)
 
         # Assign deterministic IDs so games can be detected later
-        from ..populate_database import calc_chunk_ids  # Re-use existing helper
         split_documents = calc_chunk_ids(split_documents)
 
         from ..query import get_chromadb_settings, suppress_chromadb_telemetry
