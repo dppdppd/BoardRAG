@@ -120,6 +120,23 @@ def rebuild_library_handler():
             db.add_documents(chunk_batch, ids=batch_ids)
             print(f"🔧 [DEBUG] Batch {i+1} added successfully")
 
+        # Extract and store game names for all PDFs (like refresh_games_handler does)
+        from ..query import extract_and_store_game_name
+        pdf_files = [pdf_file.name for pdf_file in Path(data_path).rglob("*.pdf")]
+        extracted_names = []
+        for pdf_filename in pdf_files:
+            try:
+                game_name = extract_and_store_game_name(pdf_filename)
+                extracted_names.append(f"{pdf_filename} -> {game_name}")
+                print(f"✅ Extracted game name: '{game_name}' from '{pdf_filename}'")
+            except Exception as e:
+                print(f"⚠️ Failed to extract game name from '{pdf_filename}': {e}")
+                extracted_names.append(f"{pdf_filename} -> [extraction failed]")
+
+        # Clear cached games to force refresh with new names
+        if hasattr(get_available_games, '_filename_mapping'):
+            delattr(get_available_games, '_filename_mapping')
+
         # Clear the app-level cache to ensure fresh games list
         try:
             import app
@@ -127,9 +144,14 @@ def rebuild_library_handler():
         except:
             pass  # If import fails, just continue
 
+        # Small delay to ensure database writes are flushed
+        import time
+        time.sleep(0.5)
+        
         # Refresh available games
         available_games = get_available_games()
         
+        print(f"[DEBUG] Rebuild complete - {len(pdf_files)} PDFs processed, game names stored")
         return f"✅ Library rebuilt successfully! {len(split_documents)} chunks from {len(documents)} documents", gr.update(choices=available_games)
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
@@ -256,7 +278,7 @@ def refresh_games_handler():
         chroma_path = config.CHROMA_PATH
 
         if not os.path.exists(data_path):
-            return "❌ No data directory found", gr.update()
+            return "❌ No data directory found", gr.update(), gr.update(), gr.update()
 
         stored_games_dict = get_stored_game_names()
         stored_filenames = set(stored_games_dict.keys())  # existing PDF filenames
@@ -267,6 +289,11 @@ def refresh_games_handler():
             for pdf_file in Path(data_path).glob("*.pdf")
         }
         new_pdf_files = all_pdf_files - stored_filenames
+        
+        # Debug logging to understand why files are considered "new"
+        print(f"[DEBUG] refresh_games_handler: Found {len(all_pdf_files)} total PDFs")
+        print(f"[DEBUG] refresh_games_handler: Found {len(stored_filenames)} stored game names: {sorted(stored_filenames)}")
+        print(f"[DEBUG] refresh_games_handler: Identified {len(new_pdf_files)} new files: {sorted(new_pdf_files)}")
 
         if not new_pdf_files:
             available_games = get_available_games()
@@ -274,6 +301,7 @@ def refresh_games_handler():
             return (
                 "ℹ️ No new PDFs to process",
                 gr.update(choices=available_games),
+                gr.update(choices=pdf_choices),
                 gr.update(choices=pdf_choices),
             )
 
@@ -328,12 +356,14 @@ def refresh_games_handler():
             f"✅ Added {len(new_pdf_files)} new PDF(s): {', '.join(new_pdf_files)}",
             gr.update(choices=available_games),
             gr.update(choices=pdf_choices),
+            gr.update(choices=pdf_choices),
         )
     except Exception as e:
         pdf_choices = get_pdf_dropdown_choices()
         return (
             f"❌ Error processing new games: {str(e)}",
             gr.update(),
+            gr.update(choices=pdf_choices),
             gr.update(choices=pdf_choices),
         )
 
@@ -362,7 +392,7 @@ def upload_with_status_update(pdf_files):
 
         if uploaded_count > 0:
             # Automatically process the newly uploaded PDFs so they are instantly usable
-            process_msg, updated_game_dropdown, pdf_choices_update = refresh_games_handler()
+            process_msg, updated_game_dropdown, pdf_choices_update, pdf_choices_update2 = refresh_games_handler()
             
             # Combine messages for clarity
             combined_msg = (
