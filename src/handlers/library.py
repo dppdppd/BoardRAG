@@ -58,25 +58,17 @@ def rebuild_library_handler():
         documents = []
         for pdf_file in Path(data_path).rglob("*.pdf"):
             print(f"Processing: {pdf_file}")
-            print(f"🔧 [DEBUG] Processing PDF: {pdf_file}")
-            print(f"🔧 [DEBUG]   Absolute path: {pdf_file.absolute()}")
-            print(f"🔧 [DEBUG]   String representation: {str(pdf_file)}")
             
             loader = PyPDFLoader(str(pdf_file))
             docs = loader.load()
-            print(f"🔧 [DEBUG]   Loaded {len(docs)} documents from PDF")
             
-            for i, doc in enumerate(docs):
-                print(f"🔧 [DEBUG]   Document {i} metadata before: {doc.metadata}")
-                
-                # For flat file structure, use the filename (without extension) as game identifier
-                game_name = pdf_file.stem  # filename without .pdf extension
+            # Set game metadata for all documents from this PDF
+            game_name = pdf_file.stem  # filename without .pdf extension
+            for doc in docs:
                 doc.metadata["game"] = game_name
-                print(f"🔧 [DEBUG]   Set game metadata to: {game_name}")
-                
-                print(f"🔧 [DEBUG]   Document {i} metadata after: {doc.metadata}")
-                print(f"🔧 [DEBUG]   Document {i} source in metadata: {doc.metadata.get('source', 'NO SOURCE!')}")
-                documents.extend([doc])
+            
+            documents.extend(docs)
+            print(f"🔧 [DEBUG] ✅ {pdf_file.name}: {len(docs)} pages, game='{game_name}'")
 
         if not documents:
             return "❌ No PDF files found", gr.update()
@@ -92,10 +84,10 @@ def rebuild_library_handler():
         from itertools import islice
 
         print(f"🔧 [DEBUG] About to add {len(split_documents)} document chunks to ChromaDB")
-        for i, chunk in enumerate(split_documents[:5]):  # Show first 5 chunks
-            print(f"🔧 [DEBUG] Chunk {i}:")
-            print(f"🔧 [DEBUG]   metadata: {chunk.metadata}")
-            print(f"🔧 [DEBUG]   content preview: {chunk.page_content[:100]}...")
+        if len(split_documents) > 0:
+            sample_chunk = split_documents[0]
+            print(f"🔧 [DEBUG] Sample chunk metadata: {sample_chunk.metadata}")
+            print(f"🔧 [DEBUG] Sample content: {sample_chunk.page_content[:100]}...")
 
         def batched(it, n=100):
             """Yield n-sized batches from it."""
@@ -116,11 +108,15 @@ def rebuild_library_handler():
         print(f"🔧 [DEBUG] Using ChromaDB collection: '{db._collection.name}'")
 
         # Add documents in batches to avoid token limits
+        batch_count = 0
         for i, chunk_batch in enumerate(batched(split_documents, 100)):
-            print(f"🔧 [DEBUG] Adding batch {i+1} with {len(chunk_batch)} chunks")
             batch_ids = [chunk.metadata.get("id") for chunk in chunk_batch]
             db.add_documents(chunk_batch, ids=batch_ids)
-            print(f"🔧 [DEBUG] Batch {i+1} added successfully")
+            batch_count += 1
+            if batch_count % 10 == 0:  # Progress update every 10 batches
+                print(f"🔧 [DEBUG] Progress: {batch_count} batches processed...")
+        
+        print(f"🔧 [DEBUG] Completed: {batch_count} batches, {len(split_documents)} total chunks added")
         
         # Debug: Verify documents were actually added to the collection
         verification_docs = db.get()
@@ -134,14 +130,21 @@ def rebuild_library_handler():
         from ..query import extract_and_store_game_name
         pdf_files = [pdf_file.name for pdf_file in Path(data_path).rglob("*.pdf")]
         extracted_names = []
+        extraction_failures = []
+        
+        print(f"🔧 [DEBUG] Extracting game names from {len(pdf_files)} PDFs...")
         for pdf_filename in pdf_files:
             try:
                 game_name = extract_and_store_game_name(pdf_filename)
                 extracted_names.append(f"{pdf_filename} -> {game_name}")
-                print(f"✅ Extracted game name: '{game_name}' from '{pdf_filename}'")
             except Exception as e:
                 print(f"⚠️ Failed to extract game name from '{pdf_filename}': {e}")
+                extraction_failures.append(pdf_filename)
                 extracted_names.append(f"{pdf_filename} -> [extraction failed]")
+        
+        print(f"🔧 [DEBUG] Game name extraction: {len(extracted_names) - len(extraction_failures)}/{len(pdf_files)} successful")
+        if extraction_failures:
+            print(f"🔧 [DEBUG] Failed extractions: {', '.join(extraction_failures)}")
 
         # Clear cached games to force refresh with new names
         if hasattr(get_available_games, '_filename_mapping'):
@@ -161,8 +164,11 @@ def rebuild_library_handler():
         # Refresh available games
         available_games = get_available_games()
         
-        print(f"[DEBUG] Rebuild complete - {len(pdf_files)} PDFs processed, game names stored")
-        return f"✅ Library rebuilt successfully! {len(split_documents)} chunks from {len(documents)} documents", gr.update(choices=available_games)
+        success_count = len(extracted_names) - len(extraction_failures)
+        print(f"🔧 [DEBUG] Rebuild complete: {len(pdf_files)} PDFs → {len(documents)} docs → {len(split_documents)} chunks → {success_count} game names")
+        
+        status_msg = f"✅ Library rebuilt! {len(pdf_files)} PDFs, {len(split_documents)} chunks, {success_count} games extracted"
+        return status_msg, gr.update(choices=available_games)
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 
