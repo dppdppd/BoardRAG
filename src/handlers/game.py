@@ -198,12 +198,3 @@ def get_pdf_dropdown_choices():
     return sorted(choices) 
 
 
-def update_chatbot_label(selected_game: str):
-    """Return an updated gr.Chatbot label reflecting *selected_game*.
-
-    If *selected_game* is falsy, we keep the default "Chatbot" label so the
-    component still renders nicely when no game has been chosen yet.
-    """
-    label = selected_game if selected_game else "Chatbot"
-    print(f"[DEBUG] Updating chatbot label to '{label}'")
-    return gr.update(label=label)

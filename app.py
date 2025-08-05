@@ -29,7 +29,7 @@ from src.handlers import (
     unlock_handler, rebuild_library_handler, refresh_games_handler, rebuild_selected_game_handler,
     wipe_chat_history_handler, refresh_storage_handler, upload_with_status_update,
     delete_game_handler, rename_game_handler, get_pdf_dropdown_choices,
-    update_chatbot_label, get_user_index_for_choice,
+    get_user_index_for_choice,
     load_history, auto_load_on_session_ready, auto_unlock_interface
 )
 from src.ui_components import query_interface
@@ -217,7 +217,7 @@ with gr.Blocks(
                 elem_classes=["custom-chatbot"],
                 render_markdown=True,
                 type="messages",
-                label="Chatbot",
+                show_label=False,
             )
             
 
@@ -240,7 +240,7 @@ with gr.Blocks(
         # Right sidebar for controls and settings
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Prompt history – starts open and is shown once unlocked
-            with gr.Accordion("🔖 Questions", open=True, visible=False) as prompt_accordion:
+            with gr.Accordion("🔖 History", open=True, visible=False) as prompt_accordion:
                 prompt_radio = gr.Radio(value=None, choices=[], label="", interactive=True, elem_id="prompt-radio")
                 # Hidden component to pass user index to JavaScript
                 user_index_hidden = gr.Number(value=-1, visible=False)
@@ -420,13 +420,7 @@ with gr.Blocks(
         outputs=[prompt_radio],
     )
 
-    # Update Chatbot panel title when game changes
-    game_dropdown.change(
-        update_chatbot_label,
-        inputs=[game_dropdown],
-        outputs=[chatbot],
-        queue=False,
-    )
+
     
     # Auto-load conversation when session becomes available
     session_state.change(
