@@ -18,178 +18,72 @@ from ..handlers.game import get_pdf_dropdown_choices
 
 
 def rebuild_library_handler():
-    """Rebuild the library from scratch."""
+    """
+    Rebuild the entire library by clearing the database and reprocessing all PDFs.
+    Uses the same proven logic as populate_database.py
+    """
     try:
-        chroma_path = config.CHROMA_PATH
-        data_path = config.DATA_PATH
-
-        # Clean existing vector store safely (avoids Windows file-lock errors)
+        # Force close any existing ChromaDB connections to release file locks
+        print("🔧 [REBUILD] Closing existing ChromaDB connections...")
+        import gc
+        gc.collect()  # Force garbage collection to close connections
+        
+        # Use ChromaDB reset instead of file deletion to avoid locks
+        from ..query import get_chromadb_settings, suppress_chromadb_telemetry
         import chromadb
-        from ..query import get_chromadb_settings, suppress_chromadb_telemetry
-
-        if os.path.exists(chroma_path):
-            try:
-                print("[DEBUG] Resetting existing Chroma DB via PersistentClient.reset() with consistent settings")
-                with suppress_chromadb_telemetry():
-                    chromadb.PersistentClient(path=chroma_path, settings=get_chromadb_settings()).reset()
-            except Exception as e:
-                print(f"[DEBUG] ChromaDB reset failed: {e}")
-                print("[DEBUG] Attempting to manually clear the database directory...")
-                
-                # If reset fails (tenant errors, corruption), manually delete the directory
-                try:
-                    import time
-                    time.sleep(1)  # Brief pause to release any file handles
-                    
-                    if os.path.exists(chroma_path):
-                        shutil.rmtree(chroma_path)
-                        print("[DEBUG] Successfully cleared ChromaDB directory")
-                        
-                    # Recreate the directory
-                    os.makedirs(chroma_path, exist_ok=True)
-                    print("[DEBUG] Recreated ChromaDB directory")
-                    
-                except Exception as cleanup_error:
-                    return f"❌ Error clearing corrupted database: {cleanup_error}", gr.update()
-
-        if not os.path.exists(data_path):
-            return "❌ No data directory found", gr.update()
-
-        documents = []
-        for pdf_file in Path(data_path).rglob("*.pdf"):
-            print(f"Processing: {pdf_file}")
-            
-            loader = PyPDFLoader(str(pdf_file))
-            docs = loader.load()
-            
-            # Set game metadata for all documents from this PDF
-            game_name = pdf_file.stem  # filename without .pdf extension
-            for doc in docs:
-                doc.metadata["game"] = game_name
-            
-            documents.extend(docs)
-            print(f"🔧 [DEBUG] ✅ {pdf_file.name}: {len(docs)} pages, game='{game_name}'")
-
-        if not documents:
-            return "❌ No PDF files found", gr.update()
-
-        # Use section-aware splitting to preserve rule structure and extract section names
-        from ..populate_database import split_documents as section_aware_split, calc_chunk_ids
-        split_documents = section_aware_split(documents)
-
-        # Assign deterministic IDs so games can be detected later
-        split_documents = calc_chunk_ids(split_documents)
-
-        from ..query import get_chromadb_settings, suppress_chromadb_telemetry
-        from itertools import islice
-
-        print(f"🔧 [DEBUG] About to add {len(split_documents)} document chunks to ChromaDB")
-        if len(split_documents) > 0:
-            sample_chunk = split_documents[0]
-            print(f"🔧 [DEBUG] Sample chunk metadata: {sample_chunk.metadata}")
-            print(f"🔧 [DEBUG] Sample content: {sample_chunk.page_content[:100]}...")
-
-        def batched(it, n=100):
-            """Yield n-sized batches from it."""
-            it = iter(it)
-            while True:
-                batch = list(islice(it, n))
-                if not batch:
-                    break
-                yield batch
-
-        with suppress_chromadb_telemetry():
-            db = Chroma(
-                persist_directory=chroma_path,
-                embedding_function=get_embedding_function(),
-                client_settings=get_chromadb_settings(),
-            )
+        chroma_path = config.CHROMA_PATH
         
-        print(f"🔧 [DEBUG] Using ChromaDB collection: '{db._collection.name}'")
-
-        # Add documents in batches to avoid token limits
-        batch_count = 0
-        for i, chunk_batch in enumerate(batched(split_documents, 100)):
-            batch_ids = [chunk.metadata.get("id") for chunk in chunk_batch]
-            db.add_documents(chunk_batch, ids=batch_ids)
-            batch_count += 1
-            if batch_count % 10 == 0:  # Progress update every 10 batches
-                print(f"🔧 [DEBUG] Progress: {batch_count} batches processed...")
-        
-        print(f"🔧 [DEBUG] Completed: {batch_count} batches, {len(split_documents)} total chunks added")
-        
-        # CRITICAL: Force ChromaDB to persist to disk
-        print(f"🔧 [DEBUG] Forcing ChromaDB persistence...")
+        print("🔧 [REBUILD] Clearing database with ChromaDB reset...")
         try:
-            # Get the underlying ChromaDB client and force persistence
-            if hasattr(db, '_client') and hasattr(db._client, 'persist'):
-                db._client.persist()
-                print(f"🔧 [DEBUG] ✅ Client persistence called")
-            
-            # Also try collection-level persistence if available
-            if hasattr(db._collection, 'persist'):
-                db._collection.persist()
-                print(f"🔧 [DEBUG] ✅ Collection persistence called")
-                
+            with suppress_chromadb_telemetry():
+                reset_client = chromadb.PersistentClient(path=chroma_path, settings=get_chromadb_settings())
+                reset_client.reset()
+            print("🔧 [REBUILD] Database cleared successfully")
         except Exception as e:
-            print(f"🔧 [DEBUG] ⚠️ Persistence warning: {e}")
+            print(f"🔧 [REBUILD] Database clear failed: {e}")
+            return f"❌ Error clearing database: {e}", gr.update()
         
-        # Add a small delay to ensure writes are flushed
-        import time
-        time.sleep(2)
-        print(f"🔧 [DEBUG] Persistence delay completed")
+        # Now use populate_database functions for the rest
+        from ..populate_database import load_documents, split_documents, add_to_chroma
         
-        # Debug: Verify documents were actually added to the collection
-        verification_docs = db.get()
-        print(f"🔧 [DEBUG] Verification: Database now contains {len(verification_docs['ids'])} documents")
-        if len(verification_docs['ids']) > 0:
-            print(f"🔧 [DEBUG] Sample stored document IDs: {verification_docs['ids'][:3]}")
-        else:
-            print(f"🔧 [DEBUG] ❌ CRITICAL: Verification shows 0 documents despite adding {len(split_documents)}!")
-
-        # Extract and store game names for all PDFs (like refresh_games_handler does)
+        print("🔧 [REBUILD] Loading documents...")
+        documents = load_documents()  # Load all documents from DATA_PATH
+        
+        print("🔧 [REBUILD] Splitting documents...")
+        chunks = split_documents(documents)
+        
+        print("🔧 [REBUILD] Adding to ChromaDB...")
+        success = add_to_chroma(chunks)
+        
+        if not success:
+            return "❌ Failed to add documents to database", gr.update()
+        
+        # Extract and store game names
         from ..query import extract_and_store_game_name
-        pdf_files = [pdf_file.name for pdf_file in Path(data_path).rglob("*.pdf")]
-        extracted_names = []
-        extraction_failures = []
+        import os
+        filenames = {
+            os.path.basename(doc.metadata.get("source", ""))
+            for doc in documents
+        }
+        print(f"🔧 [REBUILD] Extracting game names for {len(filenames)} PDFs...")
+        for fname in filenames:
+            if fname:
+                extract_and_store_game_name(fname)
         
-        print(f"🔧 [DEBUG] Extracting game names from {len(pdf_files)} PDFs...")
-        for pdf_filename in pdf_files:
-            try:
-                game_name = extract_and_store_game_name(pdf_filename)
-                extracted_names.append(f"{pdf_filename} -> {game_name}")
-            except Exception as e:
-                print(f"⚠️ Failed to extract game name from '{pdf_filename}': {e}")
-                extraction_failures.append(pdf_filename)
-                extracted_names.append(f"{pdf_filename} -> [extraction failed]")
-        
-        print(f"🔧 [DEBUG] Game name extraction: {len(extracted_names) - len(extraction_failures)}/{len(pdf_files)} successful")
-        if extraction_failures:
-            print(f"🔧 [DEBUG] Failed extractions: {', '.join(extraction_failures)}")
-
-        # Clear cached games to force refresh with new names
+        # Clear caches and refresh
         if hasattr(get_available_games, '_filename_mapping'):
             delattr(get_available_games, '_filename_mapping')
-
-        # Clear the app-level cache to ensure fresh games list
+            
         try:
             import app
             app.clear_games_cache()
         except:
-            pass  # If import fails, just continue
-
-        # Small delay to ensure database writes are flushed
-        import time
-        time.sleep(0.5)
+            pass
         
-        # Refresh available games
         available_games = get_available_games()
         
-        success_count = len(extracted_names) - len(extraction_failures)
-        print(f"🔧 [DEBUG] Rebuild complete: {len(pdf_files)} PDFs → {len(documents)} docs → {len(split_documents)} chunks → {success_count} game names")
-        
-        status_msg = f"✅ Library rebuilt! {len(pdf_files)} PDFs, {len(split_documents)} chunks, {success_count} games extracted"
-        return status_msg, gr.update(choices=available_games)
+        return f"✅ Library rebuilt! {len(documents)} docs, {len(chunks)} chunks, {len(available_games)} games", gr.update(choices=available_games)
+
     except Exception as e:
         return f"❌ Error rebuilding library: {str(e)}", gr.update()
 

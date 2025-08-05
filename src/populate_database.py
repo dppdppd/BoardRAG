@@ -259,8 +259,12 @@ def add_to_chroma(chunks: List[Document]) -> bool:
             import traceback
 
             traceback.print_exc()
+            return False
     else:
         print("✅ No new documents to add")
+
+    print("Data added successfully.")
+    return True
 
 
 def calc_chunk_ids(chunks: List[Document]) -> List[Document]:
@@ -309,8 +313,9 @@ def calc_chunk_ids(chunks: List[Document]) -> List[Document]:
 def clear_database():
     """
     Clears the Chroma vector database.
+    Note: This function is for standalone use only. 
+    UI should use ChromaDB reset() method to avoid file locks.
     """
-
     if os.path.exists(CHROMA_PATH):
         shutil.rmtree(CHROMA_PATH)
 
