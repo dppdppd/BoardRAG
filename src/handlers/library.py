@@ -118,13 +118,34 @@ def rebuild_library_handler():
         
         print(f"🔧 [DEBUG] Completed: {batch_count} batches, {len(split_documents)} total chunks added")
         
+        # CRITICAL: Force ChromaDB to persist to disk
+        print(f"🔧 [DEBUG] Forcing ChromaDB persistence...")
+        try:
+            # Get the underlying ChromaDB client and force persistence
+            if hasattr(db, '_client') and hasattr(db._client, 'persist'):
+                db._client.persist()
+                print(f"🔧 [DEBUG] ✅ Client persistence called")
+            
+            # Also try collection-level persistence if available
+            if hasattr(db._collection, 'persist'):
+                db._collection.persist()
+                print(f"🔧 [DEBUG] ✅ Collection persistence called")
+                
+        except Exception as e:
+            print(f"🔧 [DEBUG] ⚠️ Persistence warning: {e}")
+        
+        # Add a small delay to ensure writes are flushed
+        import time
+        time.sleep(2)
+        print(f"🔧 [DEBUG] Persistence delay completed")
+        
         # Debug: Verify documents were actually added to the collection
         verification_docs = db.get()
         print(f"🔧 [DEBUG] Verification: Database now contains {len(verification_docs['ids'])} documents")
         if len(verification_docs['ids']) > 0:
             print(f"🔧 [DEBUG] Sample stored document IDs: {verification_docs['ids'][:3]}")
         else:
-            print(f"🔧 [DEBUG] ❌ ERROR: No documents found in database after adding!")
+            print(f"🔧 [DEBUG] ❌ CRITICAL: Verification shows 0 documents despite adding {len(split_documents)}!")
 
         # Extract and store game names for all PDFs (like refresh_games_handler does)
         from ..query import extract_and_store_game_name

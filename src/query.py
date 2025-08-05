@@ -382,6 +382,10 @@ def get_available_games() -> List[str]:
             db = Chroma(client=persistent_client, embedding_function=embedding_function)
         
         print(f"[DEBUG] get_available_games: Using ChromaDB collection: '{db._collection.name}'")
+        
+        # Small delay to ensure any recent writes are fully persisted
+        import time
+        time.sleep(0.5)
 
         # Get all documents to extract filenames
         all_docs = db.get()
