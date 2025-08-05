@@ -24,7 +24,7 @@ def rebuild_library_handler():
     """
     try:
         # Force close any existing ChromaDB connections to release file locks
-        print("🔧 [REBUILD] Closing existing ChromaDB connections...")
+        print("[REBUILD] Closing existing ChromaDB connections...")
         import gc
         gc.collect()  # Force garbage collection to close connections
         
@@ -33,14 +33,14 @@ def rebuild_library_handler():
         import chromadb
         chroma_path = config.CHROMA_PATH
         
-        print("🔧 [REBUILD] Clearing database with ChromaDB reset...")
+        print("[REBUILD] Clearing database with ChromaDB reset...")
         try:
             with suppress_chromadb_telemetry():
                 reset_client = chromadb.PersistentClient(path=chroma_path, settings=get_chromadb_settings())
                 reset_client.reset()
-            print("🔧 [REBUILD] Database cleared successfully")
+            print("[REBUILD] Database cleared successfully")
         except Exception as e:
-            print(f"🔧 [REBUILD] Database clear failed: {e}")
+            print(f"[REBUILD] Database clear failed: {e}")
             return f"❌ Error clearing database: {e}", gr.update()
         
         # Now use populate_database functions for the rest
@@ -49,10 +49,10 @@ def rebuild_library_handler():
         print("🔧 [REBUILD] Loading documents...")
         documents = load_documents()  # Load all documents from DATA_PATH
         
-        print("🔧 [REBUILD] Splitting documents...")
+        print(f"🔧 [REBUILD] Splitting {len(documents)} documents into chunks...")
         chunks = split_documents(documents)
         
-        print("🔧 [REBUILD] Adding to ChromaDB...")
+        print(f"🔧 [REBUILD] Adding {len(chunks)} chunks to ChromaDB...")
         success = add_to_chroma(chunks)
         
         if not success:
@@ -66,8 +66,9 @@ def rebuild_library_handler():
             for doc in documents
         }
         print(f"🔧 [REBUILD] Extracting game names for {len(filenames)} PDFs...")
-        for fname in filenames:
+        for i, fname in enumerate(filenames, 1):
             if fname:
+                print(f"   🎮 Extracting game name {i}/{len(filenames)}: {fname}")
                 extract_and_store_game_name(fname)
         
         # Clear caches and refresh
@@ -81,11 +82,23 @@ def rebuild_library_handler():
             pass
         
         available_games = get_available_games()
+        pdf_choices = get_pdf_dropdown_choices()
         
-        return f"✅ Library rebuilt! {len(documents)} docs, {len(chunks)} chunks, {len(available_games)} games", gr.update(choices=available_games)
+        return (
+            f"✅ Library rebuilt! {len(documents)} docs, {len(chunks)} chunks, {len(available_games)} games",
+            gr.update(choices=available_games),
+            gr.update(choices=pdf_choices),
+            gr.update(choices=pdf_choices),
+        )
 
     except Exception as e:
-        return f"❌ Error rebuilding library: {str(e)}", gr.update()
+        pdf_choices = get_pdf_dropdown_choices()
+        return (
+            f"❌ Error rebuilding library: {str(e)}",
+            gr.update(),
+            gr.update(choices=pdf_choices),
+            gr.update(choices=pdf_choices),
+        )
 
 
 def rebuild_selected_game_handler(selected_game: str):

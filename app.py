@@ -478,7 +478,7 @@ with gr.Blocks(
 
     # Connect rebuild library button
     rebuild_button.click(
-        rebuild_library_handler, inputs=[], outputs=[rebuild_status, game_dropdown]
+        rebuild_library_handler, inputs=[], outputs=[rebuild_status, game_dropdown, delete_game_dropdown, rename_game_dropdown]
     ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
 
     # Connect process new PDFs button

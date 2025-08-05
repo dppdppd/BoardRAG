@@ -78,7 +78,26 @@ def load_documents(target_paths: List[str] | None = None):
 
     # Default: load everything (original behaviour)
     if not target_paths:
-        return PyPDFDirectoryLoader(DATA_PATH).load()
+        # Scan for PDF files first to show progress
+        import os
+        from pathlib import Path
+        
+        pdf_files = list(Path(DATA_PATH).rglob("*.pdf"))
+        print(f"📁 Found {len(pdf_files)} PDF files to process...")
+        
+        documents: List[Document] = []
+        for i, pdf_file in enumerate(pdf_files, 1):
+            print(f"📖 Loading PDF {i}/{len(pdf_files)}: {pdf_file.name}")
+            try:
+                loader = PyPDFLoader(str(pdf_file))
+                docs = loader.load()
+                print(f"   ✅ Loaded {len(docs)} pages from {pdf_file.name}")
+                documents.extend(docs)
+            except Exception as e:
+                print(f"   ❌ Failed to load {pdf_file.name}: {e}")
+        
+        print(f"📚 Total documents loaded: {len(documents)} pages from {len(pdf_files)} PDFs")
+        return documents
 
     documents: List[Document] = []
 
@@ -165,11 +184,18 @@ def split_documents(documents: List[Document]):
         
         return final_chunks, current_header
 
+    print(f"🔍 Phase 1: Section-aware splitting of {len(documents)} pages...")
+    
     # 1️⃣ First pass – header splitting with cross-page section tracking
     section_docs: List[Document] = []
-    for page in documents:
+    for i, page in enumerate(documents):
+        if (i + 1) % 50 == 0 or i == len(documents) - 1:  # Progress every 50 pages
+            print(f"   📄 Processed {i + 1}/{len(documents)} pages...")
         page_chunks, last_section_on_previous_page = _split_on_headers(page, last_section_on_previous_page)
         section_docs.extend(page_chunks)
+
+    print(f"✅ Phase 1 complete: {len(documents)} pages → {len(section_docs)} sections")
+    print(f"🔍 Phase 2: Character-level splitting for oversized sections...")
 
     # 2️⃣ Second pass – character splitting only when needed
     char_splitter = RecursiveCharacterTextSplitter(
@@ -181,11 +207,19 @@ def split_documents(documents: List[Document]):
     )
 
     final_chunks: List[Document] = []
-    for sec in section_docs:
+    oversized_count = 0
+    for i, sec in enumerate(section_docs):
+        if (i + 1) % 100 == 0:  # Progress every 100 sections
+            print(f"   📝 Processed {i + 1}/{len(section_docs)} sections...")
+        
         if len(sec.page_content) <= CHUNK_SIZE:
             final_chunks.append(sec)
         else:
+            oversized_count += 1
             final_chunks.extend(char_splitter.split_documents([sec]))
+
+    print(f"✅ Phase 2 complete: {len(section_docs)} sections → {len(final_chunks)} final chunks")
+    print(f"📊 Split {oversized_count} oversized sections into smaller chunks")
 
     return final_chunks
 

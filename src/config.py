@@ -304,7 +304,7 @@ def validate_config():
 
 def print_config():
     """Print current configuration (hiding API keys)."""
-    print("🔧 BoardRAG Configuration:")
+    print("BoardRAG Configuration:")
     print(f"  Provider: {LLM_PROVIDER}")
     print(f"  Generator: {GENERATOR_MODEL}")
     print(f"  Embedder: {EMBEDDER_MODEL}")

@@ -381,17 +381,15 @@ def get_available_games() -> List[str]:
             )
             db = Chroma(client=persistent_client, embedding_function=embedding_function)
         
-        print(f"[DEBUG] get_available_games: Using ChromaDB collection: '{db._collection.name}'")
-
         # Get all documents to extract filenames
         all_docs = db.get()
         
-        # Debug: Show what's actually in the main collection
-        print(f"[DEBUG] get_available_games: Main collection has {len(all_docs['ids'])} documents")
-        if len(all_docs['ids']) > 0:
-            print(f"[DEBUG] get_available_games: Sample document IDs: {all_docs['ids'][:3]}")
-        else:
-            print(f"[DEBUG] get_available_games: Main collection is EMPTY - this is the problem!")
+        # Only show debug on first call or when empty
+        if not hasattr(get_available_games, '_last_count') or len(all_docs['ids']) == 0:
+            print(f"[DEBUG] get_available_games: Main collection has {len(all_docs['ids'])} documents")
+            if len(all_docs['ids']) == 0:
+                print(f"[DEBUG] get_available_games: Main collection is EMPTY - this is the problem!")
+            get_available_games._last_count = len(all_docs['ids'])
 
         # Extract unique filenames from source paths
         filenames = set()
