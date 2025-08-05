@@ -218,15 +218,20 @@ def rename_game_handler(selected_entries, new_name):
 
     filenames = []
     for selected_entry in selected_entries:
+        print(f"[DEBUG] Processing dropdown entry: '{selected_entry}'")
         # Extract filename from "Game - filename.pdf" pattern
+        # Use rsplit to split from the right, in case the game name contains dashes
         if " - " in selected_entry:
-            _, filename = selected_entry.split(" - ", 1)
+            game_part, filename = selected_entry.rsplit(" - ", 1)
             filename = filename.strip()
+            print(f"[DEBUG] Extracted: game_part='{game_part}', filename='{filename}'")
         else:
             filename = selected_entry.strip()
+            print(f"[DEBUG] No separator found, using whole string as filename: '{filename}'")
         filenames.append(filename)
 
-    print(f"[DEBUG] rename_game_handler: filenames={filenames}, new_name='{new_name}'")
+    print(f"[DEBUG] Final filenames for database update: {filenames}")
+    print(f"[DEBUG] New game name to assign: '{new_name}'")
 
     try:
         import chromadb
@@ -241,6 +246,22 @@ def rename_game_handler(selected_entries, new_name):
         # Upsert the new mapping for all selected PDFs
         collection.upsert(ids=filenames, documents=[new_name] * len(filenames))
         print(f"[DEBUG] Upserted new mappings in game_names collection: {filenames} -> '{new_name}'")
+        
+        # Verify the update worked by reading back from database
+        verification = collection.get(ids=filenames)
+        print(f"[DEBUG] Verification - stored mappings:")
+        for i, (vid, vdoc) in enumerate(zip(verification['ids'], verification['documents'])):
+            print(f"[DEBUG]   '{vid}' -> '{vdoc}'")
+        
+        # Also check what get_stored_game_names returns for these files
+        from ..query import get_stored_game_names
+        all_stored = get_stored_game_names()
+        print(f"[DEBUG] Full stored game names mapping ({len(all_stored)} entries):")
+        for fname, gname in sorted(all_stored.items()):
+            if fname in filenames:
+                print(f"[DEBUG]   ✓ '{fname}' -> '{gname}'")
+            else:
+                print(f"[DEBUG]     '{fname}' -> '{gname}'")
 
         # Clear any cached mapping to force refresh
         if hasattr(get_available_games, '_filename_mapping'):
@@ -274,11 +295,20 @@ def get_pdf_dropdown_choices():
     """Return list like 'Game Name - filename.pdf' for all PDFs."""
     pdf_files = Path(config.DATA_PATH).rglob('*.pdf')
     name_map = get_stored_game_names()
+    print(f"[DEBUG] get_pdf_dropdown_choices: Found {len(list(pdf_files))} PDF files")
+    pdf_files = Path(config.DATA_PATH).rglob('*.pdf')  # Re-create generator since we consumed it
+    print(f"[DEBUG] get_pdf_dropdown_choices: Got {len(name_map)} stored game names")
+    
     choices = []
     for p in pdf_files:
         fname = p.name
         game_name = name_map.get(fname, fname)
-        choices.append(f"{game_name} - {fname}")
-    return sorted(choices) 
+        choice = f"{game_name} - {fname}"
+        choices.append(choice)
+        print(f"[DEBUG] get_pdf_dropdown_choices: '{fname}' -> '{game_name}' -> '{choice}'")
+    
+    result = sorted(choices)
+    print(f"[DEBUG] get_pdf_dropdown_choices: Returning {len(result)} choices")
+    return result 
 
 
