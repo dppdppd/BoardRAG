@@ -283,7 +283,7 @@ with gr.Blocks(
             with gr.Accordion(
                 "🗑️ Delete PDF", open=False, visible=False
             ) as delete_accordion:
-                delete_game_dropdown = gr.Dropdown(choices=get_pdf_dropdown_choices(), label="Select PDF")
+                delete_game_dropdown = gr.Dropdown(choices=get_pdf_dropdown_choices(), label="Select PDF", multiselect=True)
                 delete_button = gr.Button("Delete", variant="stop")
                 delete_status = gr.Textbox(interactive=False)
 
@@ -301,7 +301,7 @@ with gr.Blocks(
                 "🔄 Rebuild Selected Game", open=False, visible=False
             ) as rebuild_game_accordion:
                 rebuild_game_dropdown = gr.Dropdown(
-                    choices=get_available_games(), label="Select Game"
+                    choices=get_available_games(), label="Select Game", multiselect=True
                 )
                 rebuild_selected_button = gr.Button("Rebuild Game", variant="secondary")
                 rebuild_selected_status = gr.Textbox(interactive=False, visible=False)

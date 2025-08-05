@@ -101,11 +101,11 @@ def rebuild_library_handler():
         )
 
 
-def rebuild_selected_game_handler(selected_game: str):
-    """Re-ingest the PDF(s) that belong to *selected_game* only.
+def rebuild_selected_game_handler(selected_games):
+    """Re-ingest the PDF(s) that belong to *selected_games* only.
 
     We drop any existing Chroma docs that originate from the PDFs that map to
-    the provided *selected_game*, then load/split them again using the same
+    the provided *selected_games*, then load/split them again using the same
     logic as *populate_database.py* so that changes to splitting parameters
     immediately take effect.
     """
@@ -125,43 +125,75 @@ def rebuild_selected_game_handler(selected_game: str):
     )
     from .game import get_pdf_dropdown_choices
 
-    if not selected_game:
-        empty = gr.update()
-        return "❌ Please select a game", empty, empty, empty
+    # Handle multiselect dropdown (returns list) and backward compatibility (single string)
+    if isinstance(selected_games, list):
+        # Multiselect dropdown always returns a list
+        if not selected_games:
+            return "❌ Please select at least one game", gr.update(), gr.update(), gr.update()
+        # Filter out empty strings
+        selected_games = [game for game in selected_games if game and game.strip()]
+        if not selected_games:
+            return "❌ Please select at least one game", gr.update(), gr.update(), gr.update()
+    elif isinstance(selected_games, str):
+        # Backward compatibility for single selection
+        if not selected_games.strip():
+            return "❌ Please select a game", gr.update(), gr.update(), gr.update()
+        selected_games = [selected_games]
+    else:
+        # Handle None or other unexpected types
+        return "❌ Please select at least one game", gr.update(), gr.update(), gr.update()
 
-    # Resolve PDF filenames mapped to this game
+    # Resolve PDF filenames mapped to all selected games
     mapping = getattr(get_available_games, "_filename_mapping", None)
-    if mapping is None or selected_game not in mapping:
+    if mapping is None:
         # Rebuild mapping once
         get_available_games()
         mapping = getattr(get_available_games, "_filename_mapping", {})
 
-    simple_files = mapping.get(selected_game, [])
-    if not simple_files:
-        empty = gr.update()
-        return f"❌ No PDFs found for '{selected_game}'", empty, empty, empty
+    all_pdf_paths = []
+    rebuilt_games = []
+    failed_games = []
 
-    data_root = Path(config.DATA_PATH)
+    # Process each selected game
+    for selected_game in selected_games:
+        simple_files = mapping.get(selected_game, [])
+        if not simple_files:
+            failed_games.append(selected_game)
+            continue
 
-    # Resolve each simple filename to the *actual* file on disk in a
-    # case-insensitive way so that systems with case-sensitive paths
-    # (Linux, HF Spaces) work even when the real PDF name contains
-    # capital letters.
-    def _find_pdf(simple_name: str):
-        """Return Path to the PDF whose stem matches *simple_name* (case-insensitive)."""
-        target = f"{simple_name}.pdf"
-        # First, quick exact match
-        exact = data_root / target
-        if exact.exists():
+        data_root = Path(config.DATA_PATH)
+
+        # Resolve each simple filename to the *actual* file on disk in a
+        # case-insensitive way so that systems with case-sensitive paths
+        # (Linux, HF Spaces) work even when the real PDF name contains
+        # capital letters.
+        def _find_pdf(simple_name: str):
+            """Return Path to the PDF whose stem matches *simple_name* (case-insensitive)."""
+            target = f"{simple_name}.pdf"
+            # First, quick exact match
+            exact = data_root / target
+            if exact.exists():
+                return exact
+            # Fall back to case-insensitive scan of DATA_PATH
+            for p in data_root.glob("*.pdf"):
+                if p.stem.lower() == simple_name.lower():
+                    return p
+            # As a last resort, return the expected path (will trigger load_documents skip msg)
             return exact
-        # Fall back to case-insensitive scan of DATA_PATH
-        for p in data_root.glob("*.pdf"):
-            if p.stem.lower() == simple_name.lower():
-                return p
-        # As a last resort, return the expected path (will trigger load_documents skip msg)
-        return exact
 
-    pdf_paths = [_find_pdf(sf) for sf in simple_files]
+        game_pdf_paths = [_find_pdf(sf) for sf in simple_files]
+        if game_pdf_paths:
+            all_pdf_paths.extend(game_pdf_paths)
+            rebuilt_games.append(selected_game)
+        else:
+            failed_games.append(selected_game)
+
+    if not all_pdf_paths:
+        empty = gr.update()
+        if len(selected_games) == 1:
+            return f"❌ No PDFs found for '{selected_games[0]}'", empty, empty, empty
+        else:
+            return f"❌ No PDFs found for any of the selected games", empty, empty, empty
 
     # ---- 1️⃣ Remove existing chunks for these PDFs ----
     try:
@@ -178,22 +210,22 @@ def rebuild_selected_game_handler(selected_game: str):
         for doc_id in all_docs["ids"]:
             source_path = doc_id.split(":")[0]
             norm_source = source_path.replace("\\", "/")
-            for pdf in pdf_paths:
+            for pdf in all_pdf_paths:
                 if str(pdf).replace("\\", "/") in norm_source:
                     ids_to_delete.append(doc_id)
                     break
         if ids_to_delete:
             db.delete(ids=ids_to_delete)
-            print(f"[DEBUG] Removed {len(ids_to_delete)} existing chunks before rebuild of '{selected_game}'")
+            print(f"[DEBUG] Removed {len(ids_to_delete)} existing chunks before rebuild")
     except Exception as e:
-        print(f"[WARN] Could not clean existing docs for '{selected_game}': {e}")
+        print(f"[WARN] Could not clean existing docs: {e}")
         traceback.print_exc()
 
     # ---- 2️⃣ Load & split documents ----
-    docs = load_documents([str(p) for p in pdf_paths])
+    docs = load_documents([str(p) for p in all_pdf_paths])
     if not docs:
         empty = gr.update()
-        return f"❌ Failed to load PDFs for '{selected_game}'", empty, empty, empty
+        return f"❌ Failed to load PDFs", empty, empty, empty
 
     split_docs = split_docs_func(docs)
     add_to_chroma(split_docs)
@@ -211,8 +243,22 @@ def rebuild_selected_game_handler(selected_game: str):
     available_games = get_available_games()
     pdf_choices = get_pdf_dropdown_choices()
 
-    status_msg = f"✅ Rebuilt '{selected_game}' – {len(split_docs)} chunks processed"
-    return status_msg, gr.update(choices=available_games), gr.update(choices=pdf_choices), gr.update(choices=pdf_choices)
+    # Build success/failure message
+    success_msg_parts = []
+    if rebuilt_games:
+        if len(rebuilt_games) == 1:
+            success_msg_parts.append(f"✅ Rebuilt '{rebuilt_games[0]}' – {len(split_docs)} chunks processed")
+        else:
+            success_msg_parts.append(f"✅ Rebuilt {len(rebuilt_games)} games – {len(split_docs)} chunks processed: {', '.join(rebuilt_games)}")
+    
+    if failed_games:
+        if len(failed_games) == 1:
+            success_msg_parts.append(f"❌ No PDFs found for '{failed_games[0]}'")
+        else:
+            success_msg_parts.append(f"❌ No PDFs found for {len(failed_games)} games: {', '.join(failed_games)}")
+    
+    final_message = " | ".join(success_msg_parts)
+    return final_message, gr.update(choices=available_games), gr.update(choices=pdf_choices), gr.update(choices=pdf_choices)
 
 
 def refresh_games_handler():
