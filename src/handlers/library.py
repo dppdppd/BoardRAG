@@ -112,6 +112,8 @@ def rebuild_library_handler():
                 embedding_function=get_embedding_function(),
                 client_settings=get_chromadb_settings(),
             )
+        
+        print(f"🔧 [DEBUG] Using ChromaDB collection: '{db._collection.name}'")
 
         # Add documents in batches to avoid token limits
         for i, chunk_batch in enumerate(batched(split_documents, 100)):
@@ -119,6 +121,14 @@ def rebuild_library_handler():
             batch_ids = [chunk.metadata.get("id") for chunk in chunk_batch]
             db.add_documents(chunk_batch, ids=batch_ids)
             print(f"🔧 [DEBUG] Batch {i+1} added successfully")
+        
+        # Debug: Verify documents were actually added to the collection
+        verification_docs = db.get()
+        print(f"🔧 [DEBUG] Verification: Database now contains {len(verification_docs['ids'])} documents")
+        if len(verification_docs['ids']) > 0:
+            print(f"🔧 [DEBUG] Sample stored document IDs: {verification_docs['ids'][:3]}")
+        else:
+            print(f"🔧 [DEBUG] ❌ ERROR: No documents found in database after adding!")
 
         # Extract and store game names for all PDFs (like refresh_games_handler does)
         from ..query import extract_and_store_game_name
