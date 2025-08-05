@@ -136,16 +136,25 @@ def rename_game_handler(selected_entries, new_name):
     We only need the *filename* (the ID in game_names) to update the mapping.
     """
 
-    if not selected_entries or not new_name:
-        return "❌ Please select at least one PDF and enter a new name", gr.update(), gr.update(), gr.update()
+    if not new_name or not new_name.strip():
+        return "❌ Please enter a new name", gr.update(), gr.update(), gr.update()
 
-    # Handle both single selection (backward compatibility) and multiple selections
-    if isinstance(selected_entries, str):
+    # Handle multiselect dropdown (returns list) and backward compatibility (single string)
+    if isinstance(selected_entries, list):
+        # Multiselect dropdown always returns a list
+        if not selected_entries:
+            return "❌ Please select at least one PDF", gr.update(), gr.update(), gr.update()
+        # Filter out empty strings
+        selected_entries = [entry for entry in selected_entries if entry and entry.strip()]
+        if not selected_entries:
+            return "❌ Please select at least one PDF", gr.update(), gr.update(), gr.update()
+    elif isinstance(selected_entries, str):
+        # Backward compatibility for single selection
+        if not selected_entries.strip():
+            return "❌ Please select at least one PDF", gr.update(), gr.update(), gr.update()
         selected_entries = [selected_entries]
-    elif not isinstance(selected_entries, list):
-        return "❌ Invalid selection format", gr.update(), gr.update(), gr.update()
-
-    if not selected_entries:
+    else:
+        # Handle None or other unexpected types
         return "❌ Please select at least one PDF", gr.update(), gr.update(), gr.update()
 
     filenames = []

@@ -184,6 +184,32 @@ def perform_web_search(query: str, k: int = 5) -> List[Document]:
     return docs
 
 
+def normalize_game_title(title: str) -> str:
+    """
+    Normalize game title by moving leading articles to the end.
+    
+    Args:
+        title (str): Game title like "The Campaign for North Africa"
+        
+    Returns:
+        str: Normalized title like "Campaign for North Africa, The"
+    """
+    # Only strip leading/trailing whitespace for the final result
+    stripped_title = title.strip()
+    
+    # Check for leading "The " (case insensitive)
+    if stripped_title.lower().startswith("the "):
+        # Remove "The " from beginning and add ", The" to end
+        return stripped_title[4:] + ", The"
+    
+    # Check for leading "A " (case insensitive) 
+    if stripped_title.lower().startswith("a "):
+        # Remove "A " from beginning and add ", A" to end
+        return stripped_title[2:] + ", A"
+    
+    return stripped_title
+
+
 def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
     """
     Use LLM API to extract the proper game name from a PDF filename.
@@ -304,10 +330,12 @@ Official game name:"""
 
             # Basic validation
             if game_name and len(game_name) <= 50:
+                # Normalize the title by moving leading articles to the end
+                normalized_name = normalize_game_title(game_name)
                 print(
-                    f"Successfully extracted game name: '{game_name}' from '{filename}'"
+                    f"Successfully extracted game name: '{normalized_name}' from '{filename}'"
                 )
-                return game_name
+                return normalized_name
             else:
                 raise ValueError("Invalid response")
 
@@ -341,13 +369,16 @@ Official game name:"""
     fallback_name = (
         filename.replace(".pdf", "").replace("-", " ").replace("_", " ").title()
     )
+    # Normalize the fallback name as well
+    normalized_fallback = normalize_game_title(fallback_name)
+    
     if debug and last_raw_response is not None:
         print("\n❌ Using fallback – last raw LLM response was:\n")
         print(last_raw_response)
         print()
 
-    print(f"Using fallback name: '{fallback_name}' for '{filename}'")
-    return fallback_name
+    print(f"Using fallback name: '{normalized_fallback}' for '{filename}'")
+    return normalized_fallback
 
 
 def improve_fallback_name(filename: str) -> str:
