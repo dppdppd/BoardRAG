@@ -291,7 +291,7 @@ with gr.Blocks(
                 "✏️ Assign PDF", open=False, visible=False
             ) as rename_accordion:
                 rename_game_dropdown = gr.Dropdown(
-                    choices=get_pdf_dropdown_choices(), label="Select PDF"
+                    choices=get_pdf_dropdown_choices(), label="Select PDF", multiselect=True
                 )
                 new_name_tb = gr.Textbox(label="New Name")
                 rename_button = gr.Button("Rename", variant="primary")

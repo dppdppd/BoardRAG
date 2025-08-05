@@ -129,24 +129,36 @@ def delete_game_handler(game_to_delete):
     return f"✅ Deleted game '{game_to_delete}' successfully", upd_games, upd_games, upd_pdfs
 
 
-def rename_game_handler(selected_entry, new_name):
-    """Assign or re-assign a single PDF to *new_name*.
+def rename_game_handler(selected_entries, new_name):
+    """Assign or re-assign multiple PDFs to *new_name*.
 
-    The dropdown entry comes in the form "<current_game> - <filename>.pdf".
+    The dropdown entries come in the form "<current_game> - <filename>.pdf".
     We only need the *filename* (the ID in game_names) to update the mapping.
     """
 
-    if not selected_entry or not new_name:
-        return "❌ Please select a PDF and enter a new name", gr.update(), gr.update(), gr.update()
+    if not selected_entries or not new_name:
+        return "❌ Please select at least one PDF and enter a new name", gr.update(), gr.update(), gr.update()
 
-    # Extract filename from "Game - filename.pdf" pattern
-    if " - " in selected_entry:
-        _, filename = selected_entry.split(" - ", 1)
-        filename = filename.strip()
-    else:
-        filename = selected_entry.strip()
+    # Handle both single selection (backward compatibility) and multiple selections
+    if isinstance(selected_entries, str):
+        selected_entries = [selected_entries]
+    elif not isinstance(selected_entries, list):
+        return "❌ Invalid selection format", gr.update(), gr.update(), gr.update()
 
-    print(f"[DEBUG] rename_game_handler: filename='{filename}', new_name='{new_name}'")
+    if not selected_entries:
+        return "❌ Please select at least one PDF", gr.update(), gr.update(), gr.update()
+
+    filenames = []
+    for selected_entry in selected_entries:
+        # Extract filename from "Game - filename.pdf" pattern
+        if " - " in selected_entry:
+            _, filename = selected_entry.split(" - ", 1)
+            filename = filename.strip()
+        else:
+            filename = selected_entry.strip()
+        filenames.append(filename)
+
+    print(f"[DEBUG] rename_game_handler: filenames={filenames}, new_name='{new_name}'")
 
     try:
         import chromadb
@@ -158,9 +170,9 @@ def rename_game_handler(selected_entry, new_name):
 
         collection = client.get_or_create_collection("game_names")
 
-        # Upsert the new mapping for this single PDF
-        collection.upsert(ids=[filename], documents=[new_name])
-        print(f"[DEBUG] Upserted new mapping in game_names collection: '{filename}' -> '{new_name}'")
+        # Upsert the new mapping for all selected PDFs
+        collection.upsert(ids=filenames, documents=[new_name] * len(filenames))
+        print(f"[DEBUG] Upserted new mappings in game_names collection: {filenames} -> '{new_name}'")
 
         # Clear any cached mapping to force refresh
         if hasattr(get_available_games, '_filename_mapping'):
@@ -179,11 +191,15 @@ def rename_game_handler(selected_entry, new_name):
         _msg, upd_games, upd_pdfs, upd_rename = _refresh_games()
 
         print(f"[DEBUG] Library reprocessed after rename; dropdowns updated")
-        return f"✅ Assigned '{filename}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs
+        
+        if len(filenames) == 1:
+            return f"✅ Assigned '{filenames[0]}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs
+        else:
+            return f"✅ Assigned {len(filenames)} PDFs to game '{new_name}': {', '.join(filenames)}", upd_games, upd_pdfs, upd_pdfs
     except Exception as e:
         print(f"[DEBUG] Error in rename_game_handler: {e}")
         empty_upd = gr.update()
-        return f"❌ Error assigning PDF: {e}", empty_upd, empty_upd, empty_upd
+        return f"❌ Error assigning PDFs: {e}", empty_upd, empty_upd, empty_upd
 
 
 def get_pdf_dropdown_choices():
