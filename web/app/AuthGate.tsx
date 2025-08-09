@@ -1,0 +1,87 @@
+"use client";
+
+import React, { useEffect, useState } from "react";
+
+type Props = { children: React.ReactNode };
+
+const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const API_BASE = RAW_API_BASE.trim().replace(/\/+$/, "");
+
+export default function AuthGate({ children }: Props) {
+  const [role, setRole] = useState<string | null>(null); // null = unknown (loading), "none" = locked
+  const [pw, setPw] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    try {
+      const fromSession = sessionStorage.getItem("boardrag_role");
+      if (fromSession) {
+        setRole(fromSession);
+        return;
+      }
+      // Migrate from localStorage if present (older versions stored here)
+      const fromLocal = localStorage.getItem("boardrag_role");
+      if (fromLocal) {
+        sessionStorage.setItem("boardrag_role", fromLocal);
+        setRole(fromLocal);
+        return;
+      }
+    } catch {}
+    setRole("none");
+  }, []);
+
+  const unlock = async () => {
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("password", pw);
+      const resp = await fetch(`${API_BASE}/auth/unlock`, { method: "POST", body: form });
+      if (!resp.ok) {
+        setError("Invalid password");
+        setRole("none");
+        return;
+      }
+      const data = await resp.json();
+      sessionStorage.setItem("boardrag_role", data.role || "user");
+      setRole(data.role || "user");
+    } catch (e) {
+      setError("Network error");
+    }
+  };
+
+  if (role === null || role === "none") {
+    return (
+      <div style={{
+        minHeight: "100vh",
+        display: "grid",
+        placeItems: "center",
+        background: "var(--bg)",
+        color: "var(--text)",
+        padding: 16,
+      }}>
+        <div className="surface" style={{ width: "min(92vw, 520px)", padding: 16 }}>
+          <div className="title" style={{ padding: 0, marginBottom: 6 }}>BoardRAG</div>
+          <div className="subtitle" style={{ marginTop: 0 }}>Enter access code to continue.</div>
+          <div className="row" style={{ gap: 8, marginTop: 10 }}>
+            <input
+              className="input"
+              autoFocus
+              type="password"
+              placeholder="Password"
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") unlock(); }}
+              style={{ flex: 1 }}
+            />
+            <button className="btn primary" onClick={unlock}>Unlock</button>
+          </div>
+          {error && <div style={{ color: "crimson", marginTop: 8 }}>{error}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+}
+
+
