@@ -186,9 +186,32 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
 
 
 def get_pdf_dropdown_choices() -> List[str]:
-    """Proxy to handler's list builder for external use."""
-    from ..handlers.game import get_pdf_dropdown_choices as _choices
+    """Return entries like 'Game Name - filename.pdf' for Admin dropdown.
 
-    return _choices()
+    Prefer scanning `DATA_PATH` for PDFs. If none are found (e.g., serverless
+    or missing disk files), fall back to the `game_names` collection mapping so
+    the Admin can still rename/delete entries that exist in the DB.
+    """
+    data_root = Path(config.DATA_PATH)
+    pdf_files = list(data_root.rglob("*.pdf")) if data_root.exists() else []
+    name_map = get_stored_game_names()
+
+    choices: List[str] = []
+    if pdf_files:
+        for p in pdf_files:
+            fname = p.name
+            title = name_map.get(fname, fname)
+            choices.append(f"{title} - {fname}")
+        return sorted(choices)
+
+    # Fallback: populate from stored mapping only
+    if name_map:
+        for fname, title in name_map.items():
+            safe_fname = Path(fname).name
+            display = title or safe_fname
+            choices.append(f"{display} - {safe_fname}")
+        return sorted(choices)
+
+    return []
 
 

@@ -79,7 +79,17 @@ async def upload(files: List[UploadFile] = File(...)):
     for line in (msg or "").splitlines():
         if line.strip():
             await _admin_log_publish(line.strip())
-    return {"message": msg, "games": games, "pdf_choices": pdf_choices}
+    # Return only a concise summary to the client upload panel
+    try:
+        import re
+        m = re.search(r"Uploaded\s+(\d+)\s+PDF\(s\)\s+successfully", msg or "")
+        if m:
+            summary = f"✅ Uploaded {m.group(1)} PDF(s) successfully"
+        else:
+            summary = "Upload complete."
+    except Exception:
+        summary = "Upload complete."
+    return {"message": summary, "games": games, "pdf_choices": pdf_choices}
 
 
 @app.post("/admin/rebuild")
