@@ -21,8 +21,19 @@ export default function AdminPage() {
   const [newName, setNewName] = useState<string>("");
 
   useEffect(() => {
-    const saved = localStorage.getItem("boardrag_role");
-    if (saved) setRole(saved);
+    try {
+      const fromSession = sessionStorage.getItem("boardrag_role");
+      if (fromSession) {
+        setRole(fromSession);
+        return;
+      }
+      // Backward compatibility: if an older tab stored localStorage, respect it once
+      const fromLocal = localStorage.getItem("boardrag_role");
+      if (fromLocal) {
+        sessionStorage.setItem("boardrag_role", fromLocal);
+        setRole(fromLocal);
+      }
+    } catch {}
   }, []);
 
   const unlock = async () => {
@@ -33,7 +44,7 @@ export default function AdminPage() {
     if (resp.ok) {
       const data = await resp.json();
       setRole(data.role);
-      localStorage.setItem("boardrag_role", data.role);
+      try { sessionStorage.setItem("boardrag_role", data.role); } catch {}
     } else {
       setMessage("Invalid password");
     }
