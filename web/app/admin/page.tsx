@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
 
 import { API_BASE } from "../../lib/config";
@@ -11,9 +11,8 @@ export default function AdminPage() {
   const [pw, setPw] = useState<string>("");
   const [message, setMessage] = useState<string>("");
   const [busy, setBusy] = useState<null | "rebuild" | "refresh" | "delete" | "rename">(null);
-  const [modalOpen, setModalOpen] = useState<boolean>(false);
-  const [modalTitle, setModalTitle] = useState<string>("");
-  const [modalBody, setModalBody] = useState<string>("");
+  const [consoleText, setConsoleText] = useState<string>("");
+  const consoleRef = useRef<HTMLPreElement | null>(null);
 
   const { data: gamesData, mutate: refetchGames } = useSWR<{ games: string[] }>(`${API_BASE}/games`, fetcher);
   const { data: pdfChoicesData, mutate: refetchChoices } = useSWR<{ choices: string[] }>(
@@ -22,6 +21,7 @@ export default function AdminPage() {
     { revalidateOnMount: true, revalidateOnFocus: true }
   );
   const { data: storageData, mutate: refetchStorage } = useSWR<{ markdown: string }>(`${API_BASE}/storage`, fetcher);
+  const appendConsole = (line: string) => setConsoleText((cur) => (cur ? cur + "\n" + line : line));
 
   const [deleteSelection, setDeleteSelection] = useState<string[]>([]);
   const [renameSelection, setRenameSelection] = useState<string[]>([]);
@@ -49,6 +49,15 @@ export default function AdminPage() {
     refetchChoices();
   }, [refetchChoices]);
 
+  // Auto-scroll console to bottom (must be declared before any early returns)
+  useEffect(() => {
+    try {
+      if (consoleRef.current) {
+        consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+      }
+    } catch {}
+  }, [consoleText]);
+
   const unlock = async () => {
     setMessage("");
     const form = new FormData();
@@ -58,8 +67,10 @@ export default function AdminPage() {
       const data = await resp.json();
       setRole(data.role);
       try { sessionStorage.setItem("boardrag_role", data.role); } catch {}
+      appendConsole("🔓 Admin unlocked");
     } else {
       setMessage("Invalid password");
+      appendConsole("❌ Invalid admin password");
     }
   };
 
@@ -78,43 +89,60 @@ export default function AdminPage() {
 
   const rebuild = async () => {
     setBusy("rebuild");
-    setModalOpen(true);
-    setModalTitle("Rebuild Library");
-    setModalBody("Working… This can take a while for large PDFs.");
+    setConsoleText("");
+    appendConsole("🔄 Rebuild requested…");
     try {
-      const resp = await fetch(`${API_BASE}/admin/rebuild`, { method: "POST" });
-      const data = await resp.json();
-      const text = data?.message || "Done.";
-      setMessage(text);
-      setModalBody(text);
-      await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
+      const es = new EventSource(`${API_BASE}/admin/rebuild-stream`);
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed.type === "log") {
+            setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
+          } else if (parsed.type === "done") {
+            setMessage(parsed.message || "Done.");
+            setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
+            es.close();
+            setBusy(null);
+            Promise.all([refetchGames(), refetchChoices(), refetchStorage()]).catch(() => {});
+          }
+        } catch {}
+      };
+      es.onerror = () => { try { es.close(); } catch {}; appendConsole("❌ Rebuild stream error"); setBusy(null); };
     } catch (e) {
-      setModalBody("❌ Rebuild failed. See server logs.");
-    } finally {
+      setConsoleText("❌ Rebuild failed. See server logs.");
       setBusy(null);
     }
   };
 
   const refresh = async () => {
     setBusy("refresh");
-    setModalOpen(true);
-    setModalTitle("Process New PDFs");
-    setModalBody("Processing…");
+    setConsoleText("");
+    appendConsole("🔄 Refresh requested…");
     try {
-      const resp = await fetch(`${API_BASE}/admin/refresh`, { method: "POST" });
-      const data = await resp.json();
-      const text = data?.message || "Done.";
-      setMessage(text);
-      setModalBody(text);
-      await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
+      const es = new EventSource(`${API_BASE}/admin/refresh-stream`);
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed.type === "log") {
+            setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
+          } else if (parsed.type === "done") {
+            setMessage(parsed.message || "Done.");
+            setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
+            es.close();
+            setBusy(null);
+            Promise.all([refetchGames(), refetchChoices(), refetchStorage()]).catch(() => {});
+          }
+        } catch {}
+      };
+      es.onerror = () => { try { es.close(); } catch {}; appendConsole("❌ Refresh stream error"); setBusy(null); };
     } catch (e) {
-      setModalBody("❌ Refresh failed. See server logs.");
-    } finally {
+      setConsoleText("❌ Refresh failed. See server logs.");
       setBusy(null);
     }
   };
 
   const deleteGamesReq = async () => {
+    appendConsole(`🗑️ Delete requested: ${deleteSelection.join(", ") || "<none>"}`);
     const resp = await fetch(`${API_BASE}/admin/delete`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -122,10 +150,12 @@ export default function AdminPage() {
     });
     const data = await resp.json();
     setMessage(data.message || "");
+    if (data?.message) appendConsole(data.message);
     await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
   };
 
   const renameReq = async () => {
+    appendConsole(`✏️ Rename requested: [${renameSelection.join(", ")}] → "${newName}"`);
     const resp = await fetch(`${API_BASE}/admin/rename`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -133,6 +163,7 @@ export default function AdminPage() {
     });
     const data = await resp.json();
     setMessage(data.message || "");
+    if (data?.message) appendConsole(data.message);
     await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
   };
 
@@ -141,21 +172,6 @@ export default function AdminPage() {
 
   return (
     <div style={{ display: "grid", gap: 16, padding: 16, gridTemplateColumns: "1fr 1fr" }}>
-      {modalOpen && (
-        <div style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,.35)", display: "grid", placeItems: "center", zIndex: 50
-        }}>
-          <div className="surface" style={{ width: "min(92vw, 740px)", maxHeight: "80vh", overflow: "auto", padding: 16 }}>
-            <div className="title" style={{ padding: 0 }}>{modalTitle}</div>
-            <pre style={{ whiteSpace: "pre-wrap", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace", fontSize: 13 }}>
-{modalBody}
-            </pre>
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button className="btn" onClick={() => setModalOpen(false)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
       <div style={{ gridColumn: "1 / -1" }}>
         <h2>Admin</h2>
         {message && <div style={{ color: "#444", background: "#f3f3f3", padding: 8, borderRadius: 6 }}>{message}</div>}
@@ -165,10 +181,10 @@ export default function AdminPage() {
         <h3>Library</h3>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={rebuild} disabled={busy!==null}>
-            {busy === "rebuild" ? "⏳ Rebuilding…" : "🔄 Rebuild Library"}
+            {busy === "rebuild" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Rebuilding…</span>) : "🔄 Rebuild Library"}
           </button>
           <button onClick={refresh} disabled={busy!==null}>
-            {busy === "refresh" ? "⏳ Processing…" : "🔄 Process New PDFs"}
+            {busy === "refresh" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Processing…</span>) : "🔄 Process New PDFs"}
           </button>
         </div>
         <div style={{ marginTop: 12 }}>
@@ -195,8 +211,8 @@ export default function AdminPage() {
           </select>
         </label>
         <label style={{ display: "grid", gap: 6, marginTop: 8 }}>
-          <span>New game name</span>
-          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g., Up Front" />
+          <span>New game assignment</span>
+          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Campaign for North Africa, The" />
         </label>
         <div style={{ marginTop: 8 }}>
           <button onClick={renameReq} disabled={renameSelection.length === 0 || !newName.trim()}>Rename</button>
@@ -206,7 +222,20 @@ export default function AdminPage() {
       <div style={{ gridColumn: "1 / -1" }}>
         <h3>Technical Info</h3>
         <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 12, borderRadius: 6 }}>{storageData?.markdown || ""}</pre>
-        <button onClick={() => refetchStorage()}>🔄 Refresh Storage Stats</button>
+        <button onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
+      </div>
+
+      {/* Shared console output pinned at bottom with fixed height */}
+      <div style={{ gridColumn: "1 / -1" }}>
+        <h3>Console</h3>
+        <div className="surface" style={{ padding: 8 }}>
+          <pre
+            ref={consoleRef}
+            style={{ whiteSpace: "pre-wrap", height: 240, overflow: "auto", margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace", fontSize: 13 }}
+          >
+{consoleText || ""}
+          </pre>
+        </div>
       </div>
     </div>
   );

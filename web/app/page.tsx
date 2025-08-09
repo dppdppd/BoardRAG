@@ -425,11 +425,23 @@ export default function HomePage() {
               />
             )}
 
-            {isStreaming ? (
-              <button className="btn stop" onClick={onStop}>Stop</button>
-            ) : (
-              <button className="btn primary" onClick={onSubmit} disabled={!selectedGame}>Send</button>
-            )}
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              {isStreaming ? (
+                <button className="btn stop" onClick={onStop}>Stop</button>
+              ) : (
+                <button className="btn primary" onClick={onSubmit} disabled={!selectedGame}>Send</button>
+              )}
+              {/* Kebab to toggle the bottom sheet; placed to the right of Send */}
+              <button
+                className="btn"
+                onClick={() => setSheetOpen((s) => !s)}
+                aria-label="Menu"
+                title="Menu"
+                style={{ width: 44, height: 44, minHeight: 44, padding: 0, display: "inline-grid", placeItems: "center" }}
+              >
+                ⋮
+              </button>
+            </div>
           </div>
         </div>
 
@@ -494,23 +506,12 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Mobile bottom sheet toggle */}
-      <button className="sheet-toggle" onClick={() => setSheetOpen((s) => !s)}>Menu</button>
+      {/* Mobile bottom sheet */}
       <div className={`mobile-sheet ${sheetOpen ? 'open' : ''}`}>
-        <section className="surface pad section">
-          <summary>History</summary>
-          {bookmarkLabels.length === 0 ? (
-            <div className="muted" style={{ fontSize: 13 }}>No bookmarks yet</div>
-          ) : (
-            <div style={{ marginTop: 8 }}>
-              {bookmarkLabels.map((b, i) => (
-                <button key={i} className="bookmark btn" {...longPressHandlers(i)} onClick={() => scrollToAssistant(bookmarkUserIndices[i])}>
-                  {b}
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="title" style={{ padding: 0, margin: 0, textAlign: 'left' }}>Menu</div>
+          <button className="btn" onClick={() => setSheetOpen(false)} aria-label="Close menu" title="Close menu" style={{ width: 44, height: 44, minHeight: 44, padding: 0, display: 'inline-grid', placeItems: 'center' }}>×</button>
+        </div>
         <section className="surface pad section" style={{ marginTop: 12 }}>
           <summary>Options</summary>
           <div style={{ display: "grid", gap: 10, marginTop: 8 }}>

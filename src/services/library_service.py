@@ -8,7 +8,7 @@ construct UI at import time).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Callable
 
 import chromadb
 
@@ -22,6 +22,76 @@ from ..query import (
     extract_and_store_game_name,
 )
 from ..query import get_stored_game_names
+
+
+class _LogWriter:
+    """Mirror writes to original stream and forward complete lines to a callback."""
+
+    def __init__(self, on_line: Callable[[str], None], original):
+        self._on_line = on_line
+        self._original = original
+        self._buffer: str = ""
+
+    def write(self, s: str) -> int:  # type: ignore[override]
+        try:
+            self._original.write(s)
+        except Exception:
+            pass
+        self._buffer += s
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if line:
+                try:
+                    self._on_line(line)
+                except Exception:
+                    pass
+        return len(s)
+
+    def flush(self) -> None:  # type: ignore[override]
+        try:
+            self._original.flush()
+        except Exception:
+            pass
+
+
+class _capture_prints:
+    """Context manager to capture stdout/stderr and send lines to a callback."""
+
+    def __init__(self, on_line: Callable[[str], None]):
+        self._on_line = on_line
+        self._orig_out = None
+        self._orig_err = None
+        self._writer_out = None
+        self._writer_err = None
+
+    def __enter__(self):
+        import sys
+        self._orig_out = sys.stdout
+        self._orig_err = sys.stderr
+        self._writer_out = _LogWriter(self._on_line, self._orig_out)
+        self._writer_err = _LogWriter(self._on_line, self._orig_err)
+        sys.stdout = self._writer_out  # type: ignore[assignment]
+        sys.stderr = self._writer_err  # type: ignore[assignment]
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        import sys
+        try:
+            if self._writer_out and getattr(self._writer_out, "_buffer", "").strip():
+                self._on_line(self._writer_out._buffer.strip())
+        except Exception:
+            pass
+        try:
+            if self._writer_err and getattr(self._writer_err, "_buffer", "").strip():
+                self._on_line(self._writer_err._buffer.strip())
+        except Exception:
+            pass
+        if self._orig_out is not None:
+            sys.stdout = self._orig_out  # type: ignore[assignment]
+        if self._orig_err is not None:
+            sys.stderr = self._orig_err  # type: ignore[assignment]
+        return False
 
 
 def get_pdf_dropdown_choices() -> List[str]:
@@ -40,7 +110,7 @@ def get_pdf_dropdown_choices() -> List[str]:
     return sorted(choices)
 
 
-def rebuild_library() -> Tuple[str, List[str], List[str]]:
+def rebuild_library(log: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str], List[str]]:
     """Rebuild the entire library and return a tuple of:
     (message, games, pdf_choices)
     """
@@ -62,16 +132,24 @@ def rebuild_library() -> Tuple[str, List[str], List[str]]:
         except Exception as e:  # pragma: no cover - best-effort cleanup
             return (f"❌ Error clearing database: {e}", get_available_games(), get_pdf_dropdown_choices())
 
+        logs: List[str] = []
+
+        def _log(message: str) -> None:
+            logs.append(message)
+            if log:
+                try:
+                    log(message)
+                except Exception:
+                    pass
+
         # Load, split, add
-        documents = load_documents()
-        chunks = split_documents(documents)
-        success = add_to_chroma(chunks)
+        with _capture_prints(_log):
+            documents = load_documents()
+            chunks = split_documents(documents)
+            success = add_to_chroma(chunks)
         if not success:
-            return (
-                "❌ Failed to add documents to database",
-                get_available_games(),
-                get_pdf_dropdown_choices(),
-            )
+            _log("❌ Failed to add documents to database")
+            return ("\n".join(logs), get_available_games(), get_pdf_dropdown_choices())
 
         # Extract and store game names from filenames
         filenames = {Path(doc.metadata.get("source", "")).name for doc in documents}
@@ -81,17 +159,16 @@ def rebuild_library() -> Tuple[str, List[str], List[str]]:
 
         games = get_available_games()
         pdf_choices = get_pdf_dropdown_choices()
-        msg = (
-            f"✅ Library rebuilt! {len(documents)} docs, {len(chunks)} chunks, {len(games)} games"
-        )
-        return msg, games, pdf_choices
+        summary = f"✅ Library rebuilt! {len(documents)} docs, {len(chunks)} chunks, {len(games)} games"
+        _log(summary)
+        return "\n".join(logs), games, pdf_choices
     except Exception as e:  # pragma: no cover - defensive
         games = get_available_games()
         pdf_choices = get_pdf_dropdown_choices()
         return (f"❌ Error rebuilding library: {e}", games, pdf_choices)
 
 
-def refresh_games() -> Tuple[str, List[str], List[str]]:
+def refresh_games(log: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str], List[str]]:
     """Process only new PDFs placed in DATA_PATH.
 
     Returns (message, games, pdf_choices).
@@ -129,9 +206,20 @@ def refresh_games() -> Tuple[str, List[str], List[str]]:
                 doc.metadata["game"] = fname.replace(".pdf", "")
             documents.extend(docs)
 
+        logs: List[str] = []
+
+        def _log(message: str) -> None:
+            logs.append(message)
+            if log:
+                try:
+                    log(message)
+                except Exception:
+                    pass
+
         if documents:
-            split_docs = split_documents(documents)
-            add_to_chroma(split_docs)
+            with _capture_prints(_log):
+                split_docs = split_documents(documents)
+                add_to_chroma(split_docs)
 
         # Extract and store proper names for new PDFs
         for fname in new_pdf_files:
@@ -143,11 +231,9 @@ def refresh_games() -> Tuple[str, List[str], List[str]]:
 
         games = get_available_games()
         pdf_choices = get_pdf_dropdown_choices()
-        return (
-            f"✅ Added {len(new_pdf_files)} new PDF(s): {', '.join(new_pdf_files)}",
-            games,
-            pdf_choices,
-        )
+        summary = f"✅ Added {len(new_pdf_files)} new PDF(s): {', '.join(new_pdf_files)}"
+        _log(summary)
+        return ("\n".join(logs), games, pdf_choices)
     except Exception as e:  # pragma: no cover - defensive
         return (f"❌ Error processing new games: {e}", get_available_games(), get_pdf_dropdown_choices())
 
