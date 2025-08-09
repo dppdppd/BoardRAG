@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import AsyncIterator, Dict, List, Optional
+from typing import AsyncIterator, Dict, List, Optional, Set
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,7 +72,13 @@ async def upload(files: List[UploadFile] = File(...)):
     for f in files:
         content = await f.read()
         file_tuples.append((f.filename, content))
+    # Broadcast start of upload to admin log stream
+    await _admin_log_publish(f"📥 Upload requested: {len(file_tuples)} file(s)")
     msg, games, pdf_choices = save_uploaded_files(file_tuples)
+    # Broadcast outcome lines to admin log stream
+    for line in (msg or "").splitlines():
+        if line.strip():
+            await _admin_log_publish(line.strip())
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
@@ -199,6 +205,51 @@ async def admin_rename(payload: RenamePayload):
 
 def _sse_event(data: Dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+# ----------------------------------------------------------------------------
+# Admin log broadcast (global): allows various actions to push messages that
+# connected Admin pages can observe in real-time via a single SSE stream.
+# ----------------------------------------------------------------------------
+
+_admin_log_subscribers: Set[asyncio.Queue[str]] = set()
+
+
+async def _admin_log_publish(line: str) -> None:
+    # Push to all subscribers (best-effort)
+    for q in list(_admin_log_subscribers):
+        try:
+            q.put_nowait(line)
+        except Exception:
+            pass
+
+
+@app.get("/admin/log-stream")
+async def admin_log_stream():
+    queue: asyncio.Queue = asyncio.Queue()
+    _admin_log_subscribers.add(queue)
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        try:
+            # Initial hello to ensure connection open
+            yield _sse_event({"type": "log", "line": "📡 Admin log stream connected"}).encode("utf-8")
+            while True:
+                try:
+                    line = await asyncio.wait_for(queue.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    # Heartbeat to avoid proxy buffering/idle timeouts
+                    yield b": ping\n\n"
+                    continue
+                yield _sse_event({"type": "log", "line": str(line)}).encode("utf-8")
+        finally:
+            _admin_log_subscribers.discard(queue)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/stream")

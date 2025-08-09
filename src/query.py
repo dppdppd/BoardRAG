@@ -422,7 +422,7 @@ def get_available_games() -> List[str]:
                 print(f"[DEBUG] get_available_games: Main collection is EMPTY - this is the problem!")
             get_available_games._last_count = len(all_docs['ids'])
 
-        # Extract unique filenames from source paths
+        # Extract unique filenames from source paths (primary path)
         filenames = set()
         game_to_files = {}
 
@@ -436,6 +436,28 @@ def get_available_games() -> List[str]:
                     filename = os.path.basename(source_path)
                     if filename.endswith(".pdf"):
                         filenames.add(filename)
+
+        # Fallback: if the vector DB is empty (e.g., invalid/truncated PDFs),
+        # derive available entries from disk or stored name mappings so that
+        # admin actions (delete/rename) can still operate.
+        if not filenames:
+            try:
+                data_root = Path(CHROMA_PATH).parent  # usually .../data
+                disk_files = []
+                try:
+                    from . import config as _cfg
+                    data_root = Path(_cfg.DATA_PATH)
+                except Exception:
+                    pass
+                if data_root.exists():
+                    disk_files = [p.name for p in data_root.rglob("*.pdf")]
+                stored_names = get_stored_game_names()
+                for fname in disk_files or stored_names.keys():
+                    base = os.path.basename(fname)
+                    if base.endswith(".pdf"):
+                        filenames.add(base)
+            except Exception:
+                pass
 
         # Get stored game names (fast lookup, no LLM calls)
         stored_names = get_stored_game_names()
@@ -451,9 +473,13 @@ def get_available_games() -> List[str]:
                 if VERBOSE_LOGGING:
                     print(f"📦 Using stored game name: '{proper_name}' for '{filename}'")
             else:
-                # Fallback to extracting (this should be rare after initial setup)
-                print(f"⚠️ Game name not found in storage, extracting for: '{filename}'")
-                proper_name = extract_and_store_game_name(filename)
+                # Fallbacks: try to extract name only if we have valid PDFs,
+                # otherwise derive from filename so Admin can still manage items.
+                try:
+                    proper_name = extract_and_store_game_name(filename)
+                except Exception:
+                    from .query import improve_fallback_name as _fallback  # type: ignore
+                    proper_name = _fallback(filename)
 
             simple_name = filename.replace(".pdf", "").lower().replace(" ", "_")
 

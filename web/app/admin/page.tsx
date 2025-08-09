@@ -58,6 +58,27 @@ export default function AdminPage() {
     } catch {}
   }, [consoleText]);
 
+  // Connect a global Admin log stream so uploads and other events spew here too
+  useEffect(() => {
+    if (role !== "admin") return;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(`${API_BASE}/admin/log-stream`);
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed?.type === "log" && typeof parsed.line === "string") {
+            setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
+          }
+        } catch {}
+      };
+      es.onerror = () => {
+        try { es?.close(); } catch {}
+      };
+    } catch {}
+    return () => { try { es?.close(); } catch {} };
+  }, [role]);
+
   const unlock = async () => {
     setMessage("");
     const form = new FormData();
