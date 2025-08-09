@@ -68,27 +68,70 @@ async def auth_unlock(password: str = Form(...)):
 
 @app.post("/upload")
 async def upload(files: List[UploadFile] = File(...)):
+    # Read all files into memory first (as before)
     file_tuples: List[tuple[str, bytes]] = []
     for f in files:
         content = await f.read()
         file_tuples.append((f.filename, content))
+
     # Broadcast start of upload to admin log stream
     await _admin_log_publish(f"📥 Upload requested: {len(file_tuples)} file(s)")
-    msg, games, pdf_choices = save_uploaded_files(file_tuples)
-    # Broadcast outcome lines to admin log stream
-    for line in (msg or "").splitlines():
+
+    # Save PDFs to DATA_PATH synchronously
+    from pathlib import Path
+    from src import config as cfg  # type: ignore
+
+    saved: list[str] = []
+    try:
+        data_path = Path(cfg.DATA_PATH)
+        data_path.mkdir(exist_ok=True)
+        for filename, content in file_tuples:
+            if not filename.lower().endswith(".pdf"):
+                continue
+            dest_path = data_path / Path(filename).name
+            dest_path.write_bytes(content)
+            saved.append(dest_path.name)
+    except Exception as e:
+        await _admin_log_publish(f"❌ Failed saving uploads: {e}")
+        return {"message": "Upload failed.", "games": get_available_games(), "pdf_choices": []}
+
+    if saved:
+        await _admin_log_publish(f"📄 Saved {len(saved)} PDF(s): {', '.join(saved)}")
+    else:
+        await _admin_log_publish("❌ No valid PDF files found")
+        return {"message": "No valid PDF files found", "games": get_available_games(), "pdf_choices": []}
+
+    # Process new PDFs in a background thread and stream progress lines via admin log
+    loop = asyncio.get_running_loop()
+
+    def log_cb(message: str) -> None:
+        try:
+            loop.call_soon_threadsafe(asyncio.create_task, _admin_log_publish(message))
+        except Exception:
+            pass
+
+    # Offload refresh to thread to avoid blocking event loop while logs are emitted
+    from src.services.library_service import refresh_games as svc_refresh_games  # local import
+
+    await _admin_log_publish("⚙️ Processing uploaded PDFs…")
+    refresh_msg, games, pdf_choices = await asyncio.to_thread(svc_refresh_games, log_cb)
+
+    # Ensure final summary is broadcast as well
+    for line in (refresh_msg or "").splitlines():
         if line.strip():
             await _admin_log_publish(line.strip())
-    # Return only a concise summary to the client upload panel
+
+    # Return concise summary to client upload panel
     try:
         import re
-        m = re.search(r"Uploaded\s+(\d+)\s+PDF\(s\)\s+successfully", msg or "")
+        m = re.search(r"Added\s+(\d+)\s+new PDF\(s\)", refresh_msg or "")
         if m:
-            summary = f"✅ Uploaded {m.group(1)} PDF(s) successfully"
+            summary = f"✅ Uploaded {len(saved)} PDF(s) successfully"
         else:
             summary = "Upload complete."
     except Exception:
         summary = "Upload complete."
+
     return {"message": summary, "games": games, "pdf_choices": pdf_choices}
 
 
@@ -211,6 +254,61 @@ class RenamePayload(BaseModel):
 async def admin_rename(payload: RenamePayload):
     msg, updated_games, pdf_choices = rename_pdfs(payload.entries, payload.new_name)
     return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices}
+
+
+# ----------------------------------------------------------------------------
+# Global model configuration (applies to all users)
+# ----------------------------------------------------------------------------
+
+class ModelSelection(BaseModel):
+    selection: str  # Can be a friendly label or an internal model id
+
+
+@app.get("/admin/model")
+async def admin_get_model():
+    # Lazy import to avoid circulars at startup
+    from src import config as cfg  # type: ignore
+
+    return {"provider": cfg.LLM_PROVIDER, "generator": cfg.GENERATOR_MODEL}
+
+
+@app.post("/admin/model")
+async def admin_set_model(payload: ModelSelection):
+    from src import config as cfg  # type: ignore
+
+    selection = (payload.selection or "").strip()
+
+    # Map friendly labels to internal identifiers
+    label_to_internal = {
+        "[Anthropic] Claude Sonnet 4": ("anthropic", "claude-sonnet-4-20250514"),
+        "[OpenAI] o3": ("openai", "o3"),
+        "[OpenAI] gpt-5 mini": ("openai", "gpt-5-mini"),
+    }
+
+    if selection in label_to_internal:
+        provider, generator = label_to_internal[selection]
+    else:
+        # Assume internal model id provided
+        generator = selection
+        lower = generator.lower()
+        if "claude" in lower:
+            provider = "anthropic"
+        elif "gpt" in lower or "o3" in lower:
+            provider = "openai"
+        else:
+            provider = "openai"
+
+    # Apply globally (module-level settings)
+    cfg.LLM_PROVIDER = provider
+    cfg.GENERATOR_MODEL = generator
+
+    # Broadcast to admin log stream for observability (best-effort)
+    try:
+        await _admin_log_publish(f"🧠 Global model set to provider={provider}, generator={generator}")
+    except Exception:
+        pass
+
+    return {"message": "ok", "provider": cfg.LLM_PROVIDER, "generator": cfg.GENERATOR_MODEL}
 
 
 def _sse_event(data: Dict) -> str:

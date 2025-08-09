@@ -34,13 +34,47 @@ export default function HomePage() {
 
   const games = gamesData?.games || [];
 
+  // Remove any user question that never received an assistant reply.
+  // When multiple consecutive user questions exist before an assistant,
+  // only the most recent user question is considered answered by that assistant;
+  // older ones are dropped.
+  const sanitizeConversation = (history: Message[]): Message[] => {
+    const sanitized: Message[] = [];
+    const pendingUsers: Message[] = [];
+    for (const msg of history || []) {
+      if (msg.role === "user") {
+        pendingUsers.push(msg);
+      } else if (msg.role === "assistant") {
+        if (pendingUsers.length > 0) {
+          const lastUser = pendingUsers[pendingUsers.length - 1];
+          // Drop older pending users; only keep the last one answered by this assistant
+          pendingUsers.length = 0;
+          sanitized.push(lastUser);
+        }
+        sanitized.push(msg);
+      }
+    }
+    // Any remaining pendingUsers at the end had no answer → drop
+    return sanitized;
+  };
+
   // Load/save conversation per session+game to localStorage
   useEffect(() => {
     if (!selectedGame) return;
     const key = `boardrag_conv:${sessionId}:${selectedGame}`;
     const raw = localStorage.getItem(key);
     if (raw) {
-      try { setMessages(JSON.parse(raw)); } catch { setMessages([]); }
+      try {
+        const parsed = JSON.parse(raw) as Message[];
+        const cleaned = sanitizeConversation(Array.isArray(parsed) ? parsed : []);
+        setMessages(cleaned);
+        // If anything was removed, persist cleaned history back to storage
+        if (cleaned.length !== (Array.isArray(parsed) ? parsed.length : 0)) {
+          try { localStorage.setItem(key, JSON.stringify(cleaned)); } catch {}
+        }
+      } catch {
+        setMessages([]);
+      }
     } else {
       setMessages([]);
     }
@@ -329,6 +363,26 @@ export default function HomePage() {
   };
 
   const [sheetOpen, setSheetOpen] = useState(false);
+  const forcedOnceRef = useRef<boolean>(false);
+
+  // On first mobile visit, if no saved game and none selected, auto-open menu to prompt game choice
+  useEffect(() => {
+    if (forcedOnceRef.current) return;
+    const isMobile = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
+    if (!isMobile) return;
+    if (!games || games.length === 0) return;
+    if (selectedGame) return;
+    try {
+      const last = localStorage.getItem('boardrag_last_game');
+      if (!last) {
+        setSheetOpen(true);
+        forcedOnceRef.current = true;
+      }
+    } catch {
+      setSheetOpen(true);
+      forcedOnceRef.current = true;
+    }
+  }, [games, selectedGame]);
 
   return (
     <>
@@ -336,24 +390,7 @@ export default function HomePage() {
         {/* Chat column */}
         <div className="chat surface" style={{ height: "100%" }}>
           <div className="row title" style={{ gap: 12, justifyContent: 'space-between' }}>
-            <span>BoardgameGPT</span>
-            <select
-              className="select compact"
-              value={selectedGame}
-              onChange={(e) => {
-                if (selectedGame) {
-                  const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
-                  try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
-                }
-                setSelectedGame(e.target.value);
-              }}
-              style={{ minWidth: 180 }}
-            >
-              <option value="">Select game…</option>
-              {games.map((g) => (
-                <option key={g} value={g}>{g}</option>
-              ))}
-            </select>
+            <span>BoardgameGPT{selectedGame ? ` — ${selectedGame}` : ""}</span>
           </div>
 
           {/* Horizontal history strip */}
@@ -425,7 +462,7 @@ export default function HomePage() {
               />
             )}
 
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div className="actions" style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
               {isStreaming ? (
                 <button className="btn stop" onClick={onStop}>Stop</button>
               ) : (
@@ -433,11 +470,11 @@ export default function HomePage() {
               )}
               {/* Kebab to toggle the bottom sheet; placed to the right of Send */}
               <button
-                className="btn"
+                className="btn menu-toggle"
                 onClick={() => setSheetOpen((s) => !s)}
                 aria-label="Menu"
                 title="Menu"
-                style={{ width: 44, height: 44, minHeight: 44, padding: 0, display: "inline-grid", placeItems: "center" }}
+                style={{ width: 44, minHeight: 44, padding: 0, display: "inline-grid", placeItems: "center" }}
               >
                 ⋮
               </button>
@@ -463,13 +500,25 @@ export default function HomePage() {
           </section>
 
           <section className="surface pad section" style={{ marginTop: 12 }}>
-            <summary>Options</summary>
+            <summary>Game</summary>
             <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
               <label style={{ display: "grid", gap: 6 }}>
-                <span className="muted">Model</span>
-                <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
-                  <option>[Anthropic] Claude Sonnet 4</option>
-                  <option>[OpenAI] o3</option>
+                <span className="muted">Select game</span>
+                <select
+                  className="select"
+                  value={selectedGame}
+                  onChange={(e) => {
+                    if (selectedGame) {
+                      const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
+                      try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
+                    }
+                    setSelectedGame(e.target.value);
+                  }}
+                >
+                  <option value="">Select game…</option>
+                  {games.map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
                 </select>
               </label>
               <label className="row" style={{ gap: 10 }}>
@@ -513,13 +562,25 @@ export default function HomePage() {
           <button className="btn" onClick={() => setSheetOpen(false)} aria-label="Close menu" title="Close menu" style={{ width: 44, height: 44, minHeight: 44, padding: 0, display: 'inline-grid', placeItems: 'center' }}>×</button>
         </div>
         <section className="surface pad section" style={{ marginTop: 12 }}>
-          <summary>Options</summary>
+          <summary>Game</summary>
           <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
             <label style={{ display: "grid", gap: 6 }}>
-              <span className="muted">Model</span>
-              <select className="select" value={model} onChange={(e) => setModel(e.target.value)}>
-                <option>[Anthropic] Claude Sonnet 4</option>
-                <option>[OpenAI] o3</option>
+              <span className="muted">Select game</span>
+              <select
+                className="select"
+                value={selectedGame}
+                onChange={(e) => {
+                  if (selectedGame) {
+                    const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
+                    try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
+                  }
+                  setSelectedGame(e.target.value);
+                }}
+              >
+                <option value="">Select game…</option>
+                {games.map((g) => (
+                  <option key={g} value={g}>{g}</option>
+                ))}
               </select>
             </label>
             <label className="row" style={{ gap: 10 }}>

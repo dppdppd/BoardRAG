@@ -30,6 +30,7 @@ def query_interface(message, selected_games, include_web, chat_history, selected
         MODEL_NAME_MAP = {
             "[Anthropic] Claude Sonnet 4": "claude-sonnet-4-20250514",
             "[OpenAI] o3": "o3",
+            "[OpenAI] gpt-5 mini": "gpt-5-mini",
         }
         internal_model = MODEL_NAME_MAP.get(selected_model, selected_model)
 
