@@ -1,6 +1,6 @@
 [project]
-name = "boardrag"
-version = "0.0.2"
+name = "boardgamegpt"
+version = "0.0.1"
 
 
 [tool.ruff]

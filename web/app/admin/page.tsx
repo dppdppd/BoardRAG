@@ -3,8 +3,7 @@
 import React, { useEffect, useState } from "react";
 import useSWR from "swr";
 
-const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
-const API_BASE = RAW_API_BASE.trim().replace(/\/+$/, "");
+import { API_BASE } from "../../lib/config";
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
 export default function AdminPage() {
