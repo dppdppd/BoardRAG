@@ -1,6 +1,4 @@
-"""UI configuration, theme settings, and constants for BoardRAG application."""
-
-import gradio as gr
+"""Legacy Gradio UI configuration (kept for reference)."""
 
 # JavaScript for localStorage management
 STORAGE_SET_JS = '''
@@ -312,10 +310,5 @@ def get_config_info():
 """
 
 
-def create_theme():
-    """Create and return the Gradio theme with smaller base text size."""
-    return gr.themes.Default(
-        font=[gr.themes.GoogleFont("Georgia"), "Arial", "sans-serif"],
-        spacing_size=gr.themes.sizes.spacing_sm,
-        radius_size=gr.themes.sizes.radius_none,
-    ) 
+def create_theme():  # pragma: no cover - deprecated
+    return None

@@ -1,6 +1,5 @@
 """Chat and conversation history UI handlers."""
 
-import gradio as gr
 from .. import config
 from ..conversation_store import get as load_conv, save as save_conv, get_last_game
 
@@ -155,20 +154,12 @@ def delete_bookmark(choice_text, chat_history, selected_game, session_id):
     user_idx = get_user_index_for_choice(choice_text)
     if user_idx < 0:
         # Nothing to delete – keep everything as-is
-        return (
-            chat_history,
-            gr.update(),
-            gr.update(interactive=False),
-        )
+        return (chat_history, None, {"interactive": False})
 
     # Locate absolute positions in the flat message list
     abs_user_idx = _find_nth_user_absolute_index(chat_history, user_idx)
     if abs_user_idx == -1:
-        return (
-            chat_history,
-            gr.update(),
-            gr.update(interactive=False),
-        )
+        return (chat_history, None, {"interactive": False})
 
     # Determine if an assistant message immediately follows
     abs_asst_idx = abs_user_idx + 1 if abs_user_idx + 1 < len(chat_history) and chat_history[abs_user_idx + 1].get("role") == "assistant" else None
@@ -190,11 +181,7 @@ def delete_bookmark(choice_text, chat_history, selected_game, session_id):
     indexed = build_indexed_prompt_list(new_history)
     prompt_choices = format_prompt_choices(indexed)
 
-    return (
-        new_history,
-        gr.update(choices=prompt_choices, value=None),
-        gr.update(interactive=False),
-    )
+    return (new_history, {"choices": prompt_choices, "value": None}, {"interactive": False})
 
 
 def wipe_chat_history_handler(selected_game, session_id):
@@ -207,11 +194,11 @@ def wipe_chat_history_handler(selected_game, session_id):
     try:
         if not selected_game:
             print(f"[ERROR] No game selected!")
-            return "❌ No game selected", gr.update(), gr.update()
+            return "❌ No game selected", None, None
             
         if not session_id:
             print(f"[ERROR] No session ID!")
-            return "❌ No session ID", gr.update(), gr.update()
+            return "❌ No session ID", None, None
         
         print(f"[DEBUG] About to clear history for game '{selected_game}' in session '{session_id}'")
         
@@ -235,13 +222,13 @@ def wipe_chat_history_handler(selected_game, session_id):
         
         msg = "🗑️ Chat history cleared and persisted!"
         print(f"[SUCCESS] Returning success message")
-        return msg, gr.update(value=[]), gr.update(choices=[], value=None)
+        return msg, {"value": []}, {"choices": [], "value": None}
         
     except Exception as e:
         print(f"[ERROR] Exception in wipe_chat_history_handler: {e}")
         import traceback
         traceback.print_exc()
-        return f"❌ Error wiping chat history: {str(e)}", gr.update(), gr.update()
+        return f"❌ Error wiping chat history: {str(e)}", None, None
 
 
 def load_history(selected_game, session_id):
@@ -251,7 +238,7 @@ def load_history(selected_game, session_id):
     if not selected_game or not session_id:
         # Clear chat when no game selected or no session
         print(f"[DEBUG] Clearing chat - no game selected or no session")
-        return gr.update(value=[]), gr.update(value="")
+        return {"value": []}, {"value": ""}
     
     # Update last_game when user manually switches games
     from ..conversation_store import _STORE, _flush, _LOCK
@@ -284,7 +271,7 @@ def auto_load_on_session_ready(session_id, current_game_selection):
     
     if not session_id:
         print(f"[DEBUG] No session ID provided, returning empty updates")
-        return gr.update(), gr.update(), gr.update()
+        return None, None, None
     
     # Get the last game this user was using
     last_game = get_last_game(session_id)
@@ -314,7 +301,7 @@ def auto_load_on_session_ready(session_id, current_game_selection):
         # Build indexed prompt list
         indexed_prompts = build_indexed_prompt_list(history)
         prompt_choices = format_prompt_choices(indexed_prompts)
-        return gr.update(value=last_game), gr.update(value=history), gr.update(choices=prompt_choices, value=None)
+        return {"value": last_game}, {"value": history}, {"choices": prompt_choices, "value": None}
     elif current_game_selection and session_id:
         # Load conversation for currently selected game
         history = load_conv(session_id, current_game_selection)
@@ -322,11 +309,11 @@ def auto_load_on_session_ready(session_id, current_game_selection):
         # Build indexed prompt list for current selection
         indexed_prompts = build_indexed_prompt_list(history)
         prompt_choices = format_prompt_choices(indexed_prompts)
-        return gr.update(), gr.update(value=history), gr.update(choices=prompt_choices, value=None)
+        return None, {"value": history}, {"choices": prompt_choices, "value": None}
     else:
         # Only log this once per session to avoid spam
         if not hasattr(auto_load_on_session_ready, '_logged_empty'):
             print(f"[DEBUG] No valid game to restore, returning empty")
             auto_load_on_session_ready._logged_empty = True
     
-    return gr.update(), gr.update(), gr.update()
+    return None, None, None
