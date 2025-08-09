@@ -202,7 +202,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 }
 
 /* Desktop-only sidebar panel */
-.sidebar-panel { display: block; height: 100vh; overflow: auto; }
+.sidebar-panel { display: block; height: 100vh; overflow: hidden; }
 @media (max-width: 900px) { .sidebar-panel { display: none; } }
 
 /* Theme cards and color chips (Options) */
