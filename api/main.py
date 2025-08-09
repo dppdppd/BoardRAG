@@ -110,7 +110,13 @@ async def admin_rebuild_stream():
         task = asyncio.create_task(run_rebuild())
         try:
             while True:
-                typ, payload = await queue.get()
+                try:
+                    # Send heartbeat pings to keep proxies from buffering/closing
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Comment line (ignored by EventSource) – keeps connection alive
+                    yield b": ping\n\n"
+                    continue
                 if typ == "log":
                     yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
                 elif typ == "done":
@@ -121,7 +127,12 @@ async def admin_rebuild_stream():
             if not task.done():
                 task.cancel()
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # Disable proxy buffering (nginx)
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/admin/refresh-stream")
@@ -144,7 +155,11 @@ async def admin_refresh_stream():
         task = asyncio.create_task(run_refresh())
         try:
             while True:
-                typ, payload = await queue.get()
+                try:
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
                 if typ == "log":
                     yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
                 elif typ == "done":
@@ -155,7 +170,12 @@ async def admin_refresh_stream():
             if not task.done():
                 task.cancel()
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.post("/admin/delete")
