@@ -88,6 +88,76 @@ async def admin_refresh():
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
+@app.get("/admin/rebuild-stream")
+async def admin_rebuild_stream():
+    queue: asyncio.Queue = asyncio.Queue()
+
+    loop = asyncio.get_running_loop()
+
+    def log_cb(message: str) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, ("log", message))
+        except Exception:
+            pass
+
+    async def run_rebuild():
+        # Run sync function in a thread and stream logs via callback
+        msg, _games, _choices = await asyncio.to_thread(rebuild_library, log_cb)
+        await queue.put(("done", msg))
+        await queue.put(("close", ""))
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(run_rebuild())
+        try:
+            while True:
+                typ, payload = await queue.get()
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/admin/refresh-stream")
+async def admin_refresh_stream():
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def log_cb(message: str) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, ("log", message))
+        except Exception:
+            pass
+
+    async def run_refresh():
+        msg, _games, _choices = await asyncio.to_thread(refresh_games, log_cb)
+        await queue.put(("done", msg))
+        await queue.put(("close", ""))
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(run_refresh())
+        try:
+            while True:
+                typ, payload = await queue.get()
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 @app.post("/admin/delete")
 async def admin_delete(games: List[str]):
     if not isinstance(games, list):

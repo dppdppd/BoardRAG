@@ -55,12 +55,14 @@ def get_chat_storage_usage():
 
 
 def format_storage_info():
-    """Generate formatted storage information for display."""
+    """Generate formatted storage information for display.
+
+    Chat history is no longer tracked server-side; only PDF storage is reported.
+    """
     pdf_size, pdf_count, pdf_error = get_pdf_storage_usage()
-    chat_size, chat_count, chat_error = get_chat_storage_usage()
-    
+
     info = "## 💾 Storage Usage\n\n"
-    
+
     # PDF Storage
     info += "### 📄 PDF Documents\n"
     if pdf_error:
@@ -68,23 +70,5 @@ def format_storage_info():
     else:
         info += f"**Size:** {pdf_size:.2f} MB\n"
         info += f"**Files:** {pdf_count} PDFs\n"
-    
-    info += "\n"
-    
-    # Chat History Storage
-    info += "### 💬 Chat Histories\n"
-    if chat_error:
-        info += f"❌ **Error:** {chat_error}\n"
-    else:
-        info += f"**Size:** {chat_size:.2f} MB\n"
-        info += f"**Conversations:** {chat_count} saved conversations\n"
-    
-    info += "\n"
-    
-    # Total
-    if not pdf_error and not chat_error:
-        total_size = pdf_size + chat_size
-        info += f"### 📊 Total Storage\n"
-        info += f"**Combined Size:** {total_size:.2f} MB\n"
-    
-    return info 
+
+    return info
