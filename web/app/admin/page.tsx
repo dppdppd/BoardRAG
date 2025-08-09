@@ -27,6 +27,30 @@ export default function AdminPage() {
   const [renameSelection, setRenameSelection] = useState<string[]>([]);
   const [newName, setNewName] = useState<string>("");
 
+  // --- Global Model Selector (applies to all users) -------------------------
+  const [modelLabel, setModelLabel] = useState<string>("");
+  const [savingModel, setSavingModel] = useState<boolean>(false);
+
+  useEffect(() => {
+    // Fetch current global model
+    (async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/admin/model`);
+        if (resp.ok) {
+          const data = await resp.json();
+          const pretty = (() => {
+            const gen = String(data?.generator || "");
+            if (gen.includes("claude")) return "[Anthropic] Claude Sonnet 4";
+            if (gen === "o3") return "[OpenAI] o3";
+            if (gen === "gpt-5-mini") return "[OpenAI] gpt-5 mini";
+            return gen;
+          })();
+          setModelLabel(pretty);
+        }
+      } catch {}
+    })();
+  }, []);
+
   useEffect(() => {
     try {
       const fromSession = sessionStorage.getItem("boardrag_role");
@@ -189,68 +213,107 @@ export default function AdminPage() {
   const games = gamesData?.games || [];
   const pdfChoices = pdfChoicesData?.choices || [];
 
-  return (
-    <div style={{ display: "grid", gap: 16, padding: 16, gridTemplateColumns: "1fr 1fr" }}>
-      <div style={{ gridColumn: "1 / -1" }}>
-        <h2>Admin</h2>
-        {message && <div style={{ color: "#444", background: "#f3f3f3", padding: 8, borderRadius: 6 }}>{message}</div>}
-      </div>
+  const saveModel = async () => {
+    setSavingModel(true);
+    try {
+      const resp = await fetch(`${API_BASE}/admin/model`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ selection: modelLabel }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.detail || "Failed to set model");
+      setMessage(`Model set to ${data.generator}`);
+      appendConsole(`🧠 Model set → ${data.provider}/${data.generator}`);
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to set model");
+    } finally {
+      setSavingModel(false);
+    }
+  };
 
-      <div>
-        <h3>Library</h3>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={rebuild} disabled={busy!==null}>
+  return (
+    <div style={{ display: "grid", gap: 8, padding: 8, gridTemplateColumns: "1fr", height: "100vh", overflowY: "auto", alignContent: "start", fontSize: 14 }}>
+      {message && <div style={{ color: "#444", background: "#f3f3f3", padding: 6, borderRadius: 4 }}>{message}</div>}
+
+      <div className="admin-tool">
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Library</h3>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={rebuild} disabled={busy!==null} style={{ padding: "6px 10px" }}>
             {busy === "rebuild" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Rebuilding…</span>) : "🔄 Rebuild Library"}
           </button>
-          <button onClick={refresh} disabled={busy!==null}>
+          <button onClick={refresh} disabled={busy!==null} style={{ padding: "6px 10px" }}>
             {busy === "refresh" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Processing…</span>) : "🔄 Process New PDFs"}
           </button>
         </div>
-        <div style={{ marginTop: 12 }}>
-          <h4>Delete game(s)</h4>
-          <select multiple size={6} value={deleteSelection} onChange={(e) => setDeleteSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%" }}>
-            {games.map((g) => (
-              <option key={g} value={g}>{g}</option>
-            ))}
-          </select>
-          <div style={{ marginTop: 8 }}>
-            <button onClick={deleteGamesReq} disabled={deleteSelection.length === 0}>Delete</button>
-          </div>
+      </div>
+
+      <div className="admin-tool alt">
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Delete Games</h3>
+        <select multiple size={5} value={deleteSelection} onChange={(e) => setDeleteSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%", fontSize: 13, padding: 4 }}>
+          {games.map((g) => (
+            <option key={g} value={g}>{g}</option>
+          ))}
+        </select>
+        <div style={{ marginTop: 6 }}>
+          <button onClick={deleteGamesReq} disabled={deleteSelection.length === 0} style={{ padding: "6px 10px" }}>Delete</button>
         </div>
       </div>
 
-      <div>
-        <h3>Assign PDF(s)</h3>
-        <label style={{ display: "grid", gap: 6 }}>
+      <div className="admin-tool">
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Global Model</h3>
+        <label style={{ display: "grid", gap: 4 }}>
+          <span>Model (applies to all users)</span>
+          <select
+            className="select"
+            value={modelLabel}
+            onChange={(e) => setModelLabel(e.target.value)}
+            style={{ fontSize: 13, padding: 6 }}
+          >
+            <option>[Anthropic] Claude Sonnet 4</option>
+            <option>[OpenAI] o3</option>
+            <option>[OpenAI] gpt-5 mini</option>
+          </select>
+        </label>
+        <div style={{ marginTop: 6 }}>
+          <button onClick={saveModel} disabled={savingModel} style={{ padding: "6px 10px" }}>
+            {savingModel ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+
+      <div className="admin-tool alt">
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Assign PDF(s)</h3>
+        <label style={{ display: "grid", gap: 4 }}>
           <span>PDF entries</span>
-          <select multiple size={8} value={renameSelection} onChange={(e) => setRenameSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%" }}>
+          <select multiple size={6} value={renameSelection} onChange={(e) => setRenameSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%", fontSize: 13, padding: 4 }}>
             {pdfChoices.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
         </label>
-        <label style={{ display: "grid", gap: 6, marginTop: 8 }}>
+        <label style={{ display: "grid", gap: 4, marginTop: 6 }}>
           <span>New game assignment</span>
-          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Campaign for North Africa, The" />
+          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Campaign for North Africa, The" style={{ fontSize: 13, padding: 6 }} />
         </label>
-        <div style={{ marginTop: 8 }}>
-          <button onClick={renameReq} disabled={renameSelection.length === 0 || !newName.trim()}>Rename</button>
+        <div style={{ marginTop: 6 }}>
+          <button onClick={renameReq} disabled={renameSelection.length === 0 || !newName.trim()} style={{ padding: "6px 10px" }}>Rename</button>
         </div>
       </div>
 
-      <div style={{ gridColumn: "1 / -1" }}>
-        <h3>Technical Info</h3>
-        <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 12, borderRadius: 6 }}>{storageData?.markdown || ""}</pre>
-        <button onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
+      <div className="admin-tool" style={{ gridColumn: "1 / -1" }}>
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Technical Info</h3>
+        <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 8, borderRadius: 4, fontSize: 12 }}>{storageData?.markdown || ""}</pre>
+        <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
       </div>
 
       {/* Shared console output pinned at bottom with fixed height */}
-      <div style={{ gridColumn: "1 / -1" }}>
-        <h3>Console</h3>
-        <div className="surface" style={{ padding: 8 }}>
+      <div className="admin-tool alt" style={{ gridColumn: "1 / -1" }}>
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Console</h3>
+        <div className="surface" style={{ padding: 6 }}>
           <pre
             ref={consoleRef}
-            style={{ whiteSpace: "pre-wrap", height: 240, overflow: "auto", margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace", fontSize: 13 }}
+            style={{ whiteSpace: "pre-wrap", height: 180, overflow: "auto", margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace", fontSize: 12 }}
           >
 {consoleText || ""}
           </pre>
@@ -259,5 +322,6 @@ export default function AdminPage() {
     </div>
   );
 }
+
 
 

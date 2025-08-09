@@ -20,6 +20,7 @@ Example:
 
 import argparse
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
@@ -35,9 +36,6 @@ from .config import (
     CHROMA_PATH,
     CITATION_SCORE_THRESHOLD,
     CITATION_MIN_SOURCES,
-    GENERATOR_MODEL,
-    LLM_PROVIDER,
-    OLLAMA_URL,
     disable_chromadb_telemetry,
     get_chromadb_settings,
     suppress_chromadb_telemetry,
@@ -48,10 +46,10 @@ from .config import (
     SERPAPI_API_KEY,
     BRAVE_API_KEY,
     ENABLE_SEARCH_REWRITE,
-    SEARCH_REWRITE_MODEL,
 )
 from .embedding_function import get_embedding_function
 from templates.load_jinja_template import load_jinja2_prompt
+from . import config as cfg
 
 # Optional import for web search; only loaded when enabled to avoid extra dependency at runtime
 if ENABLE_WEB_SEARCH:
@@ -60,25 +58,14 @@ if ENABLE_WEB_SEARCH:
     except ImportError:  # Fallback if dependency missing
         ddg = None
 
-# Global config ----------------------------------------------------------------
-# Importing here to avoid circular deps and keep single source of truth.
-from .config import (
-    CHROMA_PATH,
-    GENERATOR_MODEL,
-    LLM_PROVIDER,
-    OLLAMA_URL,
-    disable_chromadb_telemetry,
-    get_chromadb_settings,
-    suppress_chromadb_telemetry,
-    validate_config,
-    ENABLE_WEB_SEARCH,
-    WEB_SEARCH_RESULTS,
-)
+from . import config as cfg
 
 # ---------------------------------------------------------------------------
 # Verbose logging toggle (set VERBOSE=true to enable extra prints)
 # ---------------------------------------------------------------------------
 VERBOSE_LOGGING = os.getenv("VERBOSE", "False").lower() in {"1", "true", "yes"}
+REQUEST_TIMEOUT_S = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
+STREAM_TIMEOUT_S = float(os.getenv("LLM_STREAM_TIMEOUT", "90"))
 
 
 def perform_web_search(query: str, k: int = 5) -> List[Document]:
@@ -182,6 +169,14 @@ def perform_web_search(query: str, k: int = 5) -> List[Document]:
         docs.append(Document(page_content=snippet, metadata=meta))
     print(f"🌐 Added {len(docs)} web snippets to context")
     return docs
+def _openai_requires_default_temperature(model_name: str) -> bool:
+    """Return True if this OpenAI model doesn't accept custom temperature (must use default).
+
+    Covers o3/o4 reasoning and future reasoning-style identifiers.
+    """
+    m = (model_name or "").lower()
+    return m.startswith("o3") or m.startswith("o4") or "-reasoning" in m or m.startswith("gpt-5")
+
 
 
 def normalize_game_title(title: str) -> str:
@@ -274,18 +269,18 @@ def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
     for attempt in range(max_retries):
         try:
             # Use configured provider for filename extraction
-            if LLM_PROVIDER.lower() == "anthropic":
-                model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0)
-            elif LLM_PROVIDER.lower() == "ollama":
+            if cfg.LLM_PROVIDER.lower() == "anthropic":
+                model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0)
+            elif cfg.LLM_PROVIDER.lower() == "ollama":
                 from langchain_community.llms.ollama import Ollama
 
-                model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL)
+                model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL)
             else:  # openai
                 # o3 model only supports temperature=1, other OpenAI models use 0 for determinism
-                if GENERATOR_MODEL == "o3":
-                    model = ChatOpenAI(model=GENERATOR_MODEL, temperature=1)
+                if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
+                    model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S)
                 else:
-                    model = ChatOpenAI(model=GENERATOR_MODEL, temperature=0)
+                    model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S)
 
             # Build prompt with optional PDF content
             context_section = ""
@@ -613,7 +608,7 @@ def rewrite_search_query(raw_query: str) -> str:
         else:  # openai
             # o3 only supports temperature=1
             temp = 1 if SEARCH_REWRITE_MODEL == "o3" else 0
-            model = ChatOpenAI(model=SEARCH_REWRITE_MODEL, temperature=temp)
+            model = ChatOpenAI(model=SEARCH_REWRITE_MODEL, temperature=temp, timeout=REQUEST_TIMEOUT_S)
 
         prompt = (
             "You are a search expert. Rewrite the following user question into a concise, "
@@ -821,17 +816,18 @@ def query_rag(
         "streaming": True,
     }
 
-    if LLM_PROVIDER.lower() == "ollama":
+    if cfg.LLM_PROVIDER.lower() == "ollama":
         # Import here to avoid requiring Ollama for OpenAI users.
         from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
 
-        model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL, **model_kwargs)
-    elif LLM_PROVIDER.lower() == "anthropic":
-        model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0, **model_kwargs)
-    elif LLM_PROVIDER.lower() == "openai":
-        # o3 model only supports temperature=1, others use 0
-        temp = 1 if GENERATOR_MODEL == "o3" else 0
-        model = ChatOpenAI(model=GENERATOR_MODEL, temperature=temp, **model_kwargs)
+        model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL, **model_kwargs)
+    elif cfg.LLM_PROVIDER.lower() == "anthropic":
+        model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0, **model_kwargs)
+    elif cfg.LLM_PROVIDER.lower() == "openai":
+        if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
+        else:
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
     else:
         raise ValueError(
             f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
@@ -1101,21 +1097,24 @@ def stream_query_rag(
     # ---- Create LLM (streaming enabled) ----
 
     print("🍳 Generating the response (streaming)…")
-    print(f"🤖 Using LLM Provider: {LLM_PROVIDER}")
-    print(f"🤖 Using Model: {GENERATOR_MODEL}")
+    print(f"🤖 Using LLM Provider: {cfg.LLM_PROVIDER}")
+    print(f"🤖 Using Model: {cfg.GENERATOR_MODEL}")
 
     model_kwargs = {"streaming": True}
-    if LLM_PROVIDER.lower() == "ollama":
+    if cfg.LLM_PROVIDER.lower() == "ollama":
         from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
-        print(f"🤖 Creating Ollama model with base_url: {OLLAMA_URL}")
-        model = Ollama(model=GENERATOR_MODEL, base_url=OLLAMA_URL, **model_kwargs)
-    elif LLM_PROVIDER.lower() == "anthropic":
+        print(f"🤖 Creating Ollama model with base_url: {cfg.OLLAMA_URL}")
+        model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL, **model_kwargs)
+    elif cfg.LLM_PROVIDER.lower() == "anthropic":
         print("🤖 Creating Anthropic model...")
-        model = ChatAnthropic(model=GENERATOR_MODEL, temperature=0, **model_kwargs)
-    elif LLM_PROVIDER.lower() == "openai":
-        temp = 1 if GENERATOR_MODEL == "o3" else 0
-        print(f"🤖 Creating OpenAI model with temperature: {temp}")
-        model = ChatOpenAI(model=GENERATOR_MODEL, temperature=temp, **model_kwargs)
+        model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0, **model_kwargs)
+    elif cfg.LLM_PROVIDER.lower() == "openai":
+        if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
+            print("🤖 Creating OpenAI model with temperature: 1 (required by reasoning models)")
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
+        else:
+            print("🤖 Creating OpenAI model with temperature: 0")
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
     else:
         raise ValueError("Unsupported LLM_PROVIDER: " + LLM_PROVIDER)
 
