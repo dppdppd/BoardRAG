@@ -12,7 +12,11 @@ export default function AdminPage() {
   const [message, setMessage] = useState<string>("");
 
   const { data: gamesData, mutate: refetchGames } = useSWR<{ games: string[] }>(`${API_BASE}/games`, fetcher);
-  const { data: pdfChoicesData, mutate: refetchChoices } = useSWR<{ choices: string[] }>(`${API_BASE}/pdf-choices`, fetcher);
+  const { data: pdfChoicesData, mutate: refetchChoices } = useSWR<{ choices: string[] }>(
+    `${API_BASE}/pdf-choices`,
+    fetcher,
+    { revalidateOnMount: true, revalidateOnFocus: true }
+  );
   const { data: storageData, mutate: refetchStorage } = useSWR<{ markdown: string }>(`${API_BASE}/storage`, fetcher);
 
   const [deleteSelection, setDeleteSelection] = useState<string[]>([]);
@@ -34,6 +38,12 @@ export default function AdminPage() {
       }
     } catch {}
   }, []);
+
+  // Ensure "Assign PDF(s)" list is fresh on every visit
+  useEffect(() => {
+    // Trigger revalidation immediately when the page mounts
+    refetchChoices();
+  }, [refetchChoices]);
 
   const unlock = async () => {
     setMessage("");

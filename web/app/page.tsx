@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { mutate as swrMutate } from "swr";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 
@@ -27,6 +28,9 @@ export default function HomePage() {
   const historyDragRef = useRef<{ isDown: boolean; startX: number; scrollLeft: number; dragged: boolean }>({ isDown: false, startX: 0, scrollLeft: 0, dragged: false });
   const historyDraggingFlag = useRef<boolean>(false);
   const loadedKeyRef = useRef<string | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploading, setUploading] = useState<boolean>(false);
+  const [uploadMsg, setUploadMsg] = useState<string>("");
 
   const games = gamesData?.games || [];
 
@@ -296,12 +300,31 @@ export default function HomePage() {
   };
 
   const onUpload = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const form = new FormData();
-    Array.from(files).forEach((f) => form.append("files", f));
-    const resp = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
-    if (resp.ok) {
-      await refetchGames();
+    if (!files || files.length === 0 || uploading) return;
+    setUploading(true);
+    setUploadMsg("");
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((f) => form.append("files", f));
+      const resp = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
+      if (resp.ok) {
+        try {
+          const data = await resp.json();
+          setUploadMsg(data?.message || "Upload complete.");
+        } catch {
+          setUploadMsg("Upload complete.");
+        }
+        await refetchGames();
+        // Also refresh PDF assignment list for Admin screen
+        try { await swrMutate(`${API_BASE}/pdf-choices`); } catch {}
+      } else {
+        setUploadMsg(`Upload failed (${resp.status}).`);
+      }
+    } catch {
+      setUploadMsg("Upload failed. Network error.");
+    } finally {
+      setUploading(false);
+      try { if (uploadInputRef.current) uploadInputRef.current.value = ""; } catch {}
     }
   };
 
@@ -446,8 +469,26 @@ export default function HomePage() {
 
           <section className="surface pad section" style={{ marginTop: 12 }}>
             <summary>Add New Game</summary>
-            <div style={{ marginTop: 8 }}>
-              <input className="input" type="file" accept="application/pdf" multiple onChange={(e) => onUpload(e.target.files)} />
+            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+              <input
+                ref={uploadInputRef}
+                className="input"
+                type="file"
+                accept="application/pdf"
+                multiple
+                disabled={uploading}
+                onChange={(e) => onUpload(e.target.files)}
+                title={uploading ? "Uploading…" : "Select PDF files"}
+              />
+              {uploading && (
+                <div className="indicator" style={{ gap: 8 }}>
+                  <span className="spinner" />
+                  <span>Uploading… This may take a moment.</span>
+                </div>
+              )}
+              {!!uploadMsg && !uploading && (
+                <div className="muted" style={{ fontSize: 13 }}>{uploadMsg}</div>
+              )}
             </div>
           </section>
         </div>
@@ -488,8 +529,26 @@ export default function HomePage() {
         </section>
         <section className="surface pad section" style={{ marginTop: 12 }}>
           <summary>Add New Game</summary>
-          <div style={{ marginTop: 8 }}>
-            <input className="input" type="file" accept="application/pdf" multiple onChange={(e) => onUpload(e.target.files)} />
+          <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+            <input
+              ref={uploadInputRef}
+              className="input"
+              type="file"
+              accept="application/pdf"
+              multiple
+              disabled={uploading}
+              onChange={(e) => onUpload(e.target.files)}
+              title={uploading ? "Uploading…" : "Select PDF files"}
+            />
+            {uploading && (
+              <div className="indicator" style={{ gap: 8 }}>
+                <span className="spinner" />
+                <span>Uploading… This may take a moment.</span>
+              </div>
+            )}
+            {!!uploadMsg && !uploading && (
+              <div className="muted" style={{ fontSize: 13 }}>{uploadMsg}</div>
+            )}
           </div>
         </section>
       </div>
