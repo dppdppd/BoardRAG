@@ -222,10 +222,9 @@ def rebuild_selected_game_handler(selected_games):
         traceback.print_exc()
 
     # ---- 2️⃣ Load & split documents ----
-    docs = load_documents([str(p) for p in all_pdf_paths])
-    if not docs:
-        empty = gr.update()
-        return f"❌ Failed to load PDFs", empty, empty, empty
+        docs = load_documents([str(p) for p in all_pdf_paths])
+        if not docs:
+            return f"❌ Failed to load PDFs", None, None, None
 
     split_docs = split_docs_func(docs)
     add_to_chroma(split_docs)
@@ -258,7 +257,7 @@ def rebuild_selected_game_handler(selected_games):
             success_msg_parts.append(f"❌ No PDFs found for {len(failed_games)} games: {', '.join(failed_games)}")
     
     final_message = " | ".join(success_msg_parts)
-    return final_message, gr.update(choices=available_games), gr.update(choices=pdf_choices), gr.update(choices=pdf_choices)
+    return final_message, {"choices": available_games}, {"choices": pdf_choices}, {"choices": pdf_choices}
 
 
 def refresh_games_handler():
@@ -268,7 +267,7 @@ def refresh_games_handler():
         chroma_path = config.CHROMA_PATH
 
         if not os.path.exists(data_path):
-            return "❌ No data directory found", gr.update(), gr.update(), gr.update()
+            return "❌ No data directory found", None, None, None
 
         stored_games_dict = get_stored_game_names()
         stored_filenames = set(stored_games_dict.keys())  # existing PDF filenames
@@ -290,9 +289,9 @@ def refresh_games_handler():
             pdf_choices = get_pdf_dropdown_choices()
             return (
                 "ℹ️ No new PDFs to process",
-                gr.update(choices=available_games),
-                gr.update(choices=pdf_choices),
-                gr.update(choices=pdf_choices),
+                {"choices": available_games},
+                {"choices": pdf_choices},
+                {"choices": pdf_choices},
             )
 
         documents = []
@@ -344,17 +343,17 @@ def refresh_games_handler():
         pdf_choices = get_pdf_dropdown_choices()
         return (
             f"✅ Added {len(new_pdf_files)} new PDF(s): {', '.join(new_pdf_files)}",
-            gr.update(choices=available_games),
-            gr.update(choices=pdf_choices),
-            gr.update(choices=pdf_choices),
+            {"choices": available_games},
+            {"choices": pdf_choices},
+            {"choices": pdf_choices},
         )
     except Exception as e:
         pdf_choices = get_pdf_dropdown_choices()
         return (
             f"❌ Error processing new games: {str(e)}",
-            gr.update(),
-            gr.update(choices=pdf_choices),
-            gr.update(choices=pdf_choices),
+            None,
+            {"choices": pdf_choices},
+            {"choices": pdf_choices},
         )
 
 
@@ -396,11 +395,11 @@ def upload_with_status_update(pdf_files):
             )
         else:
             return (
-                gr.update(value="❌ No valid PDF files found", visible=True),
-                gr.update(), gr.update(), gr.update(),
+                {"value": "❌ No valid PDF files found", "visible": True},
+                None, None, None,
             )
     except Exception as e:
         return (
-            gr.update(value=f"❌ Upload failed: {str(e)}", visible=True),
-            gr.update(), gr.update(), gr.update(),
+            {"value": f"❌ Upload failed: {str(e)}", "visible": True},
+            None, None, None,
         )
