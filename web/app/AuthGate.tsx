@@ -1,11 +1,11 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { API_BASE } from "../lib/config";
 
 type Props = { children: React.ReactNode };
 
-const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
-const API_BASE = RAW_API_BASE.trim().replace(/\/+$/, "");
+// API_BASE is normalized to include protocol and no trailing slash
 
 export default function AuthGate({ children }: Props) {
   const [role, setRole] = useState<string | null>(null); // null = unknown (loading), "none" = locked

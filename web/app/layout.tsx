@@ -2,8 +2,8 @@ import "./globals.css";
 import AuthGate from "./AuthGate";
 
 export const metadata = {
-  title: "BoardRAG",
-  description: "BoardRAG front end",
+  title: "BoardgameGPT",
+  description: "BoardgameGPT front end",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

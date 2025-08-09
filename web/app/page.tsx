@@ -6,8 +6,7 @@ import ReactMarkdown from "react-markdown";
 
 type Message = { role: "user" | "assistant"; content: string };
 
-const RAW_API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
-const API_BASE = RAW_API_BASE.trim().replace(/\/+$/, "");
+import { API_BASE } from "../lib/config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -314,7 +313,7 @@ export default function HomePage() {
         {/* Chat column */}
         <div className="chat surface" style={{ height: "100%" }}>
           <div className="row title" style={{ gap: 12, justifyContent: 'space-between' }}>
-            <span>BoardRAG</span>
+            <span>BoardgameGPT</span>
             <select
               className="select compact"
               value={selectedGame}
