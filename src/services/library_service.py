@@ -103,11 +103,21 @@ def get_pdf_dropdown_choices() -> List[str]:
     pdf_files = list(data_root.rglob("*.pdf")) if data_root.exists() else []
     name_map = get_stored_game_names()
     choices: List[str] = []
-    for p in pdf_files:
-        fname = p.name
-        game_name = name_map.get(fname, fname)
-        choices.append(f"{game_name} - {fname}")
-    return sorted(choices)
+    if pdf_files:
+        for p in pdf_files:
+            fname = p.name
+            game_name = name_map.get(fname, fname)
+            choices.append(f"{game_name} - {fname}")
+        return sorted(choices)
+    # Fallback: when running on serverless/container where PDFs may not be on disk,
+    # use stored game-name mappings to populate the list so Admin can manage entries.
+    if name_map:
+        for fname, game_name in name_map.items():
+            safe_fname = Path(fname).name  # ensure it's just the filename
+            title = game_name or safe_fname
+            choices.append(f"{title} - {safe_fname}")
+        return sorted(choices)
+    return []
 
 
 def rebuild_library(log: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str], List[str]]:
