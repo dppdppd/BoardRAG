@@ -131,6 +131,21 @@ print(f"[config] ENABLE_WEB_SEARCH = {ENABLE_WEB_SEARCH}")
 # How many web snippets to fetch per query (only used when ENABLE_WEB_SEARCH)
 WEB_SEARCH_RESULTS = int(os.getenv("WEB_SEARCH_RESULTS", "5"))
 
+# ---------------------------------------------------------------------------
+# Citation Configuration
+# ---------------------------------------------------------------------------
+# Maximum similarity score threshold for including sources in citations
+# Lower scores = better similarity (distance-based). Only sources with scores <= this threshold will be cited.
+# Set to a high value like 999.0 to include all sources (original behavior)
+CITATION_SCORE_THRESHOLD = float(os.getenv("CITATION_SCORE_THRESHOLD", "0.7"))
+
+# Minimum number of citations to show even if none meet the threshold
+# This ensures users always get some source attribution
+CITATION_MIN_SOURCES = int(os.getenv("CITATION_MIN_SOURCES", "3"))
+
+print(f"[config] CITATION_SCORE_THRESHOLD = {CITATION_SCORE_THRESHOLD}")
+print(f"[config] CITATION_MIN_SOURCES = {CITATION_MIN_SOURCES}")
+
 # Search provider selection: "duckduckgo" (default), "serpapi", or "brave"
 SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "brave").lower()
 
@@ -289,7 +304,7 @@ def validate_config():
 
 def print_config():
     """Print current configuration (hiding API keys)."""
-    print("🔧 BoardRAG Configuration:")
+    print("BoardRAG Configuration:")
     print(f"  Provider: {LLM_PROVIDER}")
     print(f"  Generator: {GENERATOR_MODEL}")
     print(f"  Embedder: {EMBEDDER_MODEL}")

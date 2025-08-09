@@ -43,6 +43,7 @@ def unlock_handler(password, session_id):
         gr.update(visible=show_user),  # upload_accordion
         gr.update(visible=show_admin),  # delete_accordion
         gr.update(visible=show_admin),  # rename_accordion
+        gr.update(visible=show_admin),  # rebuild_game_accordion
         gr.update(visible=show_admin),  # tech_accordion
         gr.update(visible=show_access_panel),  # password_tb
     )
@@ -79,6 +80,7 @@ def auto_unlock_interface(access_state):
         gr.update(visible=show_user),  # upload_accordion
         gr.update(visible=show_admin),  # delete_accordion
         gr.update(visible=show_admin),  # rename_accordion
+        gr.update(visible=show_admin),  # rebuild_game_accordion
         gr.update(visible=show_admin),  # tech_accordion
         gr.update(visible=show_access_panel),  # password_tb
     )

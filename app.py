@@ -26,10 +26,10 @@ except Exception as e:
 # Import modular components
 from src.config_ui import INTRO_STRING, THEME_CSS, get_config_info, create_theme
 from src.handlers import (
-    unlock_handler, rebuild_library_handler, refresh_games_handler,
+    unlock_handler, rebuild_library_handler, refresh_games_handler, rebuild_selected_game_handler,
     wipe_chat_history_handler, refresh_storage_handler, upload_with_status_update,
     delete_game_handler, rename_game_handler, get_pdf_dropdown_choices,
-    update_chatbot_label, get_user_index_for_choice,
+    get_user_index_for_choice,
     load_history, auto_load_on_session_ready, auto_unlock_interface
 )
 from src.ui_components import query_interface
@@ -146,8 +146,12 @@ with gr.Blocks(
         # Prime the in-memory store with conversations from the browser
         try:
             from src import conversation_store as _cs
-            for game, hist in (saved_convs or {}).items():
-                _cs.save(saved_session, game, hist)
+            # Restore all data directly to avoid triggering _last_game updates
+            with _cs._LOCK:
+                user_data = _cs._STORE.setdefault(saved_session, {})
+                for game, hist in (saved_convs or {}).items():
+                    user_data[game] = hist
+                    print(f"[DEBUG] Restored {game}: {len(hist) if isinstance(hist, list) else hist}")
         except Exception as e:
             print(f"[DEBUG] Failed priming in-memory conversations: {e}")
 
@@ -213,7 +217,7 @@ with gr.Blocks(
                 elem_classes=["custom-chatbot"],
                 render_markdown=True,
                 type="messages",
-                label="Chatbot",
+                show_label=False,
             )
             
 
@@ -236,7 +240,7 @@ with gr.Blocks(
         # Right sidebar for controls and settings
         with gr.Column(scale=1, elem_classes=["sidebar"]):
             # Prompt history – starts open and is shown once unlocked
-            with gr.Accordion("🔖 Questions", open=True, visible=False) as prompt_accordion:
+            with gr.Accordion("🔖 History", open=True, visible=False) as prompt_accordion:
                 prompt_radio = gr.Radio(value=None, choices=[], label="", interactive=True, elem_id="prompt-radio")
                 # Hidden component to pass user index to JavaScript
                 user_index_hidden = gr.Number(value=-1, visible=False)
@@ -279,7 +283,7 @@ with gr.Blocks(
             with gr.Accordion(
                 "🗑️ Delete PDF", open=False, visible=False
             ) as delete_accordion:
-                delete_game_dropdown = gr.Dropdown(choices=game_choices, label="Select Game")
+                delete_game_dropdown = gr.Dropdown(choices=get_pdf_dropdown_choices(), label="Select PDF", multiselect=True)
                 delete_button = gr.Button("Delete", variant="stop")
                 delete_status = gr.Textbox(interactive=False)
 
@@ -287,11 +291,21 @@ with gr.Blocks(
                 "✏️ Assign PDF", open=False, visible=False
             ) as rename_accordion:
                 rename_game_dropdown = gr.Dropdown(
-                    choices=get_pdf_dropdown_choices(), label="Select PDF"
+                    choices=get_pdf_dropdown_choices(), label="Select PDF", multiselect=True
                 )
                 new_name_tb = gr.Textbox(label="New Name")
                 rename_button = gr.Button("Rename", variant="primary")
                 rename_status = gr.Textbox(interactive=False)
+
+            with gr.Accordion(
+                "🔄 Rebuild Selected Game", open=False, visible=False
+            ) as rebuild_game_accordion:
+                rebuild_game_dropdown = gr.Dropdown(
+                    choices=get_available_games(), label="Select Game", multiselect=True
+                )
+                rebuild_selected_button = gr.Button("Rebuild Game", variant="secondary")
+                rebuild_selected_status = gr.Textbox(interactive=False, visible=False)
+
 
             # Technical info (admin only)
             with gr.Accordion(
@@ -376,6 +390,11 @@ with gr.Blocks(
         load_history,
         inputs=[game_dropdown, session_state],
         outputs=[chatbot, prompt_radio],
+    ).then(
+        persist_to_browser,
+        inputs=[session_state, access_state],
+        outputs=[browser_state],
+        show_progress=False
     )
     
     # Hook into chatbot changes to detect when it's been cleared via the built-in button
@@ -401,13 +420,7 @@ with gr.Blocks(
         outputs=[prompt_radio],
     )
 
-    # Update Chatbot panel title when game changes
-    game_dropdown.change(
-        update_chatbot_label,
-        inputs=[game_dropdown],
-        outputs=[chatbot],
-        queue=False,
-    )
+
     
     # Auto-load conversation when session becomes available
     session_state.change(
@@ -430,7 +443,8 @@ with gr.Blocks(
             upload_accordion,
             delete_accordion,
             rename_accordion,
-            tech_accordion,
+   rebuild_game_accordion,
+   tech_accordion,
             password_tb,
         ],
     )
@@ -450,19 +464,22 @@ with gr.Blocks(
             upload_accordion,
             delete_accordion,
             rename_accordion,
-            tech_accordion,
+   rebuild_game_accordion,
+   tech_accordion,
             password_tb,
         ],
     )
 
     # Connect rebuild library button
     rebuild_button.click(
-        rebuild_library_handler, inputs=[], outputs=[rebuild_status, game_dropdown]
+        rebuild_library_handler, inputs=[], outputs=[rebuild_status, game_dropdown, delete_game_dropdown, rename_game_dropdown]
     ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
 
     # Connect process new PDFs button
     refresh_button.click(
-        refresh_games_handler, inputs=[], outputs=[rebuild_status, game_dropdown]
+        refresh_games_handler,
+        inputs=[],
+        outputs=[rebuild_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     ).then(lambda: gr.update(visible=True), outputs=[rebuild_status])
 
     # Connect wipe chat history button
@@ -495,6 +512,13 @@ with gr.Blocks(
         inputs=[delete_game_dropdown],
         outputs=[delete_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
     )
+
+    # Connect rebuild selected game button
+    rebuild_selected_button.click(
+        rebuild_selected_game_handler,
+        inputs=[rebuild_game_dropdown],
+        outputs=[rebuild_selected_status, game_dropdown, delete_game_dropdown, rename_game_dropdown],
+    ).then(lambda: gr.update(visible=True), outputs=[rebuild_selected_status])
 
     # Export all conversations as markdown
     def _export_all_conversations(session_id):

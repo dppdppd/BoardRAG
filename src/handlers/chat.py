@@ -301,7 +301,11 @@ def auto_load_on_session_ready(session_id, current_game_selection):
     # We need to get available_games from somewhere - let's import it
     from ..query import get_available_games
     available_games = get_available_games()
-    print(f"[DEBUG] Available games in database: {available_games}")
+    
+    # Only show debug for empty database or first call
+    if not available_games or not hasattr(auto_load_on_session_ready, '_logged_games'):
+        print(f"[DEBUG] Available games in database: {available_games}")
+        auto_load_on_session_ready._logged_games = True
     
     if last_game and last_game in available_games:
         # Restore the last selected game and its conversation
@@ -320,6 +324,9 @@ def auto_load_on_session_ready(session_id, current_game_selection):
         prompt_choices = format_prompt_choices(indexed_prompts)
         return gr.update(), gr.update(value=history), gr.update(choices=prompt_choices, value=None)
     else:
-        print(f"[DEBUG] No valid game to restore, returning empty")
+        # Only log this once per session to avoid spam
+        if not hasattr(auto_load_on_session_ready, '_logged_empty'):
+            print(f"[DEBUG] No valid game to restore, returning empty")
+            auto_load_on_session_ready._logged_empty = True
     
     return gr.update(), gr.update(), gr.update()

@@ -199,9 +199,31 @@ THEME_CSS = """
 /* Gradio 4 puts text into .md; tighten that too */
 .custom-chatbot .md {
     font-size: 14px !important;
-    line-height: 3 !important;
+    line-height: 2 !important;
     padding: 4 !important;
     margin: 2 !important;
+}
+
+/* Headings inside chatbot markdown - make them more subtle */
+.custom-chatbot .md h1,
+.custom-chatbot .md h2,
+.custom-chatbot .md h3,
+.custom-chatbot .md h4,
+.custom-chatbot .md h5,
+.custom-chatbot .md h6 {
+    font-size: 1.4em !important;
+    margin: 4px 0 !important;
+    font-weight: 300 !important;
+    line-height: 4em !important;
+}
+
+/* Bold/strong text tweaks - remove glow */
+.custom-chatbot .md strong,
+.custom-chatbot .md b {
+    font-weight: 400 !important;
+    color: #e0e0e0 !important; /* softer white to reduce perceived glow */
+    text-shadow: none !important;
+    filter: none !important; /* ensure no inherited glow effects */
 }
 
 .custom-chatbot .bubble {

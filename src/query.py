@@ -33,6 +33,8 @@ from langchain.schema.document import Document
 # config imports extended
 from .config import (
     CHROMA_PATH,
+    CITATION_SCORE_THRESHOLD,
+    CITATION_MIN_SOURCES,
     GENERATOR_MODEL,
     LLM_PROVIDER,
     OLLAMA_URL,
@@ -182,6 +184,32 @@ def perform_web_search(query: str, k: int = 5) -> List[Document]:
     return docs
 
 
+def normalize_game_title(title: str) -> str:
+    """
+    Normalize game title by moving leading articles to the end.
+    
+    Args:
+        title (str): Game title like "The Campaign for North Africa"
+        
+    Returns:
+        str: Normalized title like "Campaign for North Africa, The"
+    """
+    # Only strip leading/trailing whitespace for the final result
+    stripped_title = title.strip()
+    
+    # Check for leading "The " (case insensitive)
+    if stripped_title.lower().startswith("the "):
+        # Remove "The " from beginning and add ", The" to end
+        return stripped_title[4:] + ", The"
+    
+    # Check for leading "A " (case insensitive) 
+    if stripped_title.lower().startswith("a "):
+        # Remove "A " from beginning and add ", A" to end
+        return stripped_title[2:] + ", A"
+    
+    return stripped_title
+
+
 def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
     """
     Use LLM API to extract the proper game name from a PDF filename.
@@ -302,10 +330,12 @@ Official game name:"""
 
             # Basic validation
             if game_name and len(game_name) <= 50:
+                # Normalize the title by moving leading articles to the end
+                normalized_name = normalize_game_title(game_name)
                 print(
-                    f"Successfully extracted game name: '{game_name}' from '{filename}'"
+                    f"Successfully extracted game name: '{normalized_name}' from '{filename}'"
                 )
-                return game_name
+                return normalized_name
             else:
                 raise ValueError("Invalid response")
 
@@ -339,13 +369,16 @@ Official game name:"""
     fallback_name = (
         filename.replace(".pdf", "").replace("-", " ").replace("_", " ").title()
     )
+    # Normalize the fallback name as well
+    normalized_fallback = normalize_game_title(fallback_name)
+    
     if debug and last_raw_response is not None:
         print("\n❌ Using fallback – last raw LLM response was:\n")
         print(last_raw_response)
         print()
 
-    print(f"Using fallback name: '{fallback_name}' for '{filename}'")
-    return fallback_name
+    print(f"Using fallback name: '{normalized_fallback}' for '{filename}'")
+    return normalized_fallback
 
 
 def improve_fallback_name(filename: str) -> str:
@@ -378,9 +411,16 @@ def get_available_games() -> List[str]:
                 path=CHROMA_PATH, settings=get_chromadb_settings()
             )
             db = Chroma(client=persistent_client, embedding_function=embedding_function)
-
+        
         # Get all documents to extract filenames
         all_docs = db.get()
+        
+        # Only show debug on first call or when empty
+        if not hasattr(get_available_games, '_last_count') or len(all_docs['ids']) == 0:
+            print(f"[DEBUG] get_available_games: Main collection has {len(all_docs['ids'])} documents")
+            if len(all_docs['ids']) == 0:
+                print(f"[DEBUG] get_available_games: Main collection is EMPTY - this is the problem!")
+            get_available_games._last_count = len(all_docs['ids'])
 
         # Extract unique filenames from source paths
         filenames = set()
@@ -614,35 +654,76 @@ def query_rag(
 
 
     # Get results from database (more if filtering is needed)
-    k_results = (
-        75 if selected_game else 40
-    )  # Increased to maintain context with smaller chunks
-    all_results = db.similarity_search_with_score(search_query, k=k_results)
-
-    # Apply game filter if specified
+    k_results = 200 if selected_game else 40  # balanced pool size for game-specific searches
+            # Try server-side metadata filtering first (if supported)
+    metadata_filter = None
     if selected_game:
-        # selected_game can be a list of filter strings or a single string
-        filters = selected_game if isinstance(selected_game, list) else [selected_game]
+        # Debug: normalize selected_game input
+        def _normalize_game_input(game_input):
+            """Convert game input to normalized string."""
+            import os  # Import needed for basename function
+            if isinstance(game_input, list):
+                # Handle list of filenames - find the game they map to
+                if game_input:
+                    # Look up what game these filenames belong to
+                    stored_map = get_stored_game_names()
+                    for fname, gname in stored_map.items():
+                        # Check if any of the input filenames match this stored file
+                        fname_base = os.path.basename(fname).replace(".pdf", "").lower()
+                        if any(fname_base == item.strip().lower() for item in game_input):
+                            normalized = gname  # Use the mapped game name
+                            break
+                    else:
+                        # Fallback: use first item if no mapping found
+                        normalized = game_input[0].strip()
+                else:
+                    normalized = ""
+            elif isinstance(game_input, str):
+                normalized = game_input.strip()
+            else:
+                normalized = str(game_input).strip()
+            print(f"🎮 Game input normalization: {game_input!r} → {normalized!r}")
+            return normalized.lower()
+        
+        game_key = _normalize_game_input(selected_game)
+        stored_map = get_stored_game_names()
+        
+        # Debug: show what's in the mapping
+        print(f"📚 Current game mappings ({len(stored_map)} entries):")
+        for fname, gname in sorted(stored_map.items()):
+            print(f"  '{fname}' → '{gname}'")
+        
+        import os
+        # Try matching by game name first, then by filename if that fails
+        target_files = {os.path.basename(fname).lower() for fname, gname in stored_map.items() if gname.lower() == game_key}
+        
+        if not target_files:
+            # Fallback: try matching by filename (for UI compatibility)
+            target_files = {os.path.basename(fname).lower() for fname in stored_map.keys() if os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == game_key}
+        
+        print(f"🔍 Looking for game: '{game_key}'")
+        print(f"📂 Found {len(target_files)} matching PDFs: {sorted(target_files)}")
+        
+        if not target_files:
+            available_games = sorted(set(gname.lower() for gname in stored_map.values()))
+            raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
+        metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
+    try:
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
+    except TypeError:
+            # langchain-chroma version without 'filter' kwarg
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
 
-        filtered_results = []
-        for doc, score in all_results:
-            source = doc.metadata.get("source", "").lower()
-            # Normalize source filename the same way we create filter names
-            import os
-            source_filename = os.path.basename(source)
-            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_")
-            
-            if any(f in normalized_source for f in filters):
-                filtered_results.append((doc, score))
-                if len(filtered_results) >= 40:  # Increased to maintain context
-                    break
-
-        results = filtered_results
-        print(
-            f"  Filtered from {len(all_results)} to {len(results)} results for game '{selected_game}'"
-        )
-    else:
-        results = all_results
+    # Server-side filtering already handled game selection
+    results = all_results
     print(f"  Found {len(results)} results")
     if results:
         print(f"  Best match score: {results[0][1]:.4f}")
@@ -737,7 +818,59 @@ def query_rag(
     else:
         response_text = response_raw
 
-    sources = [doc.metadata.get("id", None) for doc, _score in results]
+    # Build structured source metadata for citations (filter by relevance)
+    sources = []
+    qualifying_sources = []
+    all_pdf_sources = []
+    
+    for doc, score in results:
+        meta_doc = doc.metadata
+        src_path = meta_doc.get("source", "")
+        
+        # Handle web results separately (always include regardless of score)
+        if isinstance(src_path, str) and src_path.startswith("http"):
+            sources.append(src_path)
+            continue
+        
+        # Collect PDF source info
+        source_info = {
+            "filepath": src_path,
+            "page": meta_doc.get("page"),
+            "section": meta_doc.get("section"),
+            "score": score
+        }
+        all_pdf_sources.append(source_info)
+        
+        # Check if it meets the quality threshold (lower scores = better similarity)
+        if score <= CITATION_SCORE_THRESHOLD:
+            print(f"  📊 Including source in citation: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f})")
+            qualifying_sources.append(source_info)
+        else:
+            print(f"  📊 Source above threshold: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f} > threshold {CITATION_SCORE_THRESHOLD})")
+    
+    # Add qualifying sources
+    for source_info in qualifying_sources:
+        sources.append({
+            "filepath": source_info["filepath"],
+            "page": source_info["page"],
+            "section": source_info["section"],
+        })
+    
+    # If we don't have enough qualifying sources, add the best remaining ones
+    if len(qualifying_sources) < CITATION_MIN_SOURCES and len(all_pdf_sources) > len(qualifying_sources):
+        print(f"  📊 Only {len(qualifying_sources)} sources met threshold, adding {CITATION_MIN_SOURCES - len(qualifying_sources)} more from best available")
+        # Sort all sources by score (ascending - lower is better) and take the best remaining
+        remaining_sources = [s for s in all_pdf_sources if s not in qualifying_sources]
+        remaining_sources.sort(key=lambda x: x["score"])
+        
+        needed = CITATION_MIN_SOURCES - len(qualifying_sources)
+        for source_info in remaining_sources[:needed]:
+            print(f"  📊 Adding minimum source: {Path(source_info['filepath']).name if source_info['filepath'] else 'unknown'} (score: {source_info['score']:.4f})")
+            sources.append({
+                "filepath": source_info["filepath"],
+                "page": source_info["page"],
+                "section": source_info["section"],
+            })
     response = {
         "response_text": response_text,
         "sources": sources,
@@ -796,9 +929,74 @@ def stream_query_rag(
         print(f"  Filtering by game: '{selected_game}'")
 
     # Fetch DB results (same k logic)
-    k_results = 75 if selected_game else 40
+    k_results = 200 if selected_game else 40  # balanced pool size for game-specific searches
     print(f"🔎 Fetching {k_results} results from database...")
-    all_results = db.similarity_search_with_score(search_query, k=k_results)
+            # Try server-side metadata filtering first (if supported)
+    metadata_filter = None
+    if selected_game:
+        # Debug: normalize selected_game input
+        def _normalize_game_input(game_input):
+            """Convert game input to normalized string."""
+            import os  # Import needed for basename function
+            if isinstance(game_input, list):
+                # Handle list of filenames - find the game they map to
+                if game_input:
+                    # Look up what game these filenames belong to
+                    stored_map = get_stored_game_names()
+                    for fname, gname in stored_map.items():
+                        # Check if any of the input filenames match this stored file
+                        fname_base = os.path.basename(fname).replace(".pdf", "").lower()
+                        if any(fname_base == item.strip().lower() for item in game_input):
+                            normalized = gname  # Use the mapped game name
+                            break
+                    else:
+                        # Fallback: use first item if no mapping found
+                        normalized = game_input[0].strip()
+                else:
+                    normalized = ""
+            elif isinstance(game_input, str):
+                normalized = game_input.strip()
+            else:
+                normalized = str(game_input).strip()
+            print(f"🎮 Game input normalization: {game_input!r} → {normalized!r}")
+            return normalized.lower()
+        
+        game_key = _normalize_game_input(selected_game)
+        stored_map = get_stored_game_names()
+        
+        # Debug: show what's in the mapping
+        print(f"📚 Current game mappings ({len(stored_map)} entries):")
+        for fname, gname in sorted(stored_map.items()):
+            print(f"  '{fname}' → '{gname}'")
+        
+        import os
+        # Try matching by game name first, then by filename if that fails
+        target_files = {os.path.basename(fname).lower() for fname, gname in stored_map.items() if gname.lower() == game_key}
+        
+        if not target_files:
+            # Fallback: try matching by filename (for UI compatibility)
+            target_files = {os.path.basename(fname).lower() for fname in stored_map.keys() if os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == game_key}
+        
+        print(f"🔍 Looking for game: '{game_key}'")
+        print(f"📂 Found {len(target_files)} matching PDFs: {sorted(target_files)}")
+        
+        if not target_files:
+            available_games = sorted(set(gname.lower() for gname in stored_map.values()))
+            raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
+        metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
+    try:
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
+    except TypeError:
+            # langchain-chroma version without 'filter' kwarg
+            all_results = (
+                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+                if metadata_filter
+                else db.similarity_search_with_score(search_query, k=k_results)
+            )
     print(f"📊 Database returned {len(all_results)} total results")
 
     if len(all_results) == 0:
@@ -808,40 +1006,9 @@ def stream_query_rag(
         print("  - Embedding function is working")
         print("  - Query is not too specific")
 
-    # Apply optional game filter
-    if selected_game:
-        filters = [selected_game] if isinstance(selected_game, str) else selected_game
-        print(f"🎯 Applying game filter: {filters}")
-        filtered_results = []
-        for i, (doc, score) in enumerate(all_results):
-            source = doc.metadata.get("source", "").lower()
-            # Normalize source filename the same way we create filter names
-            # Extract just the filename from the path and normalize it
-            import os
-            source_filename = os.path.basename(source)
-            normalized_source = source_filename.replace(".pdf", "").replace(" ", "_")
-            
-            print(f"  Result {i+1}: source='{source}', normalized='{normalized_source}', score={score:.4f}")
-            if any(f in normalized_source for f in filters):
-                filtered_results.append((doc, score))
-                print(f"    ✅ PASSED filter ('{normalized_source}' contains: {[f for f in filters if f in normalized_source]})")
-                if len(filtered_results) >= 40:
-                    print(f"    🛑 Reached limit of 40 filtered results")
-                    break
-            else:
-                print(f"    ❌ FAILED filter ('{normalized_source}' doesn't contain any of: {filters})")
-        results = filtered_results
-        print(f"📊 After filtering: {len(results)} results remain")
-        
-        if len(results) == 0:
-            print("❌ ERROR: No results after game filtering! This will cause 'I don't know' response")
-            print("  Check if:")
-            print("  - Game filter matches actual source filenames")
-            print("  - Documents were ingested with correct source metadata")
-            print("  - Filter is not too restrictive")
-    else:
-        results = all_results
-        print(f"📊 Using all {len(results)} results (no game filter)")
+    # Server-side filtering already handled game selection perfectly
+    results = all_results
+    print(f"📊 Using {len(results)} results from server-side filter")
 
     # Show final results summary
     print(f"\n📋 FINAL RESULTS SUMMARY:")
@@ -943,7 +1110,60 @@ def stream_query_rag(
             print(f"❌ ERROR during token generation: {e}")
             raise
 
-    sources = [doc.metadata.get("id", None) for doc, _ in results]
+    # Build structured source metadata for citations (filter by relevance)
+    sources = []
+    qualifying_sources = []
+    all_pdf_sources = []
+    
+    for doc, score in results:
+        meta_doc = doc.metadata
+        src_path = meta_doc.get("source", "")
+        
+        # Handle web results separately (always include regardless of score)
+        if isinstance(src_path, str) and src_path.startswith("http"):
+            sources.append(src_path)
+            continue
+        
+        # Collect PDF source info
+        source_info = {
+            "filepath": src_path,
+            "page": meta_doc.get("page"),
+            "section": meta_doc.get("section"),
+            "score": score
+        }
+        all_pdf_sources.append(source_info)
+        
+        # Check if it meets the quality threshold (lower scores = better similarity)
+        if score <= CITATION_SCORE_THRESHOLD:
+            print(f"  📊 Including source in citation: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f})")
+            qualifying_sources.append(source_info)
+        else:
+            print(f"  📊 Source above threshold: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f} > threshold {CITATION_SCORE_THRESHOLD})")
+    
+    # Add qualifying sources
+    for source_info in qualifying_sources:
+        sources.append({
+            "filepath": source_info["filepath"],
+            "page": source_info["page"],
+            "section": source_info["section"],
+        })
+    
+    # If we don't have enough qualifying sources, add the best remaining ones
+    if len(qualifying_sources) < CITATION_MIN_SOURCES and len(all_pdf_sources) > len(qualifying_sources):
+        print(f"  📊 Only {len(qualifying_sources)} sources met threshold, adding {CITATION_MIN_SOURCES - len(qualifying_sources)} more from best available")
+        # Sort all sources by score (ascending - lower is better) and take the best remaining
+        remaining_sources = [s for s in all_pdf_sources if s not in qualifying_sources]
+        remaining_sources.sort(key=lambda x: x["score"])
+        
+        needed = CITATION_MIN_SOURCES - len(qualifying_sources)
+        for source_info in remaining_sources[:needed]:
+            print(f"  📊 Adding minimum source: {Path(source_info['filepath']).name if source_info['filepath'] else 'unknown'} (score: {source_info['score']:.4f})")
+            sources.append({
+                "filepath": source_info["filepath"],
+                "page": source_info["page"],
+                "section": source_info["section"],
+            })
+    
     print(f"📚 Final sources: {sources}")
 
     meta = {
@@ -994,8 +1214,13 @@ def main():
     response = query_rag(query_text, selected_game, game_names=args.game_names)
 
     # Extract game name from first source
-    if response["sources"] and response["sources"][0]:
-        game_name = os.path.basename(response["sources"][0]).split()[0].capitalize()
+    if response["sources"]:
+        first_src = response["sources"][0]
+        if isinstance(first_src, dict):
+            src_path = first_src.get("filepath", "")
+        else:
+            src_path = first_src
+        game_name = os.path.basename(src_path).split()[0].capitalize() if src_path else "Game"
     else:
         game_name = "Game"
 

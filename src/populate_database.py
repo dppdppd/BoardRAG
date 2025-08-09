@@ -78,16 +78,40 @@ def load_documents(target_paths: List[str] | None = None):
 
     # Default: load everything (original behaviour)
     if not target_paths:
-        return PyPDFDirectoryLoader(DATA_PATH).load()
+        # Scan for PDF files first to show progress
+        import os
+        from pathlib import Path
+        
+        pdf_files = list(Path(DATA_PATH).rglob("*.pdf"))
+        print(f"📁 Found {len(pdf_files)} PDF files to process...")
+        
+        documents: List[Document] = []
+        for i, pdf_file in enumerate(pdf_files, 1):
+            print(f"📖 Loading PDF {i}/{len(pdf_files)}: {pdf_file.name}")
+            try:
+                loader = PyPDFLoader(str(pdf_file))
+                docs = loader.load()
+                print(f"   ✅ Loaded {len(docs)} pages from {pdf_file.name}")
+                documents.extend(docs)
+            except Exception as e:
+                print(f"   ❌ Failed to load {pdf_file.name}: {e}")
+        
+        print(f"📚 Total documents loaded: {len(documents)} pages from {len(pdf_files)} PDFs")
+        return documents
 
     documents: List[Document] = []
 
     for path in target_paths:
-        # Resolve path – support both relative (to DATA_PATH) and absolute
-        # inputs so callers have flexibility.
-        full_path = (
-            os.path.join(DATA_PATH, path) if not os.path.isabs(path) else path
-        )
+        
+        # Normalise path for safe comparisons on any OS
+        norm_path = os.path.normpath(path)
+
+        # If the caller already passed a full path (absolute **or** already under DATA_PATH)
+        # we leave it untouched. Otherwise we treat it as relative to DATA_PATH.
+        if os.path.isabs(norm_path) or norm_path.startswith(os.path.normpath(DATA_PATH)):
+            full_path = norm_path
+        else:
+            full_path = os.path.join(DATA_PATH, norm_path)
 
         if os.path.isdir(full_path):
             documents.extend(PyPDFDirectoryLoader(full_path).load())
@@ -113,12 +137,18 @@ def split_documents(documents: List[Document]):
     retrieval quality compared with naive fixed-width splitting.
     """
 
-    HEADER_RE = re.compile(r"^\s*(?:\d+\.)?\s*[A-Z][A-Z0-9 &'\-/]{2,}\s*$")
+    HEADER_RE = re.compile(r"^\s*(?:[A-Z0-9]+(?:\.[A-Z0-9]+)*\.?)?\s*[A-Z][A-Z0-9 &'\-/]{2,}(?::\s*.*)?$")
 
-    def _split_on_headers(page_doc: Document) -> List[Document]:
-        """Split a single PDF page into sections based on detected headers."""
+    # Track section state across pages to handle continuations
+    last_section_on_previous_page = "intro"
+    
+    def _split_on_headers(page_doc: Document, inherited_section: str) -> tuple[List[Document], str]:
+        """Split a single PDF page into sections based on detected headers.
+        
+        Returns: (chunks, last_section_on_this_page)
+        """
         lines = page_doc.page_content.splitlines()
-        current_header = "intro"
+        current_header = inherited_section  # Start with inherited section, not always "intro"
         buffer: list[str] = []
         out: List[Document] = []
 
@@ -135,19 +165,37 @@ def split_documents(documents: List[Document]):
             if HEADER_RE.match(line):
                 _flush(buffer, current_header)
                 buffer = []
-                current_header = line.strip()
+                # Extract just the section title (before any colon)
+                header_text = line.strip()
+                if ':' in header_text:
+                    current_header = header_text.split(':', 1)[0].strip()
+                else:
+                    current_header = header_text
             else:
                 buffer.append(line)
         _flush(buffer, current_header)
 
         # If no headers were found, return the original page so that downstream
-        # logic still sees it.
-        return out or [page_doc]
+        # logic still sees it, but preserve the section state
+        final_chunks = out or [page_doc]
+        if not out and page_doc:
+            # Update the original page's section metadata to inherited section
+            page_doc.metadata["section"] = inherited_section
+        
+        return final_chunks, current_header
 
-    # 1️⃣ First pass – header splitting
+    print(f"🔍 Phase 1: Section-aware splitting of {len(documents)} pages...")
+    
+    # 1️⃣ First pass – header splitting with cross-page section tracking
     section_docs: List[Document] = []
-    for page in documents:
-        section_docs.extend(_split_on_headers(page))
+    for i, page in enumerate(documents):
+        if (i + 1) % 50 == 0 or i == len(documents) - 1:  # Progress every 50 pages
+            print(f"   📄 Processed {i + 1}/{len(documents)} pages...")
+        page_chunks, last_section_on_previous_page = _split_on_headers(page, last_section_on_previous_page)
+        section_docs.extend(page_chunks)
+
+    print(f"✅ Phase 1 complete: {len(documents)} pages → {len(section_docs)} sections")
+    print(f"🔍 Phase 2: Character-level splitting for oversized sections...")
 
     # 2️⃣ Second pass – character splitting only when needed
     char_splitter = RecursiveCharacterTextSplitter(
@@ -159,11 +207,19 @@ def split_documents(documents: List[Document]):
     )
 
     final_chunks: List[Document] = []
-    for sec in section_docs:
+    oversized_count = 0
+    for i, sec in enumerate(section_docs):
+        if (i + 1) % 100 == 0:  # Progress every 100 sections
+            print(f"   📝 Processed {i + 1}/{len(section_docs)} sections...")
+        
         if len(sec.page_content) <= CHUNK_SIZE:
             final_chunks.append(sec)
         else:
+            oversized_count += 1
             final_chunks.extend(char_splitter.split_documents([sec]))
+
+    print(f"✅ Phase 2 complete: {len(section_docs)} sections → {len(final_chunks)} final chunks")
+    print(f"📊 Split {oversized_count} oversized sections into smaller chunks")
 
     return final_chunks
 
@@ -237,8 +293,12 @@ def add_to_chroma(chunks: List[Document]) -> bool:
             import traceback
 
             traceback.print_exc()
+            return False
     else:
         print("✅ No new documents to add")
+
+    print("Data added successfully.")
+    return True
 
 
 def calc_chunk_ids(chunks: List[Document]) -> List[Document]:
@@ -274,14 +334,22 @@ def calc_chunk_ids(chunks: List[Document]) -> List[Document]:
         # Add it to the page meta-data.
         chunk.metadata["id"] = chunk_id
 
+        # Derive a simple game identifier from the PDF filename (e.g. "dixit")
+        if source and isinstance(source, str):
+            import os
+            pdf_name = os.path.basename(source)
+            # Store helper metadata fields
+            chunk.metadata["pdf_filename"] = pdf_name.lower()  # for fast server-side filtering
+
     return chunks
 
 
 def clear_database():
     """
     Clears the Chroma vector database.
+    Note: This function is for standalone use only. 
+    UI should use ChromaDB reset() method to avoid file locks.
     """
-
     if os.path.exists(CHROMA_PATH):
         shutil.rmtree(CHROMA_PATH)
 
@@ -291,6 +359,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--reset", action="store_true", help="Reset the database.")
+    parser.add_argument(
+        "--skip-name-extraction",
+        action="store_true",
+        help="Skip extracting and storing game names for PDFs.",
+    )
 
     # Optional positional paths (files or directories) to process. If omitted,
     # the entire DATA_PATH will be processed (original behaviour).
@@ -312,6 +385,27 @@ def main() -> None:
     documents = load_documents(args.paths)
     chunks = split_documents(documents)
     add_to_chroma(chunks)
+
+    # ---------------------------------------------
+    # Optional: Extract & store official game names
+    # ---------------------------------------------
+    if not args.skip_name_extraction:
+        try:
+            from src.query import extract_and_store_game_name  # local import to avoid circular deps
+        except ImportError:
+            from query import extract_and_store_game_name  # fallback when running as module
+
+        import os
+        filenames = {
+            os.path.basename(doc.metadata.get("source", ""))
+            for doc in documents
+        }
+        print(f"🔤 Extracting game names for {len(filenames)} PDFs …")
+        for fname in filenames:
+            if fname:
+                extract_and_store_game_name(fname)
+    else:
+        print("⚠️  Skipped game-name extraction as requested")
 
 
 if __name__ == "__main__":
