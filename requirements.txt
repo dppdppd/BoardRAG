@@ -16,4 +16,5 @@ python-dotenv==1.0.1
 ruff==0.6.4
 watchdog==3.0.0
 fastapi>=0.115.2,<1.0
-uvicorn==0.30.6python-multipart 
+uvicorn==0.30.6
+python-multipart
