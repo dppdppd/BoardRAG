@@ -99,7 +99,6 @@ export default function AdminPage() {
           if (parsed.type === "log") {
             setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
           } else if (parsed.type === "done") {
-            setMessage(parsed.message || "Done.");
             setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
             es.close();
             setBusy(null);
@@ -126,7 +125,6 @@ export default function AdminPage() {
           if (parsed.type === "log") {
             setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
           } else if (parsed.type === "done") {
-            setMessage(parsed.message || "Done.");
             setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
             es.close();
             setBusy(null);
