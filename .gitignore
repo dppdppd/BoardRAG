@@ -202,4 +202,8 @@ cython_debug/
 *.code-workspace
 .ruff_cache/
 .cursor
-temp_tests/
+temp_tests/web/.next/
+web/node_modules/
+data/
+chroma/
+.venv/
