@@ -356,7 +356,9 @@ export default function HomePage() {
     };
     anchorToQuestion();
 
-    const url = new URL(`${API_BASE}/stream`);
+    // Prefer NDJSON endpoint in production; SSE works locally
+    const NDJSON = (process.env.NEXT_PUBLIC_USE_NDJSON === '1') || (typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app'));
+    const url = new URL(`${API_BASE}/${NDJSON ? 'stream-ndjson' : 'stream'}`);
     url.searchParams.set("q", question);
     url.searchParams.set("game", selectedGame);
     url.searchParams.set("include_web", String(includeWeb));
@@ -403,7 +405,8 @@ export default function HomePage() {
     // Streaming via fetch+ReadableStream (NDJSON/SSE parser)
     const streamWithFetch = async () => {
       try {
-        const resp = await fetch(url.toString(), { headers: { Accept: "text/event-stream" }, cache: "no-store" });
+        const headers: any = NDJSON ? { Accept: 'application/x-ndjson' } : { Accept: 'text/event-stream' };
+        const resp = await fetch(url.toString(), { headers, cache: "no-store" });
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("no reader");
         const decoder = new TextDecoder();
@@ -412,12 +415,21 @@ export default function HomePage() {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          let idx;
-          while ((idx = buffer.indexOf("\n\n")) !== -1) {
-            const raw = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
-            const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
-            if (!dataLine) continue;
-            handleSseData(dataLine.slice(5).trim());
+          if (NDJSON) {
+            let idx;
+            while ((idx = buffer.indexOf("\n")) !== -1) {
+              const line = buffer.slice(0, idx).trim();
+              buffer = buffer.slice(idx + 1);
+              if (line) handleSseData(line);
+            }
+          } else {
+            let idx;
+            while ((idx = buffer.indexOf("\n\n")) !== -1) {
+              const raw = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+              const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
+              if (!dataLine) continue;
+              handleSseData(dataLine.slice(5).trim());
+            }
           }
         }
       } catch {

@@ -540,6 +540,58 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
 
 
 # ----------------------------------------------------------------------------
+# NDJSON chat stream (CDN-friendly)
+# ----------------------------------------------------------------------------
+
+@app.get("/stream-ndjson")
+async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None, sid: Optional[str] = None):
+    game_filter = [game] if game else None
+    game_names_list = game_names.split(",") if game_names else ([game] if game else None)
+
+    token_gen, meta = stream_query_rag(
+        query_text=q,
+        selected_game=game_filter,
+        chat_history=history,
+        game_names=game_names_list,
+        enable_web=include_web,
+    )
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        # Padding to defeat buffering
+        yield (" " * 8192 + "\n").encode("utf-8")
+        last_ping = time.time()
+        try:
+            for chunk in token_gen:
+                now = time.time()
+                if now - last_ping > 1:
+                    yield (json.dumps({"type": "ping"}) + "\n").encode("utf-8")
+                    last_ping = now
+                # Split into smaller slices to improve flush
+                text = str(chunk)
+                slice_size = 80
+                for i in range(0, len(text), slice_size):
+                    part = text[i:i+slice_size]
+                    if part:
+                        yield (json.dumps({"type": "token", "data": part}) + "\n").encode("utf-8")
+            yield (json.dumps({"type": "done", "meta": meta}) + "\n").encode("utf-8")
+        except Exception as e:
+            try:
+                await _admin_log_publish(f"❌ Query error (ndjson): {str(e)}")
+            except Exception:
+                pass
+            yield (json.dumps({"type": "error", "error": str(e)}) + "\n").encode("utf-8")
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform, private",
+        "Pragma": "no-cache",
+        "Connection": "keep-alive",
+        "Keep-Alive": "timeout=60",
+        "X-Accel-Buffering": "no",
+        "Content-Encoding": "identity",
+    }
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson", headers=headers)
+
+# ----------------------------------------------------------------------------
 # Admin: list/unblock blocked sessions
 # ----------------------------------------------------------------------------
 
