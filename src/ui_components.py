@@ -23,25 +23,17 @@ def query_interface(message, selected_games, include_web, chat_history, selected
         yield "", chat_history, gr.update(visible=False), gr.update(interactive=True)
         return
 
-    # Update provider based on dropdown --------------------------------
+    # Update provider based on dropdown (real model names) ---------------
     if selected_model:
         from . import config
-        # Map pretty names to full model identifiers
-        MODEL_NAME_MAP = {
-            "[Anthropic] Claude Sonnet 4": "claude-sonnet-4-20250514",
-            "[OpenAI] o3": "o3",
-            "[OpenAI] gpt-5 mini": "gpt-5-mini",
-        }
-        internal_model = MODEL_NAME_MAP.get(selected_model, selected_model)
-
-        model_lower = internal_model.lower()
+        model_lower = selected_model.lower()
         if "claude" in model_lower:
             config.LLM_PROVIDER = "anthropic"
         elif "gpt" in model_lower or "o3" in model_lower:
             config.LLM_PROVIDER = "openai"
         else:
             config.LLM_PROVIDER = "openai"
-        config.GENERATOR_MODEL = internal_model
+        config.GENERATOR_MODEL = selected_model
 
     # Normalise to list --------------------------------------------------
     if isinstance(selected_games, str):

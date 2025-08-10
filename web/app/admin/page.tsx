@@ -40,14 +40,8 @@ export default function AdminPage() {
         const resp = await fetch(`${API_BASE}/admin/model`);
         if (resp.ok) {
           const data = await resp.json();
-          const pretty = (() => {
-            const gen = String(data?.generator || "");
-            if (gen.includes("claude")) return "[Anthropic] Claude Sonnet 4";
-            if (gen === "o3") return "[OpenAI] o3";
-            if (gen === "gpt-5-mini") return "[OpenAI] gpt-5 mini";
-            return gen;
-          })();
-          setModelLabel(pretty);
+          const gen = String(data?.generator || "");
+          setModelLabel(gen);
         }
       } catch {}
     })();
@@ -86,7 +80,6 @@ export default function AdminPage() {
 
   // Connect a global Admin log stream so uploads and other events spew here too
   useEffect(() => {
-    if (role !== "admin") return;
     let es: EventSource | null = null;
     try {
       es = new EventSource(`${API_BASE}/admin/log-stream`);
@@ -99,11 +92,25 @@ export default function AdminPage() {
         } catch {}
       };
       es.onerror = () => {
+        appendConsole("❌ Admin log stream error (disconnected)");
         try { es?.close(); } catch {}
       };
     } catch {}
     return () => { try { es?.close(); } catch {} };
-  }, [role]);
+  }, []);
+
+  // Helper to inject breadcrumbs into admin console even if server log stream connection is momentarily lagging
+  const logClient = async (line: string) => {
+    try {
+      // Local echo for instant feedback
+      setConsoleText((cur) => (cur ? cur + "\n" + line : line));
+      await fetch(`${API_BASE}/admin/log`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ line }),
+      });
+    } catch {}
+  };
 
   const unlock = async () => {
     setMessage("");
@@ -138,6 +145,7 @@ export default function AdminPage() {
     setBusy("rebuild");
     setConsoleText("");
     appendConsole("🔄 Rebuild requested…");
+    logClient("[client] 🔄 Rebuild requested…");
     try {
       const es = new EventSource(`${API_BASE}/admin/rebuild-stream`);
       es.onmessage = (ev) => {
@@ -164,6 +172,7 @@ export default function AdminPage() {
     setBusy("refresh");
     setConsoleText("");
     appendConsole("🔄 Refresh requested…");
+    logClient("[client] 🔄 Refresh requested…");
     try {
       const es = new EventSource(`${API_BASE}/admin/refresh-stream`);
       es.onmessage = (ev) => {
@@ -320,9 +329,10 @@ export default function AdminPage() {
             onChange={(e) => setModelLabel(e.target.value)}
             style={{ fontSize: 13, padding: 6 }}
           >
-            <option>[Anthropic] Claude Sonnet 4</option>
-            <option>[OpenAI] o3</option>
-            <option>[OpenAI] gpt-5 mini</option>
+            <option value="claude-3-5-haiku-latest">claude-3-5-haiku-latest</option>
+            <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
+            <option value="o3">o3</option>
+            <option value="gpt-5-mini">gpt-5-mini</option>
           </select>
         </label>
         <div style={{ marginTop: 6 }}>
@@ -359,7 +369,12 @@ export default function AdminPage() {
 
       {/* Shared console output pinned at bottom with fixed height */}
       <div className="admin-tool alt" style={{ gridColumn: "1 / -1" }}>
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Console</h3>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Console</h3>
+          <div>
+            <button onClick={() => setConsoleText("")} style={{ padding: "6px 10px" }}>🧹 Clear</button>
+          </div>
+        </div>
         <div className="surface" style={{ padding: 6 }}>
           <pre
             ref={consoleRef}

@@ -91,15 +91,15 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   /* Show inline menu toggle within input row on mobile; keep it a square */
   .menu-toggle {
     display: inline-grid;
-    height: auto;
-    min-height: 44px;
-    width: auto;
-    /* Match the input row control height exactly */
+    /* Match the input control height and ensure a square, larger tap target */
+    width: var(--control-min-height, 44px);
+    min-width: var(--control-min-height, 44px);
+    height: var(--control-min-height, 44px);
     min-height: var(--control-min-height, 44px);
-    /* Ensure square by using computed height via line-height trick */
-    line-height: 0;
     place-items: center;
     padding: 0;
+    line-height: 1;
+    font-size: 22px; /* bigger kebab glyph for visibility */
   }
 }
 
@@ -163,7 +163,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .bubble {
   margin: 3px 0;
   max-width: 92%;
-  padding: 20px;
+  /* tighter inner padding to reduce perceived whitespace */
+  padding: 12px 14px;
   border-radius: var(--radius);
   line-height: 1.4;
   white-space: pre-wrap;
@@ -178,6 +179,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .input-row .btn { min-height: 44px; height: 100%; }
   /* Make Ask button define the row height; menu toggle inherits via grid auto-stretch */
   .input-row .btn.primary { height: 100%; min-height: var(--control-min-height, 44px); }
+  /* Ensure Stop button exactly matches Ask in size and typography */
+  .input-row .btn.stop { height: 100%; min-height: var(--control-min-height, 44px); font-size: 18px; }
 .input-row .btn.stop, .input-row .btn.primary { padding-top: 0; padding-bottom: 0; }
 .bookmark { display: block; width: 100%; text-align: left; padding: 10px 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: var(--radius); background: color-mix(in oklab, var(--accent) 16%, var(--surface)); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bookmark + .bookmark { margin-top: 6px; }
@@ -185,7 +188,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 
 /* Tighter markdown headings inside chat bubbles */
 .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
-  margin: 3px 0 2px; /* more space above, less below */
+  /* further reduce vertical margins */
+  margin: 2px 0 1px;
   line-height: 1.18;
   padding-top: 4px;
   padding-bottom: 0px;
@@ -200,6 +204,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .bubble h2 { font-size: 0.92rem; }
 .bubble h3 { font-size: 0.90rem; }
 .bubble p { margin: 2px 0; }
+/* Remove stray blank paragraphs that can appear in LLM output */
+.bubble p:empty { display: none; }
 .bubble ul, .bubble ol { margin: 0; padding-left: 10px; }
 .bubble li { margin: 0; line-height: 1; }
 .bubble li + li { margin-top: 0; }

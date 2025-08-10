@@ -25,6 +25,8 @@ export default function HomePage() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const historyStripRef = useRef<HTMLDivElement>(null);
   const eventRef = useRef<EventSource | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const switchTimerRef = useRef<number | null>(null);
   const historyDragRef = useRef<{ isDown: boolean; startX: number; scrollLeft: number; dragged: boolean }>({ isDown: false, startX: 0, scrollLeft: 0, dragged: false });
   const historyDraggingFlag = useRef<boolean>(false);
   const loadedKeyRef = useRef<string | null>(null);
@@ -389,6 +391,8 @@ export default function HomePage() {
           eventRef.current = null;
           setIsStreaming(false);
           removeRetryable(lastSubmittedUserIndexRef.current);
+          // Client-side breadcrumb to Admin console
+          try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `🤖 A: ${acc}` }) }); } catch {}
         } else if (parsed.type === "error") {
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
           eventRef.current = null;
@@ -406,7 +410,10 @@ export default function HomePage() {
     const streamWithFetch = async () => {
       try {
         const headers: any = NDJSON ? { Accept: 'application/x-ndjson' } : { Accept: 'text/event-stream' };
-        const resp = await fetch(url.toString(), { headers, cache: "no-store" });
+        // Create/replace an AbortController so Stop can cancel the fetch
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const resp = await fetch(url.toString(), { headers, cache: "no-store", signal: controller.signal });
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("no reader");
         const decoder = new TextDecoder();
@@ -434,6 +441,9 @@ export default function HomePage() {
         }
       } catch {
         setIsStreaming(false); addRetryable(lastSubmittedUserIndexRef.current);
+      } finally {
+        // Clear abort ref after completion/abort
+        abortRef.current = null;
       }
     };
 
@@ -450,6 +460,7 @@ export default function HomePage() {
     const switchTimer = window.setTimeout(() => {
       streamWithFetch();
     }, 1500);
+    switchTimerRef.current = switchTimer as unknown as number;
 
     es.onmessage = (ev) => {
       clearTimeout(switchTimer);
@@ -460,6 +471,7 @@ export default function HomePage() {
       try { es.close(); } catch {}
       eventRef.current = null;
       // Try fetch-based streaming immediately on error
+      try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `[client] SSE error; falling back to fetch` }) }); } catch {}
       streamWithFetch();
     };
   };
@@ -474,8 +486,14 @@ export default function HomePage() {
   };
 
   const onStop = () => {
+    // Close EventSource if active
     try { eventRef.current?.close(); } catch {}
     eventRef.current = null;
+    // Abort fetch streaming if active
+    try { abortRef.current?.abort(); } catch {}
+    abortRef.current = null;
+    // Clear any pending fallback timer
+    if (switchTimerRef.current != null) { try { clearTimeout(switchTimerRef.current); } catch {} switchTimerRef.current = null; }
     setIsStreaming(false);
     addRetryable(lastSubmittedUserIndexRef.current);
   };
@@ -655,7 +673,7 @@ export default function HomePage() {
 
             <div className="actions" style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
               {isStreaming ? (
-                <button className="btn stop" onClick={onStop} style={{ height: 44, minHeight: 44, paddingTop: 0, paddingBottom: 0 }}>Stop</button>
+                <button className="btn stop" onClick={onStop}>Stop</button>
               ) : (
                 <button className="btn primary" onClick={onSubmit} disabled={!selectedGame} style={{ fontSize: 18 }}>
                   Ask

@@ -190,6 +190,7 @@ CHUNKING_CONFIGS = {
         "chunk_overlap": 200,
     },  # Reduced for better citations
     "claude-3-5-haiku-20241022": {"chunk_size": 2400, "chunk_overlap": 300},
+    "claude-3-5-haiku-latest": {"chunk_size": 2400, "chunk_overlap": 300},
     "gpt-4o": {"chunk_size": 2400, "chunk_overlap": 300},
     "gpt-4-turbo": {"chunk_size": 2400, "chunk_overlap": 300},
     "gpt-3.5-turbo": {"chunk_size": 800, "chunk_overlap": 80},

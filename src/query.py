@@ -603,16 +603,16 @@ def rewrite_search_query(raw_query: str) -> str:
         print("✏️  Rewriting web search query via LLM …")
 
         # Choose provider following same logic as answer generation but simpler
-        if LLM_PROVIDER.lower() == "anthropic":
-            model = ChatAnthropic(model=SEARCH_REWRITE_MODEL, temperature=0)
-        elif LLM_PROVIDER.lower() == "ollama":
+        if cfg.LLM_PROVIDER.lower() == "anthropic":
+            model = ChatAnthropic(model=cfg.SEARCH_REWRITE_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS)
+        elif cfg.LLM_PROVIDER.lower() == "ollama":
             from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
 
-            model = Ollama(model=SEARCH_REWRITE_MODEL, base_url=OLLAMA_URL)
+            model = Ollama(model=cfg.SEARCH_REWRITE_MODEL, base_url=cfg.OLLAMA_URL)
         else:  # openai
             # o3 only supports temperature=1
-            temp = 1 if SEARCH_REWRITE_MODEL == "o3" else 0
-            model = ChatOpenAI(model=SEARCH_REWRITE_MODEL, temperature=temp, timeout=REQUEST_TIMEOUT_S)
+            temp = 1 if cfg.SEARCH_REWRITE_MODEL == "o3" else 0
+            model = ChatOpenAI(model=cfg.SEARCH_REWRITE_MODEL, temperature=temp, timeout=REQUEST_TIMEOUT_S)
 
         prompt = (
             "You are a search expert. Rewrite the following user question into a concise, "
@@ -849,7 +849,7 @@ def query_rag(
             model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
     else:
         raise ValueError(
-            f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
+            f"Unsupported LLM_PROVIDER: {cfg.LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
         )
 
     response_raw = model.invoke(prompt)
@@ -1048,8 +1048,9 @@ def stream_query_rag(
         print("  - Query is not too specific")
 
     # Server-side filtering already handled game selection perfectly
-    results = all_results
-    print(f"📊 Using {len(results)} results from server-side filter")
+    # Use only the top-N results and cap total context size to control token usage
+    results = all_results[: RAG_MAX_DOCS]
+    print(f"📊 Using top {len(results)} results (capped by RAG_MAX_DOCS={RAG_MAX_DOCS})")
 
     # Show final results summary
     print(f"\n📋 FINAL RESULTS SUMMARY:")
@@ -1082,8 +1083,21 @@ def stream_query_rag(
 
     # Build prompt
     print("🔮 Building the prompt …")
-    context_text = "\n\n---\n\n".join([doc.page_content for doc, _ in results])
-    print(f"📏 Context length: {len(context_text)} characters")
+    # Build context with a hard character cap (same logic as non-streaming path)
+    parts = []
+    used = 0
+    for doc, _score in results:
+        t = doc.page_content
+        if not t:
+            continue
+        if used + len(t) + 8 > RAG_CONTEXT_CHAR_LIMIT:
+            t = t[: max(0, RAG_CONTEXT_CHAR_LIMIT - used)]
+        parts.append(t)
+        used += len(t) + 8
+        if used >= RAG_CONTEXT_CHAR_LIMIT:
+            break
+    context_text = "\n\n---\n\n".join(parts)
+    print(f"📏 Context length (capped): {len(context_text)} characters (limit={RAG_CONTEXT_CHAR_LIMIT})")
     if len(context_text) == 0:
         print("❌ ERROR: Empty context! This will cause 'I don't know' response")
     else:
@@ -1126,7 +1140,13 @@ def stream_query_rag(
         model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL, **model_kwargs)
     elif cfg.LLM_PROVIDER.lower() == "anthropic":
         print("🤖 Creating Anthropic model...")
-        model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0, **model_kwargs)
+        # Anthropic requires max_tokens for reliable streaming output
+        model = ChatAnthropic(
+            model=cfg.GENERATOR_MODEL,
+            temperature=0,
+            max_tokens=LLM_MAX_TOKENS,
+            **model_kwargs,
+        )
     elif cfg.LLM_PROVIDER.lower() == "openai":
         if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
             print("🤖 Creating OpenAI model with temperature: 1 (required by reasoning models)")
@@ -1135,24 +1155,48 @@ def stream_query_rag(
             print("🤖 Creating OpenAI model with temperature: 0")
             model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
     else:
-        raise ValueError("Unsupported LLM_PROVIDER: " + LLM_PROVIDER)
+        raise ValueError("Unsupported LLM_PROVIDER: " + cfg.LLM_PROVIDER)
 
     # ---- Token generator ----
 
     def _token_gen():
-        try:
-            for chunk in model.stream(prompt):
-                # chunk can be ChatGenerationChunk or similar; extract text portion
-                text_part = getattr(chunk, "content", None)
-                if text_part is None and hasattr(chunk, "message"):
-                    text_part = getattr(chunk.message, "content", "")
-                if text_part is None:
-                    text_part = str(chunk)
-                if text_part:
-                    yield text_part
-        except Exception as e:
-            print(f"❌ ERROR during token generation: {e}")
-            raise
+        import random, time as _time
+
+        def _is_rate_limited(err: Exception) -> bool:
+            s = str(err).lower()
+            return ("429" in s) or ("rate_limit" in s) or ("rate limit" in s) or ("overload" in s)
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            # On retries, shrink prompt to reduce input tokens pressure
+            attempt_prompt = prompt
+            if attempt > 0:
+                shrink_factor = 0.8 ** attempt
+                new_len = max(1000, int(len(prompt) * shrink_factor))
+                attempt_prompt = prompt[:new_len]
+                print(f"⏳ Retry {attempt}/{max_attempts-1}: shrinking prompt to {len(attempt_prompt)} chars")
+            try:
+                for chunk in model.stream(attempt_prompt):
+                    # chunk can be ChatGenerationChunk or similar; extract text portion
+                    text_part = getattr(chunk, "content", None)
+                    if text_part is None and hasattr(chunk, "message"):
+                        text_part = getattr(chunk.message, "content", "")
+                    if text_part is None:
+                        text_part = str(chunk)
+                    if text_part:
+                        yield text_part
+                # Completed successfully – exit generator
+                return
+            except Exception as e:
+                print(f"❌ ERROR during token generation: {e}")
+                if _is_rate_limited(e) and attempt < max_attempts - 1:
+                    # Exponential backoff with jitter, then retry
+                    delay = (2 ** attempt) + random.uniform(0, 0.75)
+                    print(f"🔁 Rate limited/overloaded; retrying in {delay:.2f}s …")
+                    _time.sleep(delay)
+                    continue
+                # Non-retryable or out of attempts – propagate
+                raise
 
     # Build structured source metadata for citations (filter by relevance)
     sources = []

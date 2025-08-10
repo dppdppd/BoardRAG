@@ -21,12 +21,163 @@ from src.services.auth_service import unlock
 from src.storage_utils import format_storage_info
 
 
-app = FastAPI(title="BoardRAG API")
+import asyncio
+from contextlib import asynccontextmanager
+import sys
+import os
+from typing import Optional
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Custom lifespan to:
+    # 1) Gracefully swallow cancellation during shutdown so Ctrl+C isn't noisy
+    # 2) Mirror stdout/stderr to Admin log stream
+
+    # --- Begin stdout/stderr mirroring setup ---
+    loop = asyncio.get_event_loop()
+    stdout_queue: asyncio.Queue[str] = asyncio.Queue()
+    # Allow disabling the admin log mirror via env (default disabled for easier local debugging)
+    enable_admin_mirror = str(os.getenv("ADMIN_LOG_MIRROR", "0")).lower() not in ("0", "false", "no", "off")
+
+    class _AdminLogStream:
+        def __init__(self, original_stream):
+            self._original = original_stream
+            self._buffer = ""
+
+        def write(self, data: str):
+            try:
+                # Always write to original stream
+                self._original.write(data)
+            except Exception:
+                # If the terminal can't encode Unicode (e.g., Windows cp1252), degrade gracefully
+                try:
+                    enc = getattr(self._original, "encoding", None) or "utf-8"
+                    safe = (
+                        data.encode(enc, errors="replace").decode(enc, errors="replace")
+                        if isinstance(data, str)
+                        else str(data)
+                    )
+                    try:
+                        self._original.write(safe)
+                    except Exception:
+                        # Last resort: strip non-ASCII
+                        import re as _re  # local import to avoid top-level dependency here
+                        ascii_only = _re.sub(r"[^\x00-\x7F]", "?", str(data))
+                        try:
+                            self._original.write(ascii_only)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            # Buffer and split on newlines to form complete lines
+            if not isinstance(data, str):
+                data = str(data)
+            self._buffer += data
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                line = line.rstrip("\r")
+                # Drop empty lines to avoid noise
+                if line.strip():
+                    try:
+                        stdout_queue.put_nowait(line)
+                    except Exception:
+                        pass
+
+        def flush(self):
+            try:
+                self._original.flush()
+            except Exception:
+                pass
+
+        def isatty(self):
+            try:
+                return self._original.isatty()
+            except Exception:
+                return False
+
+        def fileno(self):
+            try:
+                return self._original.fileno()
+            except Exception:
+                raise
+
+    async def _drain_stdout_queue():
+        while True:
+            line = await stdout_queue.get()
+            # Clip super long lines to keep Admin console readable
+            if len(line) > 4000:
+                line = line[:4000] + " …(truncated)"
+            try:
+                await _admin_log_publish(line)
+                # Also echo to original stdout to guarantee terminal visibility even if sys.stdout was swapped elsewhere
+                try:
+                    _orig = globals().get("_orig_stdout")
+                    if _orig:
+                        try:
+                            _orig.write(line + "\n")
+                            _orig.flush()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            except Exception:
+                # Best effort only; continue draining
+                pass
+
+    _orig_stdout = sys.stdout
+    _orig_stderr = sys.stderr
+    # Stash originals at module level for use inside drain task
+    globals()["_orig_stdout"] = _orig_stdout
+    globals()["_orig_stderr"] = _orig_stderr
+    drain_task: Optional[asyncio.Task] = None
+    try:
+        if enable_admin_mirror:
+            sys.stdout = _AdminLogStream(_orig_stdout)
+            sys.stderr = _AdminLogStream(_orig_stderr)
+            drain_task = loop.create_task(_drain_stdout_queue())
+            # --- End stdout/stderr mirroring setup ---
+
+            # Announce startup to both stdout and admin stream
+            try:
+                print("[ADMIN] 🚀 API startup: admin log mirror enabled")
+            except Exception:
+                pass
+            try:
+                await _admin_log_publish("🚀 API startup: admin log mirror enabled")
+            except Exception:
+                pass
+
+        yield
+    except (asyncio.CancelledError, KeyboardInterrupt):  # pragma: no cover - shutdown path
+        pass
+    finally:
+        # Restore original streams if we swapped them
+        if enable_admin_mirror:
+            try:
+                sys.stdout = _orig_stdout
+                sys.stderr = _orig_stderr
+            except Exception:
+                pass
+            try:
+                globals().pop("_orig_stdout", None)
+                globals().pop("_orig_stderr", None)
+            except Exception:
+                pass
+            # Cancel drain task
+            if drain_task and not drain_task.done():
+                try:
+                    drain_task.cancel()
+                except Exception:
+                    pass
+
+
+app = FastAPI(title="BG-GPT API", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # tighten in production
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Type"],
@@ -36,6 +187,22 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+# At startup, print available routes for debugging 404s during local dev
+@app.on_event("startup")
+async def _print_routes_on_startup():
+    try:
+        print("[routes] Registered endpoints:")
+        for r in app.router.routes:
+            try:
+                path = getattr(r, "path", None) or getattr(r, "path_format", None)
+                methods = sorted(list(getattr(r, "methods", set())))
+                if path and methods:
+                    print(f"  {','.join(methods):<12} {path}")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 @app.get("/games")
@@ -189,13 +356,25 @@ async def admin_rebuild_stream():
         finally:
             if not task.done():
                 task.cancel()
+        
+        # Allow graceful shutdown without noisy tracebacks
+        # If the client disconnects or server shuts down, the stream may be cancelled
+        # which should not be treated as an error.
+        
 
     headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",  # Disable proxy buffering (nginx)
     }
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:  # pragma: no cover - shutdown/disconnect path
+            return
+
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/admin/refresh-stream")
@@ -237,8 +416,17 @@ async def admin_refresh_stream():
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
+        # Explicitly disable buffering for well-known reverse proxies
+        "Cache-Control": "no-cache, no-transform",  # ensure no transformation
     }
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:  # pragma: no cover
+            return
+
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.post("/admin/delete")
@@ -281,26 +469,16 @@ async def admin_set_model(payload: ModelSelection):
     from src import config as cfg  # type: ignore
 
     selection = (payload.selection or "").strip()
-
-    # Map friendly labels to internal identifiers
-    label_to_internal = {
-        "[Anthropic] Claude Sonnet 4": ("anthropic", "claude-sonnet-4-20250514"),
-        "[OpenAI] o3": ("openai", "o3"),
-        "[OpenAI] gpt-5 mini": ("openai", "gpt-5-mini"),
-    }
-
-    if selection in label_to_internal:
-        provider, generator = label_to_internal[selection]
+    # Treat selection as the real model id and infer provider heuristically
+    generator = selection
+    lower = generator.lower()
+    if "claude" in lower:
+        provider = "anthropic"
+    elif "gpt" in lower or "o3" in lower:
+        provider = "openai"
     else:
-        # Assume internal model id provided
-        generator = selection
-        lower = generator.lower()
-        if "claude" in lower:
-            provider = "anthropic"
-        elif "gpt" in lower or "o3" in lower:
-            provider = "openai"
-        else:
-            provider = "openai"
+        # Default to OpenAI unless explicitly set elsewhere
+        provider = "openai"
 
     # Apply globally (module-level settings)
     cfg.LLM_PROVIDER = provider
@@ -317,6 +495,29 @@ async def admin_set_model(payload: ModelSelection):
 
 def _sse_event(data: Dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+# ----------------------------------------------------------------------------
+# Admin: explicit log injection (for client-side breadcrumbs)
+# ----------------------------------------------------------------------------
+
+class AdminLogLine(BaseModel):
+    line: str
+
+
+@app.post("/admin/log")
+async def admin_log(line: AdminLogLine):
+    text = (line.line or "").strip()
+    if not text:
+        return {"message": "ignored"}
+    # Clip overly long lines to keep console usable
+    if len(text) > 4000:
+        text = text[:4000] + " …(truncated)"
+    try:
+        await _admin_log_publish(text)
+    except Exception:
+        pass
+    return {"message": "ok"}
 
 
 # ----------------------------------------------------------------------------
@@ -419,6 +620,13 @@ async def _admin_log_publish(line: str) -> None:
             q.put_nowait(line)
         except Exception:
             pass
+    # Optionally also echo to stdout for local debugging
+    try:
+        echo = str(os.getenv("ADMIN_LOG_ECHO_STDOUT", "1")).lower() not in ("0", "false", "no", "off")
+        if echo:
+            print(str(line))
+    except Exception:
+        pass
 
 
 @app.get("/admin/log-stream")
@@ -438,6 +646,8 @@ async def admin_log_stream():
                     yield b": ping\n\n"
                     continue
                 yield _sse_event({"type": "log", "line": str(line)}).encode("utf-8")
+        except asyncio.CancelledError:  # pragma: no cover
+            return
         finally:
             _admin_log_subscribers.discard(queue)
 
@@ -446,7 +656,14 @@ async def admin_log_stream():
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:  # pragma: no cover
+            return
+
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/stream")
@@ -455,9 +672,27 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
     game_filter = [game] if game else None
     game_names_list = game_names.split(",") if game_names else ([game] if game else None)
 
+    # Log incoming request early so even blocked sessions are visible in admin console/stdout
+    try:
+        await _admin_log_publish(f"💬 Q: {q} — game={game or '-'} web={include_web if include_web is not None else 'default'} sid={sid or '-'}")
+    except Exception:
+        pass
+    try:
+        print(f"[ADMIN] Q: {q} — game={game or '-'} web={include_web if include_web is not None else 'default'} sid={sid or '-'}")
+    except Exception:
+        pass
+
     # If this browser session is already blocked, short-circuit with an error
     if sid and sid in _blocked_sessions:
         async def blocked_stream() -> AsyncIterator[bytes]:
+            try:
+                await _admin_log_publish(f"⛔ Blocked session attempt sid={sid} — query suppressed")
+            except Exception:
+                pass
+            try:
+                print(f"[ADMIN] ⛔ Blocked session attempt sid={sid}")
+            except Exception:
+                pass
             yield _sse_event({"type": "error", "error": "blocked"}).encode("utf-8")
         headers = {
             "Cache-Control": "no-cache",
@@ -476,6 +711,14 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                 except Exception:
                     pass
             async def flagged_stream() -> AsyncIterator[bytes]:
+                try:
+                    await _admin_log_publish(f"⛔ Prefilter blocked sid={sid or '-'} — query suppressed")
+                except Exception:
+                    pass
+                try:
+                    print(f"[ADMIN] ⛔ Prefilter blocked sid={sid or '-'}")
+                except Exception:
+                    pass
                 yield _sse_event({"type": "error", "error": "blocked"}).encode("utf-8")
             headers = {
                 "Cache-Control": "no-cache",
@@ -488,6 +731,8 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
         # (we avoid false positives due to internal errors)
         pass
 
+    # Note: question was already logged above (before prefilter). Avoid duplicate spew here.
+
     token_gen, meta = stream_query_rag(
         query_text=q,
         selected_game=game_filter,
@@ -498,20 +743,51 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
+            echo_tokens = str(os.getenv("STREAM_ECHO_STDOUT", "1")).lower() not in ("0", "false", "no", "off")
+            if echo_tokens:
+                try:
+                    print("\n========== STREAM BEGIN ==========")
+                except Exception:
+                    pass
+            admin_acc = ""
             for chunk in token_gen:
                 # Slice into smaller chunks and yield control to event loop to encourage flushes
                 text = str(chunk)
                 slice_size = 64
                 if len(text) <= slice_size:
                     yield _sse_event({"type": "token", "data": text}).encode("utf-8")
+                    admin_acc += text
+                    if echo_tokens:
+                        try:
+                            print(text, end="", flush=True)
+                        except Exception:
+                            pass
                     await asyncio.sleep(0)
                 else:
                     for i in range(0, len(text), slice_size):
                         part = text[i:i+slice_size]
                         if part:
                             yield _sse_event({"type": "token", "data": part}).encode("utf-8")
+                            admin_acc += part
+                            if echo_tokens:
+                                try:
+                                    print(part, end="", flush=True)
+                                except Exception:
+                                    pass
                             await asyncio.sleep(0)
             yield _sse_event({"type": "done", "meta": meta}).encode("utf-8")
+            if echo_tokens:
+                try:
+                    print("\n=========== STREAM END ===========")
+                except Exception:
+                    pass
+            # Spew full assistant response to admin console (best-effort)
+            try:
+                await _admin_log_publish(f"🤖 A: {admin_acc}")
+            except Exception:
+                pass
+        except asyncio.CancelledError:  # pragma: no cover - client disconnect/shutdown
+            return
         except Exception as e:  # pragma: no cover - runtime safety
             try:
                 await _admin_log_publish(f"❌ Query error: {str(e)}")
@@ -519,7 +795,19 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                 pass
             yield _sse_event({"type": "error", "error": str(e)}).encode("utf-8")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:  # pragma: no cover
+            return
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
 
@@ -532,6 +820,12 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
     game_filter = [game] if game else None
     game_names_list = game_names.split(",") if game_names else ([game] if game else None)
 
+    # Log the incoming question to the admin console (best-effort)
+    try:
+        await _admin_log_publish(f"💬 Q: {q} — game={game or '-'} web={include_web if include_web is not None else 'default'} sid={sid or '-'}")
+    except Exception:
+        pass
+
     token_gen, meta = stream_query_rag(
         query_text=q,
         selected_game=game_filter,
@@ -542,9 +836,34 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
 
     async def event_stream() -> AsyncIterator[bytes]:
         try:
+            echo_tokens = str(os.getenv("STREAM_ECHO_STDOUT", "1")).lower() not in ("0", "false", "no", "off")
+            if echo_tokens:
+                try:
+                    print("\n====== STREAM (NDJSON) BEGIN ======")
+                except Exception:
+                    pass
+            admin_acc = ""
             for chunk in token_gen:
+                admin_acc += str(chunk)
                 yield (json.dumps({"type": "token", "data": chunk}) + "\n").encode("utf-8")
+                if echo_tokens:
+                    try:
+                        print(str(chunk), end="", flush=True)
+                    except Exception:
+                        pass
             yield (json.dumps({"type": "done", "meta": meta}) + "\n").encode("utf-8")
+            if echo_tokens:
+                try:
+                    print("\n===== STREAM (NDJSON) END =====")
+                except Exception:
+                    pass
+            # Spew full assistant response to admin console (best-effort)
+            try:
+                await _admin_log_publish(f"🤖 A: {admin_acc}")
+            except Exception:
+                pass
+        except asyncio.CancelledError:  # pragma: no cover
+            return
         except Exception as e:
             try:
                 await _admin_log_publish(f"❌ Query error (ndjson): {str(e)}")
@@ -552,7 +871,19 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
                 pass
             yield (json.dumps({"type": "error", "error": str(e)}) + "\n").encode("utf-8")
 
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:  # pragma: no cover
+            return
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(safe_stream(), media_type="application/x-ndjson", headers=headers)
 
 # ----------------------------------------------------------------------------
 # Admin: list/unblock blocked sessions
