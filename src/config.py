@@ -95,9 +95,9 @@ MODEL_CONFIGS = {
         "evaluator": "o3",
     },
     "anthropic": {
-        "generator": "claude-3-5-haiku-latest",
+        "generator": "claude-sonnet-4-20250514",
         "embedder": "text-embedding-3-small",  # Still use OpenAI for embeddings
-        "evaluator": "claude-3-5-haiku-latest",
+        "evaluator": "claude-sonnet-4-20250514",
     },
     "ollama": {
         "generator": "mistral",
