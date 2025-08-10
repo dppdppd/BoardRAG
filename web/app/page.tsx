@@ -370,14 +370,38 @@ export default function HomePage() {
     url.searchParams.set("sid", sessionId || "");
     url.searchParams.set("_", String(Date.now()));
 
-    const es = new EventSource(url.toString());
-    eventRef.current = es;
+    // Unified SSE event handler (used by EventSource or fetch-stream parser)
     let acc = "";
-    let fallbackUsed = false;
+    const handleSseData = (payload: string) => {
+      try {
+        const parsed = JSON.parse(payload);
+        if (parsed.type === "token") {
+          acc += parsed.data;
+          setMessages((cur) => {
+            const last = cur[cur.length - 1];
+            if (!last || last.role !== "assistant") return [...cur, { role: "assistant", content: acc }];
+            const updated = [...cur]; updated[updated.length - 1] = { role: "assistant", content: acc }; return updated;
+          });
+        } else if (parsed.type === "done") {
+          try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
+          eventRef.current = null;
+          setIsStreaming(false);
+          removeRetryable(lastSubmittedUserIndexRef.current);
+        } else if (parsed.type === "error") {
+          try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
+          eventRef.current = null;
+          setIsStreaming(false);
+          if (parsed.error === "blocked") {
+            try { sessionStorage.setItem("boardrag_blocked", "1"); } catch {}
+          } else {
+            addRetryable(lastSubmittedUserIndexRef.current);
+          }
+        }
+      } catch {}
+    };
 
-    const startFetchFallback = async () => {
-      if (fallbackUsed) return; fallbackUsed = true;
-      try { es.close(); } catch {}
+    // Streaming via fetch+ReadableStream (NDJSON/SSE parser)
+    const streamWithFetch = async () => {
       try {
         const resp = await fetch(url.toString(), { headers: { Accept: "text/event-stream" }, cache: "no-store" });
         const reader = resp.body?.getReader();
@@ -393,21 +417,7 @@ export default function HomePage() {
             const raw = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
             const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
             if (!dataLine) continue;
-            try {
-              const parsed = JSON.parse(dataLine.slice(5).trim());
-              if (parsed.type === "token") {
-                acc += parsed.data;
-                setMessages((cur) => {
-                  const last = cur[cur.length - 1];
-                  if (!last || last.role !== "assistant") return [...cur, { role: "assistant", content: acc }];
-                  const updated = [...cur]; updated[updated.length - 1] = { role: "assistant", content: acc }; return updated;
-                });
-              } else if (parsed.type === "done") {
-                setIsStreaming(false);
-              } else if (parsed.type === "error") {
-                setIsStreaming(false); addRetryable(lastSubmittedUserIndexRef.current);
-              }
-            } catch {}
+            handleSseData(dataLine.slice(5).trim());
           }
         }
       } catch {
@@ -415,52 +425,30 @@ export default function HomePage() {
       }
     };
 
-    // If nothing arrives quickly, switch to fetch reader (helps on some CDNs)
+    // If production (or explicitly toggled), prefer fetch streaming immediately
+    const FORCE_FETCH = (process.env.NEXT_PUBLIC_SSE_FETCH === '1') || (typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app'));
+    if (FORCE_FETCH) {
+      streamWithFetch();
+      return;
+    }
+
+    // Default path: EventSource with rapid fallback to fetch if buffered
+    const es = new EventSource(url.toString());
+    eventRef.current = es;
     const switchTimer = window.setTimeout(() => {
-      if (!fallbackUsed) startFetchFallback();
-    }, 1500);
+      streamWithFetch();
+    }, 300);
 
     es.onmessage = (ev) => {
-      try {
-        const parsed = JSON.parse(ev.data);
-        if (parsed.type === "token") {
-          clearTimeout(switchTimer);
-          acc += parsed.data;
-          setMessages((cur) => {
-            const last = cur[cur.length - 1];
-            if (!last || last.role !== "assistant") {
-              return [...cur, { role: "assistant", content: acc }];
-            }
-            const updated = [...cur];
-            updated[updated.length - 1] = { role: "assistant", content: acc };
-            return updated;
-          });
-        } else if (parsed.type === "done") {
-          clearTimeout(switchTimer);
-          es.close();
-          eventRef.current = null;
-          setIsStreaming(false);
-          removeRetryable(lastSubmittedUserIndexRef.current);
-        } else if (parsed.type === "error") {
-          clearTimeout(switchTimer);
-          es.close();
-          eventRef.current = null;
-          setIsStreaming(false);
-          if (parsed.error === "blocked") {
-            // Remember locally and prevent further submissions in this tab
-            try { sessionStorage.setItem("boardrag_blocked", "1"); } catch {}
-          } else {
-            addRetryable(lastSubmittedUserIndexRef.current);
-          }
-        }
-      } catch {}
+      clearTimeout(switchTimer);
+      handleSseData(ev.data);
     };
     es.onerror = () => {
       clearTimeout(switchTimer);
       try { es.close(); } catch {}
       eventRef.current = null;
-      setIsStreaming(false);
-      addRetryable(lastSubmittedUserIndexRef.current);
+      // Try fetch-based streaming immediately on error
+      streamWithFetch();
     };
   };
 
