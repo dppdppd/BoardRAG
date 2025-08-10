@@ -479,13 +479,20 @@ export default function HomePage() {
     // Default path: EventSource with rapid fallback to fetch if buffered
     const es = new EventSource(url.toString());
     eventRef.current = es;
+    let sseReceived = false;
     const switchTimer = window.setTimeout(() => {
-      streamWithFetch();
+      // Only fall back to fetch if we have not received any SSE data yet
+      if (!sseReceived) {
+        try { es.close(); } catch {}
+        eventRef.current = null;
+        streamWithFetch();
+      }
     }, 1500);
     switchTimerRef.current = switchTimer as unknown as number;
 
     es.onmessage = (ev) => {
       clearTimeout(switchTimer);
+      sseReceived = true;
       handleSseData(ev.data);
     };
     es.onerror = () => {
