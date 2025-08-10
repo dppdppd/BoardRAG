@@ -327,6 +327,8 @@ export default function HomePage() {
       .map((m) => `${m.role[0].toUpperCase()}${m.role.slice(1)}: ${m.content}`)
       .join("\n"));
     url.searchParams.set("game_names", selectedGame);
+    // Send stable browser session id for server-side blocking
+    url.searchParams.set("sid", sessionId || "");
     url.searchParams.set("_", String(Date.now()));
 
     const es = new EventSource(url.toString());
@@ -356,7 +358,12 @@ export default function HomePage() {
           es.close();
           eventRef.current = null;
           setIsStreaming(false);
-          addRetryable(lastSubmittedUserIndexRef.current);
+          if (parsed.error === "blocked") {
+            // Remember locally and prevent further submissions in this tab
+            try { sessionStorage.setItem("boardrag_blocked", "1"); } catch {}
+          } else {
+            addRetryable(lastSubmittedUserIndexRef.current);
+          }
         }
       } catch {}
     };
@@ -371,6 +378,8 @@ export default function HomePage() {
   const onSubmit = () => {
     const q = input.trim();
     if (!q || !selectedGame) return;
+    // If this browser session was blocked, short-circuit locally without hitting the server
+    try { if (sessionStorage.getItem("boardrag_blocked") === "1") { return; } } catch {}
     setInput("");
     startQuery(q, null);
   };
