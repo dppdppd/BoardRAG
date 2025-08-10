@@ -37,6 +37,8 @@ export default function HomePage() {
   const firstTokenSeenRef = useRef<boolean>(false);
   const lastSubmittedUserIndexRef = useRef<number>(-1);
   const [retryableUsers, setRetryableUsers] = useState<number[]>([]);
+  // Active stream request id as announced by the server; used to ignore late chunks from older streams
+  const streamReqIdRef = useRef<string | null>(null);
 
   const addRetryable = (idx: number | null | undefined) => {
     if (idx == null || idx < 0) return;
@@ -372,9 +374,7 @@ export default function HomePage() {
     url.searchParams.set("game_names", selectedGame);
     // Send stable browser session id for server-side blocking
     url.searchParams.set("sid", sessionId || "");
-    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    url.searchParams.set("_", reqId);
-    const currentReqIdRef = { current: reqId } as { current: string };
+    url.searchParams.set("_", String(Date.now()));
 
     // Unified SSE event handler (used by EventSource or fetch-stream parser)
     let acc = "";
@@ -399,9 +399,13 @@ export default function HomePage() {
       try {
         const parsed = JSON.parse(payload);
         if (parsed.type === "token") {
-          // Guard: if a new request starts while a fallback arrives late, ignore mismatched req ids
-          if (typeof parsed.req === 'string' && parsed.req !== (url.searchParams.get('_req') || currentReqIdRef.current)) {
-            return;
+          // Adopt the server-announced req id on first token; ignore mismatches later
+          if (parsed.req && typeof parsed.req === 'string') {
+            if (streamReqIdRef.current == null) {
+              streamReqIdRef.current = parsed.req;
+            } else if (streamReqIdRef.current !== parsed.req) {
+              return; // late or cross-stream chunk – ignore
+            }
           }
           acc = mergeChunk(acc, String(parsed.data));
           setMessages((cur) => {
@@ -410,13 +414,14 @@ export default function HomePage() {
             const updated = [...cur]; updated[updated.length - 1] = { role: "assistant", content: acc }; return updated;
           });
         } else if (parsed.type === "done") {
-          if (typeof parsed.req === 'string' && parsed.req !== (url.searchParams.get('_req') || currentReqIdRef.current)) {
-            return;
+          if (parsed.req && typeof parsed.req === 'string' && streamReqIdRef.current && parsed.req !== streamReqIdRef.current) {
+            return; // not our stream
           }
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
           eventRef.current = null;
           setIsStreaming(false);
           removeRetryable(lastSubmittedUserIndexRef.current);
+          streamReqIdRef.current = null;
         } else if (parsed.type === "error") {
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
           eventRef.current = null;
