@@ -499,16 +499,18 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
     async def event_stream() -> AsyncIterator[bytes]:
         try:
             for chunk in token_gen:
-                # Some providers buffer larger pieces; slice into smaller chunks to improve perceived streaming
+                # Slice into smaller chunks and yield control to event loop to encourage flushes
                 text = str(chunk)
                 slice_size = 64
                 if len(text) <= slice_size:
                     yield _sse_event({"type": "token", "data": text}).encode("utf-8")
+                    await asyncio.sleep(0)
                 else:
                     for i in range(0, len(text), slice_size):
                         part = text[i:i+slice_size]
                         if part:
                             yield _sse_event({"type": "token", "data": part}).encode("utf-8")
+                            await asyncio.sleep(0)
             yield _sse_event({"type": "done", "meta": meta}).encode("utf-8")
         except Exception as e:  # pragma: no cover - runtime safety
             try:
