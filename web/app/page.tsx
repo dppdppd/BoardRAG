@@ -709,7 +709,7 @@ export default function HomePage() {
           </section>
 
           <section className="surface pad section" style={{ marginTop: 12 }}>
-            <summary>Add New Game</summary>
+            <summary>Upload PDFs</summary>
             <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
               <input
                 ref={uploadInputRef}
@@ -770,7 +770,7 @@ export default function HomePage() {
           </div>
         </section>
         <section className="surface pad section" style={{ marginTop: 12 }}>
-          <summary>Add New Game</summary>
+          <summary>Upload PDFs</summary>
           <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
             <input
               ref={uploadInputRef}
