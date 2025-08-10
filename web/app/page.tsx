@@ -55,7 +55,6 @@ export default function HomePage() {
     | "brief"
     | "detailed"
     | "step_by_step"
-    | "flashcard"
     | "mnemonic"
     | "analogy"
     | "story"
@@ -201,8 +200,15 @@ export default function HomePage() {
     if (!selectedGame) return;
     try {
       const key = `boardrag_style:${selectedGame}`;
-      const saved = localStorage.getItem(key) as PromptStyle | null;
-      setPromptStyle(saved || "default");
+      const savedRaw = localStorage.getItem(key);
+      const allowed: PromptStyle[] = [
+        "default","brief","detailed","step_by_step","mnemonic","analogy","story","checklist","comparison","mistakes","if_then","teach_back","example_first","self_quiz"
+      ];
+      const valid = (savedRaw && (allowed as readonly string[]).includes(savedRaw)) ? (savedRaw as PromptStyle) : "default";
+      setPromptStyle(valid);
+      if (savedRaw && !allowed.includes(savedRaw as any)) {
+        try { localStorage.setItem(key, valid); } catch {}
+      }
     } catch {
       setPromptStyle("default");
     }
@@ -478,8 +484,6 @@ export default function HomePage() {
           return `${q} Instruction: Provide a thorough, step-by-step explanation with relevant details and examples.`;
         case "step_by_step":
           return `${q} Instruction: Explain as numbered steps from setup to outcome; keep each step short.`;
-        case "flashcard":
-          return `${q} Instruction: Format as a flashcard: Question, then a concise Answer.`;
         case "mnemonic":
           return `${q} Instruction: Include a short mnemonic or memory hook that captures the rule.`;
         case "analogy":
@@ -981,7 +985,6 @@ export default function HomePage() {
                   <option value="brief">Brief</option>
                   <option value="detailed">Detailed</option>
                   <option value="step_by_step">Step-by-step</option>
-                  <option value="flashcard">Flashcard (Q→A)</option>
                   <option value="mnemonic">Mnemonic</option>
                   <option value="analogy">Analogy</option>
                   <option value="story">Story/Scenario</option>
@@ -1067,7 +1070,6 @@ export default function HomePage() {
                 <option value="brief">Brief</option>
                 <option value="detailed">Detailed</option>
                 <option value="step_by_step">Step-by-step</option>
-                <option value="flashcard">Flashcard (Q→A)</option>
                 <option value="mnemonic">Mnemonic</option>
                 <option value="analogy">Analogy</option>
                 <option value="story">Story/Scenario</option>
