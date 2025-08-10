@@ -127,6 +127,8 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   overflow: hidden; /* prevent growth; allow inner scroll */
 }
 .chat-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px; -webkit-overflow-scrolling: touch; min-height: 0; }
+/* Provide permanent scrollable whitespace at the end of the chat without pushing the input bar */
+.chat-scroll::after { content: ""; display: block; height: 100vh; }
 .bubble {
   margin: 3px 0;
   max-width: 92%;

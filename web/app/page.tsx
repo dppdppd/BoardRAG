@@ -31,6 +31,18 @@ export default function HomePage() {
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState<boolean>(false);
   const [uploadMsg, setUploadMsg] = useState<string>("");
+  const firstTokenSeenRef = useRef<boolean>(false);
+  const lastSubmittedUserIndexRef = useRef<number>(-1);
+  const [retryableUsers, setRetryableUsers] = useState<number[]>([]);
+
+  const addRetryable = (idx: number | null | undefined) => {
+    if (idx == null || idx < 0) return;
+    setRetryableUsers((cur) => (cur.includes(idx) ? cur : [...cur, idx]));
+  };
+  const removeRetryable = (idx: number | null | undefined) => {
+    if (idx == null || idx < 0) return;
+    setRetryableUsers((cur) => cur.filter((i) => i !== idx));
+  };
 
   const games = gamesData?.games || [];
 
@@ -124,8 +136,9 @@ export default function HomePage() {
     try { localStorage.setItem("boardrag_last_game", selectedGame); } catch {}
   }, [selectedGame]);
 
+  // Do not auto-scroll on every token; we'll control scroll when an answer starts
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    // intentionally empty to avoid continuous auto scroll during streaming
   }, [messages]);
 
   const { bookmarkLabels, bookmarkUserIndices } = useMemo(() => {
@@ -268,24 +281,53 @@ export default function HomePage() {
     } as any;
   };
 
-  const onSubmit = async () => {
-    const q = input.trim();
-    if (!q || !selectedGame) return;
-    setInput("");
+  const startQuery = (question: string, reuseUserIndex?: number | null) => {
+    if (!selectedGame || !question) return;
     setIsStreaming(true);
-    const nextMessages = [...messages, { role: "user", content: q } as Message];
-    setMessages(nextMessages);
+    let workingMessages = messages;
+    if (reuseUserIndex == null) {
+      // append new user message
+      workingMessages = [...messages, { role: "user", content: question } as Message];
+      setMessages(workingMessages);
+      const numUsers = workingMessages.filter((m) => m.role === "user").length;
+      lastSubmittedUserIndexRef.current = numUsers - 1;
+    } else {
+      lastSubmittedUserIndexRef.current = reuseUserIndex;
+    }
+    firstTokenSeenRef.current = false;
+
+    // Immediately scroll so the asked question is at the top, then stop auto-scrolling
+    const anchorToQuestion = () => {
+      let attempts = 0;
+      const tryScroll = () => {
+        const parent = chatScrollRef.current;
+        if (!parent) return;
+        const target = parent.querySelector(`[data-user-index="${lastSubmittedUserIndexRef.current}"]`) as HTMLElement | null;
+        if (target) {
+          const top = target.offsetTop - parent.offsetTop - 12;
+          parent.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+          // Prevent later first-token scroll
+          firstTokenSeenRef.current = true;
+        } else if (attempts < 6) {
+          attempts += 1;
+          setTimeout(tryScroll, 16);
+        }
+      };
+      requestAnimationFrame(tryScroll);
+    };
+    anchorToQuestion();
 
     const url = new URL(`${API_BASE}/stream`);
-    url.searchParams.set("q", q);
+    url.searchParams.set("q", question);
     url.searchParams.set("game", selectedGame);
     url.searchParams.set("include_web", String(includeWeb));
-    url.searchParams.set("history", nextMessages
+    url.searchParams.set("history", workingMessages
       .slice(-20)
       .filter((m) => m.role !== "assistant")
       .map((m) => `${m.role[0].toUpperCase()}${m.role.slice(1)}: ${m.content}`)
       .join("\n"));
     url.searchParams.set("game_names", selectedGame);
+    url.searchParams.set("_", String(Date.now()));
 
     const es = new EventSource(url.toString());
     eventRef.current = es;
@@ -296,7 +338,6 @@ export default function HomePage() {
         const parsed = JSON.parse(ev.data);
         if (parsed.type === "token") {
           acc += parsed.data;
-          // add assistant message on first token, update afterwards
           setMessages((cur) => {
             const last = cur[cur.length - 1];
             if (!last || last.role !== "assistant") {
@@ -307,30 +348,38 @@ export default function HomePage() {
             return updated;
           });
         } else if (parsed.type === "done") {
-          // could append formatted Sources here based on parsed.meta
           es.close();
           eventRef.current = null;
           setIsStreaming(false);
+          removeRetryable(lastSubmittedUserIndexRef.current);
         } else if (parsed.type === "error") {
           es.close();
           eventRef.current = null;
           setIsStreaming(false);
+          addRetryable(lastSubmittedUserIndexRef.current);
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
     };
     es.onerror = () => {
-      es.close();
+      try { es.close(); } catch {}
       eventRef.current = null;
       setIsStreaming(false);
+      addRetryable(lastSubmittedUserIndexRef.current);
     };
+  };
+
+  const onSubmit = () => {
+    const q = input.trim();
+    if (!q || !selectedGame) return;
+    setInput("");
+    startQuery(q, null);
   };
 
   const onStop = () => {
     try { eventRef.current?.close(); } catch {}
     eventRef.current = null;
     setIsStreaming(false);
+    addRetryable(lastSubmittedUserIndexRef.current);
   };
 
   const onUpload = async (files: FileList | null) => {
@@ -390,7 +439,7 @@ export default function HomePage() {
         {/* Chat column */}
         <div className="chat surface" style={{ height: "100%" }}>
           <div className="row title" style={{ gap: 12, justifyContent: 'space-between' }}>
-            <span>BoardgameGPT{selectedGame ? ` — ${selectedGame}` : ""}</span>
+            <span>BG-GPT{selectedGame ? ` — ${selectedGame}` : ""}</span>
           </div>
 
           {/* Horizontal history strip */}
@@ -430,9 +479,50 @@ export default function HomePage() {
                   userCounter += 1;
                   props["data-user-index"] = userCounter;
                 }
+                const isUser = m.role === "user";
+                const showActions = isUser && retryableUsers.includes(userCounter);
+                if (isUser) {
+                  props.style = { position: "relative" };
+                }
                 return (
                   <div {...props}>
                     <ReactMarkdown>{m.content}</ReactMarkdown>
+                    {showActions && (
+                      <div style={{ position: "absolute", right: 6, display: "flex", gap: 6, top: "calc(20px + 0.7em)", transform: "translateY(-50%)" }}>
+                        <button
+                          className="btn ghost"
+                          title="Retry"
+                          onClick={() => startQuery(m.content, userCounter)}
+                          style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "rgba(255,255,255,0.45)", background: "transparent" }}
+                        >↻</button>
+                        <button
+                          className="btn ghost"
+                          title="Delete"
+                          onClick={() => {
+                            // Remove this user message
+                            const targetUserIdx = userCounter;
+                            let seen = -1;
+                            const newList: Message[] = [];
+                            for (const msg of messages) {
+                              if (msg.role === 'user') {
+                                seen += 1;
+                                if (seen === targetUserIdx) continue; // skip this one
+                              }
+                              newList.push(msg);
+                            }
+                            setMessages(newList);
+                            setRetryableUsers((cur) => cur.filter((n) => n !== userCounter));
+                            try {
+                              if (selectedGame) {
+                                const key = `boardrag_conv:${sessionId}:${selectedGame}`;
+                                localStorage.setItem(key, JSON.stringify(newList));
+                              }
+                            } catch {}
+                          }}
+                          style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "rgba(255,255,255,0.45)", background: "transparent" }}
+                        >✕</button>
+                      </div>
+                    )}
                   </div>
                 );
               });
