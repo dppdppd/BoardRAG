@@ -28,6 +28,7 @@ export default function HomePage() {
   const historyDragRef = useRef<{ isDown: boolean; startX: number; scrollLeft: number; dragged: boolean }>({ isDown: false, startX: 0, scrollLeft: 0, dragged: false });
   const historyDraggingFlag = useRef<boolean>(false);
   const loadedKeyRef = useRef<string | null>(null);
+  const initialScrollDoneRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [uploading, setUploading] = useState<boolean>(false);
   const [uploadMsg, setUploadMsg] = useState<string>("");
@@ -46,10 +47,11 @@ export default function HomePage() {
 
   const games = gamesData?.games || [];
 
-  // Remove any user question that never received an assistant reply.
-  // When multiple consecutive user questions exist before an assistant,
-  // only the most recent user question is considered answered by that assistant;
-  // older ones are dropped.
+  // Keep only valid QA pairs.
+  // - Drop any user question that never received an assistant reply
+  // - Drop any assistant reply that has no preceding user question
+  // - When multiple consecutive user questions exist before an assistant,
+  //   only keep the most recent user question for that assistant
   const sanitizeConversation = (history: Message[]): Message[] => {
     const sanitized: Message[] = [];
     const pendingUsers: Message[] = [];
@@ -57,13 +59,16 @@ export default function HomePage() {
       if (msg.role === "user") {
         pendingUsers.push(msg);
       } else if (msg.role === "assistant") {
+        // Only keep assistant if there is at least one pending user
         if (pendingUsers.length > 0) {
           const lastUser = pendingUsers[pendingUsers.length - 1];
           // Drop older pending users; only keep the last one answered by this assistant
           pendingUsers.length = 0;
           sanitized.push(lastUser);
+          sanitized.push(msg);
+        } else {
+          // assistant without a preceding question → drop
         }
-        sanitized.push(msg);
       }
     }
     // Any remaining pendingUsers at the end had no answer → drop
@@ -167,6 +172,40 @@ export default function HomePage() {
     // Scroll to the end so the latest pill is visible
     bar.scrollTo({ left: bar.scrollWidth, behavior: 'smooth' });
   }, [bookmarkLabels, selectedGame]);
+
+  // After loading a session, scroll to the last asked question (last user message)
+  useEffect(() => {
+    if (!selectedGame || !messages || messages.length === 0) return;
+    if (isStreaming) return; // avoid fighting live streaming scroll
+    const key = `boardrag_conv:${sessionId}:${selectedGame}`;
+    if (loadedKeyRef.current !== key) return; // ensure messages for this key are loaded
+    if (initialScrollDoneRef.current === key) return; // already scrolled for this key
+
+    // Find the last user index
+    let lastUserIdx = -1;
+    let count = -1;
+    for (const msg of messages) {
+      if (msg.role === 'user') { count += 1; lastUserIdx = count; }
+    }
+    if (lastUserIdx < 0) return;
+
+    const parent = chatScrollRef.current;
+    if (!parent) return;
+
+    let attempts = 0;
+    const tryScroll = () => {
+      const target = parent.querySelector(`[data-user-index="${lastUserIdx}"]`) as HTMLElement | null;
+      if (target) {
+        const top = target.offsetTop - parent.offsetTop - 12;
+        parent.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
+        initialScrollDoneRef.current = key;
+      } else if (attempts < 6) {
+        attempts += 1;
+        setTimeout(tryScroll, 16);
+      }
+    };
+    requestAnimationFrame(tryScroll);
+  }, [messages, selectedGame, sessionId, isStreaming]);
 
   // Draggable history strip (mouse & touch)
   useEffect(() => {
@@ -334,11 +373,58 @@ export default function HomePage() {
     const es = new EventSource(url.toString());
     eventRef.current = es;
     let acc = "";
+    let fallbackUsed = false;
+
+    const startFetchFallback = async () => {
+      if (fallbackUsed) return; fallbackUsed = true;
+      try { es.close(); } catch {}
+      try {
+        const resp = await fetch(url.toString(), { headers: { Accept: "text/event-stream" }, cache: "no-store" });
+        const reader = resp.body?.getReader();
+        if (!reader) throw new Error("no reader");
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const raw = buffer.slice(0, idx); buffer = buffer.slice(idx + 2);
+            const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
+            if (!dataLine) continue;
+            try {
+              const parsed = JSON.parse(dataLine.slice(5).trim());
+              if (parsed.type === "token") {
+                acc += parsed.data;
+                setMessages((cur) => {
+                  const last = cur[cur.length - 1];
+                  if (!last || last.role !== "assistant") return [...cur, { role: "assistant", content: acc }];
+                  const updated = [...cur]; updated[updated.length - 1] = { role: "assistant", content: acc }; return updated;
+                });
+              } else if (parsed.type === "done") {
+                setIsStreaming(false);
+              } else if (parsed.type === "error") {
+                setIsStreaming(false); addRetryable(lastSubmittedUserIndexRef.current);
+              }
+            } catch {}
+          }
+        }
+      } catch {
+        setIsStreaming(false); addRetryable(lastSubmittedUserIndexRef.current);
+      }
+    };
+
+    // If nothing arrives quickly, switch to fetch reader (helps on some CDNs)
+    const switchTimer = window.setTimeout(() => {
+      if (!fallbackUsed) startFetchFallback();
+    }, 1500);
 
     es.onmessage = (ev) => {
       try {
         const parsed = JSON.parse(ev.data);
         if (parsed.type === "token") {
+          clearTimeout(switchTimer);
           acc += parsed.data;
           setMessages((cur) => {
             const last = cur[cur.length - 1];
@@ -350,11 +436,13 @@ export default function HomePage() {
             return updated;
           });
         } else if (parsed.type === "done") {
+          clearTimeout(switchTimer);
           es.close();
           eventRef.current = null;
           setIsStreaming(false);
           removeRetryable(lastSubmittedUserIndexRef.current);
         } else if (parsed.type === "error") {
+          clearTimeout(switchTimer);
           es.close();
           eventRef.current = null;
           setIsStreaming(false);
@@ -368,6 +456,7 @@ export default function HomePage() {
       } catch {}
     };
     es.onerror = () => {
+      clearTimeout(switchTimer);
       try { es.close(); } catch {}
       eventRef.current = null;
       setIsStreaming(false);
@@ -490,49 +579,50 @@ export default function HomePage() {
                 }
                 const isUser = m.role === "user";
                 const showActions = isUser && retryableUsers.includes(userCounter);
-                if (isUser) {
-                  props.style = { position: "relative" };
-                }
                 return (
-                  <div {...props}>
-                    <ReactMarkdown>{m.content}</ReactMarkdown>
+                  <React.Fragment key={i}>
+                    <div {...props}>
+                      <ReactMarkdown>{m.content}</ReactMarkdown>
+                    </div>
                     {showActions && (
-                      <div style={{ position: "absolute", right: 6, display: "flex", gap: 6, top: "calc(20px + 0.7em)", transform: "translateY(-50%)" }}>
-                        <button
-                          className="btn ghost"
-                          title="Retry"
-                          onClick={() => startQuery(m.content, userCounter)}
-                          style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "rgba(255,255,255,0.45)", background: "transparent" }}
-                        >↻</button>
-                        <button
-                          className="btn ghost"
-                          title="Delete"
-                          onClick={() => {
-                            // Remove this user message
-                            const targetUserIdx = userCounter;
-                            let seen = -1;
-                            const newList: Message[] = [];
-                            for (const msg of messages) {
-                              if (msg.role === 'user') {
-                                seen += 1;
-                                if (seen === targetUserIdx) continue; // skip this one
+                      <div style={{ maxWidth: "92%", marginLeft: "auto", marginTop: 6 }}>
+                        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                          <button
+                            className="btn"
+                            title="Retry"
+                            onClick={() => { setRetryableUsers((cur) => cur.filter((n) => n !== userCounter)); startQuery(m.content, userCounter); }}
+                            style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)" }}
+                          >↻</button>
+                          <button
+                            className="btn"
+                            title="Delete"
+                            onClick={() => {
+                              // Remove this user message
+                              const targetUserIdx = userCounter;
+                              let seen = -1;
+                              const newList: Message[] = [];
+                              for (const msg of messages) {
+                                if (msg.role === 'user') {
+                                  seen += 1;
+                                  if (seen === targetUserIdx) continue; // skip this one
+                                }
+                                newList.push(msg);
                               }
-                              newList.push(msg);
-                            }
-                            setMessages(newList);
-                            setRetryableUsers((cur) => cur.filter((n) => n !== userCounter));
-                            try {
-                              if (selectedGame) {
-                                const key = `boardrag_conv:${sessionId}:${selectedGame}`;
-                                localStorage.setItem(key, JSON.stringify(newList));
-                              }
-                            } catch {}
-                          }}
-                          style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "rgba(255,255,255,0.45)", background: "transparent" }}
-                        >✕</button>
+                              setMessages(newList);
+                              setRetryableUsers((cur) => cur.filter((n) => n !== userCounter));
+                              try {
+                                if (selectedGame) {
+                                  const key = `boardrag_conv:${sessionId}:${selectedGame}`;
+                                  localStorage.setItem(key, JSON.stringify(newList));
+                                }
+                              } catch {}
+                            }}
+                            style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)" }}
+                          >✕</button>
+                        </div>
                       </div>
                     )}
-                  </div>
+                  </React.Fragment>
                 );
               });
             })()}
