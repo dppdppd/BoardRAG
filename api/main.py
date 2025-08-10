@@ -497,15 +497,15 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
-        # Initial prelude to open the stream for proxies/CDNs. The 2KB padding
-        # mitigates buffering on some reverse proxies/CDNs (e.g., gzip/transform layers).
-        yield b":" + b" " * 2048 + b"\n\n"
+        # Initial prelude to open the stream for proxies/CDNs. The 8KB padding
+        # mitigates buffering on more aggressive reverse proxies/CDNs.
+        yield b":" + b" " * 8192 + b"\n\n"
         try:
             last_ping = time.time()
             for chunk in token_gen:
                 # Periodic heartbeat to defeat proxy buffering (every ~10s)
                 now = time.time()
-                if now - last_ping > 10:
+                if now - last_ping > 1:
                     yield b": ping\n\n"
                     last_ping = now
                 yield _sse_event({"type": "token", "data": chunk}).encode("utf-8")
@@ -519,7 +519,8 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
             yield _sse_event({"type": "error", "error": str(e)}).encode("utf-8")
 
     headers = {
-        "Cache-Control": "no-cache, no-transform",
+        "Cache-Control": "no-cache, no-transform, private",
+        "Pragma": "no-cache",
         "Connection": "keep-alive",
         "Keep-Alive": "timeout=60",
         "X-Accel-Buffering": "no",
