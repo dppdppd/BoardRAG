@@ -15,6 +15,7 @@ INSTRUCTIONS:
 8. Before responding, consider the key facts and qualifiers in the question (e.g., whose turn it is, whether the card is played on a friendly or enemy group, timing restrictions, etc.).  Use those facts to reason step-by-step. If the rules differ for friendly vs. opponent actions, state both explicitly.
 9. If the question is multi-part, ask for clarification if there's any ambiguity as to who is acting, where, or when. e.g. if the question involves a sequence of actions, the actor and/or target of the action may get scrambled. 
 10. If the question is asking for a yes or no, or quantity, provide it first. Follow with detail, if appropriate.
+11. For each part of the answer and when appropriate, cite the section used, e.g. "[20.4.5 - 20.4.10]"
 CONTEXT:
 {context}
 

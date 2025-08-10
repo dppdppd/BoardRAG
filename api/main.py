@@ -382,6 +382,11 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
         except Exception as e:  # pragma: no cover - runtime safety
             yield _sse_event({"type": "error", "error": str(e)}).encode("utf-8")
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
