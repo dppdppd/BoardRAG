@@ -257,6 +257,18 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
     16px 50%
   );
 }
+.history-pill.flat-left {
+  /* Flatten the left side: remove concave tail on the left */
+  clip-path: polygon(
+    0 0,
+    calc(100% - 16px) 0,
+    100% 50%,
+    calc(100% - 16px) 100%,
+    0 100%
+  );
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
 .history-pill:hover {
   background: linear-gradient(
     to bottom,
@@ -318,6 +330,16 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   padding: 8px 12px;
 }
 .sidebar-panel .bookmark { font-size: 13px; }
+.sidebar-panel .bookmark.clear-all {
+  padding: 0; /* let width/height control size */
+  font-size: 11px;
+  letter-spacing: 0;
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  display: inline-grid;
+  place-items: center;
+}
 
 /* Scrollable history list in sidebar to avoid pushing other controls */
 .sidebar-panel .history-list {

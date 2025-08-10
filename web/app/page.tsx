@@ -783,12 +783,18 @@ export default function HomePage() {
               <>
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                   <button
-                    className="history-pill btn"
+                    className="history-pill btn flat-left"
                     title="Hold to clear history"
                     aria-label="Hold to clear history"
                     {...longPressClearAllHandlers()}
+                    style={{ width: 43, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center' }}
                   >
-                    CLEAR ALL
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style={{ display: 'block', marginLeft: -8 }}>
+                      <path d="M3 6h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                      <path d="M10 11v7M14 11v7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
                   </button>
                   {showHoldHint && (
                     <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Hold to clear history</span>
@@ -927,20 +933,31 @@ export default function HomePage() {
         {/* Sidebar (desktop only) */}
         <div className="sidebar-panel">
           <section className="surface pad section">
-            <summary>Past Questions</summary>
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
-              {bookmarkLabels.length > 0 ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <button className="btn" title="Hold to clear history" aria-label="Hold to clear history" {...longPressClearAllHandlers()}>
-                    CLEAR ALL
+            <div className="row" style={{ alignItems: 'center' }}>
+              <summary style={{ margin: 0 }}>Past Questions</summary>
+              {bookmarkLabels.length > 0 && (
+                <>
+                  <button
+                    className="btn"
+                    title="Hold to clear history"
+                    aria-label="Hold to clear history"
+                    {...longPressClearAllHandlers()}
+                    style={{ width: 28, height: 28, minHeight: 28, padding: 0, display: 'inline-grid', placeItems: 'center', marginLeft: 8 }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                      <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+                      <path d="M10 11v7M14 11v7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                    </svg>
                   </button>
-                  <span className="muted" style={{ fontSize: 12, visibility: showHoldHint ? 'visible' : 'hidden' }}>Hold to clear history</span>
-                </div>
-              ) : (
-                <div className="muted" style={{ fontSize: 13 }}>No bookmarks yet</div>
+                  <span className="muted" style={{ fontSize: 12, marginLeft: 6, visibility: showHoldHint ? 'visible' : 'hidden' }}>Hold to clear history</span>
+                </>
               )}
-              <div />
             </div>
+            {bookmarkLabels.length === 0 && (
+              <div className="muted" style={{ fontSize: 13, marginTop: 8 }}>No bookmarks yet</div>
+            )}
             {bookmarkLabels.length > 0 && (
               <div className="history-list" style={{ marginTop: 8 }}>
                 {bookmarkLabels.map((b, i) => (
