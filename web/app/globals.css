@@ -13,13 +13,18 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 
 /* Theming (Light default) */
 :root {
-  /* Terracotta / Cream / Sage palette */
-  --bg: #edf0db;        /* cream background */
-  --surface: #ffffff;   /* cards */
-  --border: #cdd7c9;    /* sage-tinted border */
-  --text: #111827;      /* neutral dark text */
-  --muted: #5f6b61;     /* muted slate-sage */
-  --accent: #b65a46;    /* terracotta primary */
+  /* Cool light palette: ice / slate / steel */
+  --bg: #f6f8fb;             /* cool very light background */
+  --surface: #ffffff;        /* panels default to white */
+  --border: #d9e2ec;         /* cool light border */
+  --text: #1f2937;           /* cool dark slate text */
+  --muted: #64748b;          /* slate muted */
+  --accent: #4f7cac;         /* desaturated steel blue */
+  --accent-2: #6fb1c5;       /* soft aqua secondary */
+  --control-bg: #eef2f7;     /* cool input/chip background */
+  --control-border: #d0dbe7; /* control border */
+  --answer-surface: #ffffff; /* clean white for assistant answers */
+  --answer-text: #0f172a;    /* deep cool text for assistant answers */
   --radius: 0px;
 }
 [data-theme="dark"] {
@@ -28,6 +33,10 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   --border: #1f2937;
   --text: #e5e7eb;
   --muted: #9ca3af;
+  --control-bg: #11161b;
+  --control-border: #243040;
+  --answer-surface: #0f172a;
+  --answer-text: #e5e7eb;
 }
 
 .container {
@@ -54,8 +63,8 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     display: block;
     position: fixed;
     inset: auto 0 0 0;
-    background: #ffffff;
-    border-top: 1px solid #e5e7eb;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
     max-height: 62svh;
     overflow: auto;
     transform: translateY(100%);
@@ -71,7 +80,7 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     right: 12px;
     bottom: 72px; /* keep clear of chat send input */
     z-index: 20;
-    background: #2563eb;
+    background: var(--accent);
     color: #ffffff;
     border: none;
     padding: 12px 14px;
@@ -79,39 +88,61 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     box-shadow: 0 6px 18px rgba(0,0,0,.2);
     font-weight: 600;
   }
-  /* Show inline menu toggle within input row on mobile */
-  .menu-toggle { display: inline-grid; }
+  /* Show inline menu toggle within input row on mobile; keep it a square */
+  .menu-toggle {
+    display: inline-grid;
+    height: auto;
+    min-height: 44px;
+    width: auto;
+    /* Match the input row control height exactly */
+    min-height: var(--control-min-height, 44px);
+    /* Ensure square by using computed height via line-height trick */
+    line-height: 0;
+    place-items: center;
+    padding: 0;
+  }
 }
 
 .surface { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-/* Use cream background for the chat pane */
-.chat.surface { background: var(--bg); }
+/* Chat pane with subtle playful game-parts pattern (very light) */
+.chat.surface {
+  background-color: var(--bg);
+  /* 24px icons with 24px gaps on a 48px grid. Two layers are offset to stagger rows */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='48' viewBox='0 0 240 48'><g fill='none' stroke='%23c7d5e7' stroke-opacity='0.6' stroke-width='1.4'><g transform='translate(12,12)'><circle cx='12' cy='6' r='6'/><path d='M6 22h12c0-6-3-10-6-10s-6 4-6 10z'/></g><g transform='translate(60,12)'><polygon points='12,0 9,4 6,6 9,10 8,16 12,13 16,16 15,10 18,6 15,4'/></g><g transform='translate(108,12)'><rect x='0' y='0' width='24' height='24' rx='4'/></g><g transform='translate(156,12)'><polygon points='12,2 20,8 20,16 12,22 4,16 4,8'/></g><g transform='translate(204,12)'><rect x='4' y='1' width='16' height='22' rx='2' transform='rotate(-12 12 12)'/></g></g><g fill='%23c7d5e7' fill-opacity='0.6'><g transform='translate(108,12)'><circle cx='6' cy='6' r='2'/><circle cx='12' cy='12' r='2'/><circle cx='18' cy='18' r='2'/></g></g></svg>"), url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='48' viewBox='0 0 240 48'><g fill='none' stroke='%23c7d5e7' stroke-opacity='0.6' stroke-width='1.4'><g transform='translate(12,12)'><circle cx='12' cy='6' r='6'/><path d='M6 22h12c0-6-3-10-6-10s-6 4-6 10z'/></g><g transform='translate(60,12)'><polygon points='12,0 9,4 6,6 9,10 8,16 12,13 16,16 15,10 18,6 15,4'/></g><g transform='translate(108,12)'><rect x='0' y='0' width='24' height='24' rx='4'/></g><g transform='translate(156,12)'><polygon points='12,2 20,8 20,16 12,22 4,16 4,8'/></g><g transform='translate(204,12)'><rect x='4' y='1' width='16' height='22' rx='2' transform='rotate(-12 12 12)'/></g></g><g fill='%23c7d5e7' fill-opacity='0.6'><g transform='translate(108,12)'><circle cx='6' cy='6' r='2'/><circle cx='12' cy='12' r='2'/><circle cx='18' cy='18' r='2'/></g></g></svg>");
+  /* Increase vertical spacing: 24px icon + 48px gap = 72px tile height */
+  background-size: 240px 72px, 240px 72px;
+  /* Stagger second layer more: 84px horizontally, half-tile vertically */
+  background-position: 0 0, 84px 36px;
+  background-repeat: repeat;
+}
 .row { display: flex; gap: 8px; align-items: center; }
 .title { padding: 8px 12px; font-weight: 700; text-align: center; font-size: 18px; color: var(--text); letter-spacing: -0.01em; }
 .subtitle { text-align: center; color: var(--muted); margin: 4px 0 8px; font-size: 14px; }
 .pad { padding: 8px; }
-.muted { color: #6b7280; }
-.chip { background: #f3f4f6; border: 1px solid #e5e7eb; padding: 6px 10px; border-radius: var(--radius); }
-.btn { background: #f3f4f6; color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 16px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, transform .05s ease, box-shadow .12s ease; -webkit-tap-highlight-color: transparent; }
+.muted { color: var(--muted); }
+.chip { background: var(--control-bg); border: 1px solid var(--control-border); padding: 6px 10px; border-radius: var(--radius); }
+.btn { background: var(--control-bg); color: var(--text); border: 1px solid var(--control-border); border-radius: var(--radius); padding: 10px 16px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, transform .05s ease, box-shadow .12s ease; -webkit-tap-highlight-color: transparent; }
 .btn.primary { background: var(--accent); color: #ffffff; border-color: var(--accent); border-radius: var(--radius); }
-.btn.ghost { background: transparent; border-color: #e5e7eb; }
+.btn.ghost { background: transparent; border-color: var(--control-border); }
 .btn.stop { background: #ef4444; color: #ffffff; border-color: #ef4444; }
-.btn:active { transform: translateY(1px); background-color: #e9ecef; }
+.btn:active { transform: translateY(1px); background-color: color-mix(in oklab, var(--control-bg) 85%, black 15%); }
 .btn.primary:active { background: color-mix(in oklab, var(--accent) 85%, black 15%); border-color: color-mix(in oklab, var(--accent) 85%, black 15%); }
 .btn.stop:active { background: color-mix(in oklab, #ef4444 85%, black 15%); border-color: color-mix(in oklab, #ef4444 85%, black 15%); }
 
 /* Simple spinner */
-.spinner { width: 18px; height: 18px; border: 2px solid #e5e7eb; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.spinner { width: 18px; height: 18px; border: 2px solid var(--control-border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .indicator { display: flex; align-items: center; }
 .select, .input {
-  background: #f3f4f6;
+  background: var(--control-bg);
   color: var(--text);
-  border: 1px solid var(--border);
+  border: 1px solid var(--control-border);
   padding: 12px 16px;
   border-radius: var(--radius);
   min-height: 44px; /* mobile-friendly target */
+  /* expose for other controls to match */
+  --control-min-height: 44px;
   font-size: 16px;
 }
 .select.compact { min-height: 36px; padding: 8px 12px; border-radius: var(--radius); font-size: 14px; }
@@ -140,11 +171,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 /* Extra separation between an answer and the next question */
 .bubble.assistant + .bubble.user { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); }
 .bubble.user { background: var(--accent); border: 1px solid var(--accent); color: #ffffff; margin-left: auto; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
-.bubble.assistant { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.bubble.assistant { background: var(--answer-surface); border: 1px solid var(--border); color: var(--answer-text); }
 .input-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 8px; }
 .input-row { align-items: stretch; }
 .input-row .actions { display: flex; gap: 8px; align-items: stretch; }
 .input-row .btn { min-height: 44px; height: 100%; }
+  /* Make Ask button define the row height; menu toggle inherits via grid auto-stretch */
+  .input-row .btn.primary { height: 100%; min-height: var(--control-min-height, 44px); }
 .input-row .btn.stop, .input-row .btn.primary { padding-top: 0; padding-bottom: 0; }
 .bookmark { display: block; width: 100%; text-align: left; padding: 10px 12px; margin: 8px 0; border: 1px solid var(--accent); border-radius: var(--radius); background: color-mix(in oklab, var(--accent) 16%, var(--surface)); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bookmark + .bookmark { margin-top: 6px; }
@@ -184,6 +217,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  /* Fill background with subtle right chevrons to imply time direction */
+  position: relative;
+  align-items: center;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='100' viewBox='0 0 24 100'><path d='M0 28 L22 50 L0 72' fill='none' stroke='%23c7d5e7' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' stroke-opacity='0.7'/></svg>");
+  background-size: 24px 100%;
+  background-repeat: repeat-x;
+  background-position: 0 center;
 }
 .history-strip::-webkit-scrollbar { height: 6px; }
 .history-strip::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius); }
@@ -194,8 +234,15 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   background: color-mix(in oklab, var(--accent) 16%, var(--surface));
   border-radius: var(--radius);
   font-size: 13px;
+  position: relative;
+  scroll-snap-align: start;
 }
 .history-pill:hover { background: color-mix(in oklab, var(--accent) 26%, var(--surface)); }
+.history-pill:first-child { opacity: 0.85; }
+.history-pill:last-child {
+  border-color: var(--accent-2);
+  background: color-mix(in oklab, var(--accent-2) 22%, var(--surface));
+}
 .bubble h4 { font-size: 0.90rem; }
 .bubble h5 { font-size: 0.90rem; }
 .bubble h6 { font-size: 0.90rem; }
@@ -203,12 +250,12 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 /* Minimal form layout spacing inspired by clean contact forms */
 .section { display: block; }
 .section > div, .section label { margin-bottom: 10px; }
-.section label span { font-size: 12px; color: #6b7280; }
+.section label span { font-size: 12px; color: var(--muted); }
 
 /* Primary button full-width on small screens for easy tap */
 @media (max-width: 900px) {
   .input-row .btn.primary { width: 100%; }
-  .history-strip { display: flex; }
+  .history-strip { display: flex; scroll-snap-type: x proximity; }
 }
 
 /* Desktop-only sidebar panel */

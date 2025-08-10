@@ -590,12 +590,14 @@ export default function HomePage() {
                           <button
                             className="btn"
                             title="Retry"
+                            aria-label="Retry"
                             onClick={() => { setRetryableUsers((cur) => cur.filter((n) => n !== userCounter)); startQuery(m.content, userCounter); }}
-                            style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)" }}
+                            style={{ width: 44, height: 44, minHeight: 44, padding: 0, fontSize: 18, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)", display: "inline-grid", placeItems: "center" }}
                           >↻</button>
                           <button
                             className="btn"
                             title="Delete"
+                            aria-label="Delete"
                             onClick={() => {
                               // Remove this user message
                               const targetUserIdx = userCounter;
@@ -617,7 +619,7 @@ export default function HomePage() {
                                 }
                               } catch {}
                             }}
-                            style={{ padding: "4px 8px", fontSize: 12, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)" }}
+                            style={{ width: 44, height: 44, minHeight: 44, padding: 0, fontSize: 18, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)", display: "inline-grid", placeItems: "center" }}
                           >✕</button>
                         </div>
                       </div>
@@ -653,9 +655,11 @@ export default function HomePage() {
 
             <div className="actions" style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
               {isStreaming ? (
-                <button className="btn stop" onClick={onStop}>Stop</button>
+                <button className="btn stop" onClick={onStop} style={{ height: 44, minHeight: 44, paddingTop: 0, paddingBottom: 0 }}>Stop</button>
               ) : (
-                <button className="btn primary" onClick={onSubmit} disabled={!selectedGame}>Send</button>
+                <button className="btn primary" onClick={onSubmit} disabled={!selectedGame} style={{ fontSize: 18 }}>
+                  Ask
+                </button>
               )}
               {/* Kebab to toggle the bottom sheet; placed to the right of Send */}
               <button
@@ -663,7 +667,6 @@ export default function HomePage() {
                 onClick={() => setSheetOpen((s) => !s)}
                 aria-label="Menu"
                 title="Menu"
-                style={{ width: 44, minHeight: 44, padding: 0, display: "inline-grid", placeItems: "center" }}
               >
                 ⋮
               </button>
