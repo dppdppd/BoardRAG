@@ -37,6 +37,8 @@ export default function HomePage() {
   const firstTokenSeenRef = useRef<boolean>(false);
   const lastSubmittedUserIndexRef = useRef<number>(-1);
   const [retryableUsers, setRetryableUsers] = useState<number[]>([]);
+  // Tracks whether any stream data has been received for the current request
+  const receivedStreamDataRef = useRef<boolean>(false);
 
   const addRetryable = (idx: number | null | undefined) => {
     if (idx == null || idx < 0) return;
@@ -380,6 +382,7 @@ export default function HomePage() {
       try {
         const parsed = JSON.parse(payload);
         if (parsed.type === "token") {
+          if (!receivedStreamDataRef.current) receivedStreamDataRef.current = true;
           acc += parsed.data;
           setMessages((cur) => {
             const last = cur[cur.length - 1];
@@ -391,8 +394,6 @@ export default function HomePage() {
           eventRef.current = null;
           setIsStreaming(false);
           removeRetryable(lastSubmittedUserIndexRef.current);
-          // Client-side breadcrumb to Admin console
-          try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `🤖 A: ${acc}` }) }); } catch {}
         } else if (parsed.type === "error") {
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
           eventRef.current = null;
@@ -458,6 +459,8 @@ export default function HomePage() {
     const es = new EventSource(url.toString());
     eventRef.current = es;
     const switchTimer = window.setTimeout(() => {
+      // If any data already arrived via SSE, don't start fetch fallback
+      if (receivedStreamDataRef.current) return;
       streamWithFetch();
     }, 1500);
     switchTimerRef.current = switchTimer as unknown as number;
@@ -472,6 +475,20 @@ export default function HomePage() {
       eventRef.current = null;
       // Try fetch-based streaming immediately on error
       try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `[client] SSE error; falling back to fetch` }) }); } catch {}
+      // If we already showed partial SSE output, clear it to avoid duplicate content when fetch restarts from the beginning
+      if (receivedStreamDataRef.current) {
+        receivedStreamDataRef.current = false;
+        acc = "";
+        setMessages((cur) => {
+          const last = cur[cur.length - 1];
+          if (last && last.role === 'assistant') {
+            const updated = [...cur];
+            updated[updated.length - 1] = { role: 'assistant', content: '' };
+            return updated;
+          }
+          return cur;
+        });
+      }
       streamWithFetch();
     };
   };
@@ -482,6 +499,7 @@ export default function HomePage() {
     // If this browser session was blocked, short-circuit locally without hitting the server
     try { if (sessionStorage.getItem("boardrag_blocked") === "1") { return; } } catch {}
     setInput("");
+    receivedStreamDataRef.current = false;
     startQuery(q, null);
   };
 
@@ -495,6 +513,7 @@ export default function HomePage() {
     // Clear any pending fallback timer
     if (switchTimerRef.current != null) { try { clearTimeout(switchTimerRef.current); } catch {} switchTimerRef.current = null; }
     setIsStreaming(false);
+    receivedStreamDataRef.current = false;
     addRetryable(lastSubmittedUserIndexRef.current);
   };
 
