@@ -508,7 +508,16 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                 if now - last_ping > 1:
                     yield b": ping\n\n"
                     last_ping = now
-                yield _sse_event({"type": "token", "data": chunk}).encode("utf-8")
+                # Further split large model chunks into smaller slices to encourage flushing
+                try:
+                    text = str(chunk)
+                except Exception:
+                    text = chunk
+                slice_size = 80
+                for i in range(0, len(text), slice_size):
+                    part = text[i:i+slice_size]
+                    if part:
+                        yield _sse_event({"type": "token", "data": part}).encode("utf-8")
             yield _sse_event({"type": "done", "meta": meta}).encode("utf-8")
         except Exception as e:  # pragma: no cover - runtime safety
             # Log to admin console for visibility
