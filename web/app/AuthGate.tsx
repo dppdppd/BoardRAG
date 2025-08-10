@@ -15,7 +15,8 @@ export default function AuthGate({ children }: Props) {
   useEffect(() => {
     try {
       const fromSession = sessionStorage.getItem("boardrag_role");
-      if (fromSession) {
+      const token = sessionStorage.getItem("boardrag_token");
+      if (fromSession && token) {
         setRole(fromSession);
         return;
       }
@@ -23,8 +24,8 @@ export default function AuthGate({ children }: Props) {
       const fromLocal = localStorage.getItem("boardrag_role");
       if (fromLocal) {
         sessionStorage.setItem("boardrag_role", fromLocal);
-        setRole(fromLocal);
-        return;
+        // Do not auto-unlock without token; force re-enter to obtain token
+        // setRole(fromLocal); // intentionally not setting role
       }
     } catch {}
     setRole("none");
@@ -43,6 +44,9 @@ export default function AuthGate({ children }: Props) {
       }
       const data = await resp.json();
       sessionStorage.setItem("boardrag_role", data.role || "user");
+      if (data.token) {
+        try { sessionStorage.setItem("boardrag_token", data.token); } catch {}
+      }
       setRole(data.role || "user");
     } catch (e) {
       setError("Network error");

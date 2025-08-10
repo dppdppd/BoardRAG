@@ -19,6 +19,7 @@ export default function ResetPage() {
         const keysToRemove = [
           "boardrag_role",
           "boardrag_session_id",
+          "boardrag_token",
         ];
         keysToRemove.forEach((k) => {
           try { localStorage.removeItem(k); } catch {}

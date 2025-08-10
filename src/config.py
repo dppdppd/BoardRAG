@@ -267,6 +267,20 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 USER_PW = os.getenv("USER_PW")
 ADMIN_PW = os.getenv("ADMIN_PW")
 
+# Server-issued auth token secret. If not provided, generate a per-process
+# ephemeral secret which will invalidate tokens on restart.
+AUTH_SECRET = os.getenv("AUTH_SECRET")
+if not AUTH_SECRET:
+    try:
+        import secrets as _secrets
+        AUTH_SECRET = _secrets.token_urlsafe(32)
+        print("[config] AUTH_SECRET not set; using ephemeral secret (tokens reset on restart)")
+    except Exception:
+        AUTH_SECRET = "change-me"
+
+# Token time-to-live in seconds
+AUTH_TOKEN_TTL_SECS = int(os.getenv("AUTH_TOKEN_TTL_SECS", "43200"))  # 12 hours
+
 
 def validate_config():
     """Validate that required configuration is present."""

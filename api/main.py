@@ -10,7 +10,7 @@ import uuid
 import time
 import re
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from src.query import stream_query_rag, get_available_games
 from src.services.library_service import rebuild_library, refresh_games, save_uploaded_files
 from src.services.game_service import delete_games, rename_pdfs, get_pdf_dropdown_choices
-from src.services.auth_service import unlock
+from src.services.auth_service import unlock, issue_token, verify_token
 from src.storage_utils import format_storage_info
 
 
@@ -235,7 +235,11 @@ async def auth_unlock(password: str = Form(...)):
     role = unlock(password)
     if role == "none":
         raise HTTPException(status_code=401, detail="invalid password")
-    return {"role": role}
+    try:
+        token = issue_token(role)
+    except Exception:
+        token = None
+    return {"role": role, "token": token}
 
 
 @app.post("/upload")
@@ -667,8 +671,31 @@ async def admin_log_stream():
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
+def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
+    if not authorization:
+        return None
+    try:
+        scheme, _, cred = authorization.partition(" ")
+        if scheme.lower() == "bearer" and cred:
+            return cred.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _require_auth(auth_header: Optional[str], token_param: Optional[str]) -> str:
+    # Accept either Bearer header or "token" query parameter (for EventSource)
+    token = _extract_bearer_token(auth_header) or (token_param or None)
+    ok, role = verify_token(token or "") if token else (False, None)
+    if not ok:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return role or "user"
+
+
 @app.get("/stream")
-async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None, sid: Optional[str] = None):
+async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None, sid: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _role = _require_auth(authorization, token)
     # Prepare inputs for existing stream_query_rag
     game_filter = [game] if game else None
     game_names_list = game_names.split(",") if game_names else ([game] if game else None)
@@ -821,7 +848,9 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
 # ----------------------------------------------------------------------------
 
 @app.get("/stream-ndjson")
-async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None, sid: Optional[str] = None):
+async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None, sid: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _role = _require_auth(authorization, token)
     game_filter = [game] if game else None
     game_names_list = game_names.split(",") if game_names else ([game] if game else None)
 

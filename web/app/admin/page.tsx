@@ -82,7 +82,15 @@ export default function AdminPage() {
   useEffect(() => {
     let es: EventSource | null = null;
     try {
-      es = new EventSource(`${API_BASE}/admin/log-stream`);
+      // Attach token to admin log stream as well if present
+      try {
+        const t = sessionStorage.getItem("boardrag_token");
+        const url = new URL(`${API_BASE}/admin/log-stream`);
+        if (t) url.searchParams.set("token", t);
+        es = new EventSource(url.toString());
+      } catch {
+        es = new EventSource(`${API_BASE}/admin/log-stream`);
+      }
       es.onmessage = (ev) => {
         try {
           const parsed = JSON.parse(ev.data);

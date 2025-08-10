@@ -375,6 +375,11 @@ export default function HomePage() {
     // Send stable browser session id for server-side blocking
     url.searchParams.set("sid", sessionId || "");
     url.searchParams.set("_", String(Date.now()));
+    // Include auth token for EventSource (which cannot send headers reliably)
+    try {
+      const token = sessionStorage.getItem("boardrag_token");
+      if (token) url.searchParams.set("token", token);
+    } catch {}
 
     // Unified SSE event handler (used by EventSource or fetch-stream parser)
     let acc = "";
@@ -439,6 +444,11 @@ export default function HomePage() {
     const streamWithFetch = async () => {
       try {
         const headers: any = NDJSON ? { Accept: 'application/x-ndjson' } : { Accept: 'text/event-stream' };
+        // Prefer Authorization header for fetch path if token present
+        try {
+          const t = sessionStorage.getItem("boardrag_token");
+          if (t) headers['Authorization'] = `Bearer ${t}`;
+        } catch {}
         // Create/replace an AbortController so Stop can cancel the fetch
         const controller = new AbortController();
         abortRef.current = controller;
