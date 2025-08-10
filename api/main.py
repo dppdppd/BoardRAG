@@ -497,45 +497,18 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
-        # Initial prelude to open the stream for proxies/CDNs. The 8KB padding
-        # mitigates buffering on more aggressive reverse proxies/CDNs.
-        yield b":" + b" " * 8192 + b"\n\n"
         try:
-            last_ping = time.time()
             for chunk in token_gen:
-                # Periodic heartbeat to defeat proxy buffering (every ~10s)
-                now = time.time()
-                if now - last_ping > 1:
-                    yield b": ping\n\n"
-                    last_ping = now
-                # Further split large model chunks into smaller slices to encourage flushing
-                try:
-                    text = str(chunk)
-                except Exception:
-                    text = chunk
-                slice_size = 80
-                for i in range(0, len(text), slice_size):
-                    part = text[i:i+slice_size]
-                    if part:
-                        yield _sse_event({"type": "token", "data": part}).encode("utf-8")
+                yield _sse_event({"type": "token", "data": chunk}).encode("utf-8")
             yield _sse_event({"type": "done", "meta": meta}).encode("utf-8")
         except Exception as e:  # pragma: no cover - runtime safety
-            # Log to admin console for visibility
             try:
                 await _admin_log_publish(f"❌ Query error: {str(e)}")
             except Exception:
                 pass
             yield _sse_event({"type": "error", "error": str(e)}).encode("utf-8")
 
-    headers = {
-        "Cache-Control": "no-cache, no-transform, private",
-        "Pragma": "no-cache",
-        "Connection": "keep-alive",
-        "Keep-Alive": "timeout=60",
-        "X-Accel-Buffering": "no",
-        "Content-Encoding": "identity",
-    }
-    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 
@@ -557,22 +530,9 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
-        # Padding to defeat buffering
-        yield (" " * 8192 + "\n").encode("utf-8")
-        last_ping = time.time()
         try:
             for chunk in token_gen:
-                now = time.time()
-                if now - last_ping > 1:
-                    yield (json.dumps({"type": "ping"}) + "\n").encode("utf-8")
-                    last_ping = now
-                # Split into smaller slices to improve flush
-                text = str(chunk)
-                slice_size = 80
-                for i in range(0, len(text), slice_size):
-                    part = text[i:i+slice_size]
-                    if part:
-                        yield (json.dumps({"type": "token", "data": part}) + "\n").encode("utf-8")
+                yield (json.dumps({"type": "token", "data": chunk}) + "\n").encode("utf-8")
             yield (json.dumps({"type": "done", "meta": meta}) + "\n").encode("utf-8")
         except Exception as e:
             try:
@@ -581,15 +541,7 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
                 pass
             yield (json.dumps({"type": "error", "error": str(e)}) + "\n").encode("utf-8")
 
-    headers = {
-        "Cache-Control": "no-cache, no-transform, private",
-        "Pragma": "no-cache",
-        "Connection": "keep-alive",
-        "Keep-Alive": "timeout=60",
-        "X-Accel-Buffering": "no",
-        "Content-Encoding": "identity",
-    }
-    return StreamingResponse(event_stream(), media_type="application/x-ndjson", headers=headers)
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 # ----------------------------------------------------------------------------
 # Admin: list/unblock blocked sessions

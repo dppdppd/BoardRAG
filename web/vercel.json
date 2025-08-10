@@ -1,0 +1,28 @@
+{
+  "rewrites": [
+    { "source": "/stream", "destination": "https://boardrag-production.up.railway.app/stream" },
+    { "source": "/stream-ndjson", "destination": "https://boardrag-production.up.railway.app/stream-ndjson" }
+  ],
+  "headers": [
+    {
+      "source": "/stream",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-transform, private" },
+        { "key": "Content-Encoding", "value": "identity" },
+        { "key": "Connection", "value": "keep-alive" },
+        { "key": "X-Accel-Buffering", "value": "no" }
+      ]
+    },
+    {
+      "source": "/stream-ndjson",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-transform, private" },
+        { "key": "Content-Encoding", "value": "identity" },
+        { "key": "Connection", "value": "keep-alive" },
+        { "key": "X-Accel-Buffering", "value": "no" }
+      ]
+    }
+  ]
+}
+
+

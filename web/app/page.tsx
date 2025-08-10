@@ -356,8 +356,8 @@ export default function HomePage() {
     };
     anchorToQuestion();
 
-    // Prefer NDJSON endpoint in production; SSE works locally
-    const NDJSON = (process.env.NEXT_PUBLIC_USE_NDJSON === '1') || (typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app'));
+    // Use original SSE endpoint by default; NDJSON only when explicitly enabled
+    const NDJSON = (process.env.NEXT_PUBLIC_USE_NDJSON === '1');
     const url = new URL(`${API_BASE}/${NDJSON ? 'stream-ndjson' : 'stream'}`);
     url.searchParams.set("q", question);
     url.searchParams.set("game", selectedGame);
@@ -438,7 +438,7 @@ export default function HomePage() {
     };
 
     // If production (or explicitly toggled), prefer fetch streaming immediately
-    const FORCE_FETCH = (process.env.NEXT_PUBLIC_SSE_FETCH === '1') || (typeof window !== 'undefined' && window.location.hostname.endsWith('.vercel.app'));
+    const FORCE_FETCH = (process.env.NEXT_PUBLIC_SSE_FETCH === '1');
     if (FORCE_FETCH) {
       streamWithFetch();
       return;
@@ -449,7 +449,7 @@ export default function HomePage() {
     eventRef.current = es;
     const switchTimer = window.setTimeout(() => {
       streamWithFetch();
-    }, 300);
+    }, 1500);
 
     es.onmessage = (ev) => {
       clearTimeout(switchTimer);
