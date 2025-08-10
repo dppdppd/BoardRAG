@@ -342,6 +342,25 @@ export default function HomePage() {
     };
   }, []);
 
+  // Enable mouse wheel to scroll the horizontal mobile history (map vertical wheel to horizontal scroll)
+  useEffect(() => {
+    const el = historyStripRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const target = el;
+      if (!target) return;
+      // Only act when horizontal overflow exists
+      if (target.scrollWidth <= target.clientWidth) return;
+      const primaryDelta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (primaryDelta === 0) return;
+      // Prevent page scroll and translate to horizontal scroll
+      e.preventDefault();
+      target.scrollLeft += primaryDelta;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => { el.removeEventListener('wheel', onWheel as any); };
+  }, []);
+
   const scrollToAssistant = (assistantIndex: number) => {
     const parent = chatScrollRef.current;
     if (!parent) return;
