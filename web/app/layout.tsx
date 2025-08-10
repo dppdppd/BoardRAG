@@ -1,5 +1,6 @@
 import "./globals.css";
 import AuthGate from "./AuthGate";
+import { Analytics } from "@vercel/analytics/react";
 
 export const metadata = {
   title: "BG-GPT",
@@ -15,6 +16,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <AuthGate>{children}</AuthGate>
+        <Analytics />
       </body>
     </html>
   );
