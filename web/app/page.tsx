@@ -372,21 +372,47 @@ export default function HomePage() {
     url.searchParams.set("game_names", selectedGame);
     // Send stable browser session id for server-side blocking
     url.searchParams.set("sid", sessionId || "");
-    url.searchParams.set("_", String(Date.now()));
+    const reqId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    url.searchParams.set("_", reqId);
+    const currentReqIdRef = { current: reqId } as { current: string };
 
     // Unified SSE event handler (used by EventSource or fetch-stream parser)
     let acc = "";
+    const mergeChunk = (previous: string, next: string): string => {
+      // Deduplicate overlaps when transport resends a boundary; look back up to 200 chars
+      const MAX_OVERLAP = 200;
+      const base = previous ?? "";
+      const piece = next ?? "";
+      if (!base) return piece;
+      if (!piece) return base;
+      const start = Math.max(0, base.length - MAX_OVERLAP);
+      const window = base.slice(start);
+      const max = Math.min(window.length, piece.length);
+      for (let k = max; k > 0; k--) {
+        if (window.slice(window.length - k) === piece.slice(0, k)) {
+          return base + piece.slice(k);
+        }
+      }
+      return base + piece;
+    };
     const handleSseData = (payload: string) => {
       try {
         const parsed = JSON.parse(payload);
         if (parsed.type === "token") {
-          acc += parsed.data;
+          // Guard: if a new request starts while a fallback arrives late, ignore mismatched req ids
+          if (typeof parsed.req === 'string' && parsed.req !== (url.searchParams.get('_req') || currentReqIdRef.current)) {
+            return;
+          }
+          acc = mergeChunk(acc, String(parsed.data));
           setMessages((cur) => {
             const last = cur[cur.length - 1];
             if (!last || last.role !== "assistant") return [...cur, { role: "assistant", content: acc }];
             const updated = [...cur]; updated[updated.length - 1] = { role: "assistant", content: acc }; return updated;
           });
         } else if (parsed.type === "done") {
+          if (typeof parsed.req === 'string' && parsed.req !== (url.searchParams.get('_req') || currentReqIdRef.current)) {
+            return;
+          }
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
           eventRef.current = null;
           setIsStreaming(false);

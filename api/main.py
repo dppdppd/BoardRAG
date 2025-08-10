@@ -6,6 +6,7 @@ from pathlib import Path
 import time
 from datetime import datetime
 from typing import AsyncIterator, Dict, List, Optional, Set
+import uuid
 import time
 import re
 
@@ -750,12 +751,15 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                 except Exception:
                     pass
             admin_acc = ""
+            req_id = str(uuid.uuid4())
+            seq = 0
             for chunk in token_gen:
                 # Slice into smaller chunks and yield control to event loop to encourage flushes
                 text = str(chunk)
                 slice_size = 64
                 if len(text) <= slice_size:
-                    yield _sse_event({"type": "token", "data": text}).encode("utf-8")
+                    yield _sse_event({"type": "token", "req": req_id, "i": seq, "data": text}).encode("utf-8")
+                    seq += 1
                     admin_acc += text
                     if echo_tokens:
                         try:
@@ -767,7 +771,8 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                     for i in range(0, len(text), slice_size):
                         part = text[i:i+slice_size]
                         if part:
-                            yield _sse_event({"type": "token", "data": part}).encode("utf-8")
+                            yield _sse_event({"type": "token", "req": req_id, "i": seq, "data": part}).encode("utf-8")
+                            seq += 1
                             admin_acc += part
                             if echo_tokens:
                                 try:
@@ -775,7 +780,7 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                                 except Exception:
                                     pass
                             await asyncio.sleep(0)
-            yield _sse_event({"type": "done", "meta": meta}).encode("utf-8")
+            yield _sse_event({"type": "done", "req": req_id, "meta": meta}).encode("utf-8")
             if echo_tokens:
                 try:
                     print("\n=========== STREAM END ===========")
@@ -843,15 +848,18 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
                 except Exception:
                     pass
             admin_acc = ""
+            req_id = str(uuid.uuid4())
+            seq = 0
             for chunk in token_gen:
                 admin_acc += str(chunk)
-                yield (json.dumps({"type": "token", "data": chunk}) + "\n").encode("utf-8")
+                yield (json.dumps({"type": "token", "req": req_id, "i": seq, "data": chunk}) + "\n").encode("utf-8")
+                seq += 1
                 if echo_tokens:
                     try:
                         print(str(chunk), end="", flush=True)
                     except Exception:
                         pass
-            yield (json.dumps({"type": "done", "meta": meta}) + "\n").encode("utf-8")
+            yield (json.dumps({"type": "done", "req": req_id, "meta": meta}) + "\n").encode("utf-8")
             if echo_tokens:
                 try:
                     print("\n===== STREAM (NDJSON) END =====")
