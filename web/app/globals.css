@@ -226,10 +226,6 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   /* Fill background with subtle right chevrons to imply time direction */
   position: relative;
   align-items: center;
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='100' viewBox='0 0 24 100'><path d='M0 28 L22 50 L0 72' fill='none' stroke='%23c7d5e7' stroke-width='3' stroke-linecap='round' stroke-linejoin='round' stroke-opacity='0.7'/></svg>");
-  background-size: 24px 100%;
-  background-repeat: repeat-x;
-  background-position: 0 center;
 }
 .history-strip::-webkit-scrollbar { height: 6px; }
 .history-strip::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius); }
@@ -285,6 +281,25 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 @media (max-width: 900px) {
   .input-row .btn.primary { width: 100%; }
   .history-strip { display: flex; scroll-snap-type: x proximity; gap: 0px; padding: 10px 12px; }
+  /* Faint background label across the mobile history strip */
+  .history-strip::before {
+    content: "Past Questions";
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    opacity: 0.12;
+    font-size: clamp(14px, 6vw, 28px);
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+  }
+  /* Ensure pills sit above the background text */
+  .history-strip > * { position: relative; z-index: 1; }
 }
 
 /* Desktop-only sidebar panel */
@@ -303,6 +318,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   padding: 8px 12px;
 }
 .sidebar-panel .bookmark { font-size: 13px; }
+
+/* Scrollable history list in sidebar to avoid pushing other controls */
+.sidebar-panel .history-list {
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 4px; /* room for scrollbar */
+}
 
 /* Admin tool panels with alternating backgrounds */
 .admin-tool {

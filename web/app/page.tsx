@@ -11,12 +11,62 @@ import { API_BASE } from "../lib/config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
+// Remove common Markdown formatting from a single-line string for use in history labels
+const stripMarkdown = (input: string): string => {
+  if (!input) return "";
+  let s = input;
+  // Remove leading/trailing whitespace
+  s = s.trim();
+  // Strip HTML tags
+  s = s.replace(/<[^>]+>/g, "");
+  // Images: ![alt](url) -> alt
+  s = s.replace(/!\[(.*?)\]\((.*?)\)/g, "$1");
+  // Links: [text](url) -> text
+  s = s.replace(/\[(.*?)\]\((.*?)\)/g, "$1");
+  // Headings at start: ### Title -> Title
+  s = s.replace(/^#{1,6}\s*/g, "");
+  // Blockquote marker at start: > quote -> quote
+  s = s.replace(/^>\s*/g, "");
+  // List markers at start: -, *, +, 1. -> (remove)
+  s = s.replace(/^\s*(?:[-*+]\s+|\d+\.\s+)/g, "");
+  // Bold: **text** or __text__ -> text
+  s = s.replace(/(\*\*|__)(.*?)\1/g, "$2");
+  // Italic: *text* or _text_ -> text
+  s = s.replace(/(\*|_)(.*?)\1/g, "$2");
+  // Strikethrough: ~~text~~ -> text
+  s = s.replace(/~~(.*?)~~/g, "$1");
+  // Inline code: `code` -> code
+  s = s.replace(/`([^`]+)`/g, "$1");
+  // Remove residual markdown escape backslashes
+  s = s.replace(/\\([\\`*_{}\[\]()#+\-.!])/g, "$1");
+  // Collapse whitespace
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+};
+
 export default function HomePage() {
   // State
   const [sessionId, setSessionId] = useState<string>("");
   const { data: gamesData, mutate: refetchGames, isLoading: loadingGames, error: gamesError } = useSWR<{ games: string[] }>(`${API_BASE}/games`, fetcher);
   const [selectedGame, setSelectedGame] = useState<string | "">("");
   const [includeWeb, setIncludeWeb] = useState<boolean>(false);
+  type PromptStyle =
+    | "default"
+    | "brief"
+    | "detailed"
+    | "step_by_step"
+    | "flashcard"
+    | "mnemonic"
+    | "analogy"
+    | "story"
+    | "checklist"
+    | "comparison"
+    | "mistakes"
+    | "if_then"
+    | "teach_back"
+    | "example_first"
+    | "self_quiz";
+  const [promptStyle, setPromptStyle] = useState<PromptStyle>("default");
   const [model, setModel] = useState<string>("[Anthropic] Claude Sonnet 4");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState<string>("");
@@ -37,6 +87,7 @@ export default function HomePage() {
   const firstTokenSeenRef = useRef<boolean>(false);
   const lastSubmittedUserIndexRef = useRef<number>(-1);
   const [retryableUsers, setRetryableUsers] = useState<number[]>([]);
+  const [showHoldHint, setShowHoldHint] = useState<boolean>(false);
   // Active stream request id as announced by the server; used to ignore late chunks from older streams
   const streamReqIdRef = useRef<string | null>(null);
 
@@ -145,6 +196,27 @@ export default function HomePage() {
     try { localStorage.setItem("boardrag_last_game", selectedGame); } catch {}
   }, [selectedGame]);
 
+  // Load prompt style per game when game changes
+  useEffect(() => {
+    if (!selectedGame) return;
+    try {
+      const key = `boardrag_style:${selectedGame}`;
+      const saved = localStorage.getItem(key) as PromptStyle | null;
+      setPromptStyle(saved || "default");
+    } catch {
+      setPromptStyle("default");
+    }
+  }, [selectedGame]);
+
+  // Persist prompt style per game when it changes
+  useEffect(() => {
+    if (!selectedGame) return;
+    try {
+      const key = `boardrag_style:${selectedGame}`;
+      localStorage.setItem(key, promptStyle);
+    } catch {}
+  }, [promptStyle, selectedGame]);
+
   // Do not auto-scroll on every token; we'll control scroll when an answer starts
   useEffect(() => {
     // intentionally empty to avoid continuous auto scroll during streaming
@@ -161,7 +233,8 @@ export default function HomePage() {
         userCount += 1;
       } else if (m.role === "assistant") {
         const first = m.content.split("\n").find((l) => l.trim().length > 0) || m.content;
-        const trimmed = first.replace(/^[#*\s]+/, "").slice(0, 60);
+        const cleaned = stripMarkdown(first);
+        const trimmed = cleaned.slice(0, 60);
         labels.push(trimmed);
         userIdxs.push(Math.max(0, userCount - 1));
       }
@@ -301,6 +374,19 @@ export default function HomePage() {
     } catch {}
   };
 
+  // Clear entire conversation history for the current game
+  const clearAllHistory = () => {
+    if (!selectedGame) return;
+    if (!messages || messages.length === 0) return;
+    const emptied: Message[] = [];
+    setMessages(emptied);
+    setRetryableUsers([]);
+    try {
+      const key = `boardrag_conv:${sessionId}:${selectedGame}`;
+      localStorage.setItem(key, JSON.stringify(emptied));
+    } catch {}
+  };
+
   // Build long-press handlers for history pills
   const longPressHandlers = (assistantIndex: number) => {
     let timer: any;
@@ -321,6 +407,27 @@ export default function HomePage() {
       onMouseLeave: clear,
       onTouchStart: start,
       onTouchEnd: (e: any) => { clear(); if (!triggered) scrollToAssistant(assistantIndex); },
+    } as any;
+  };
+
+  // Long-press handler for clearing all history (no extra confirm; long-press is the confirmation)
+  const longPressClearAllHandlers = () => {
+    let timer: any;
+    let triggered = false;
+    const start = () => {
+      triggered = false;
+      timer = setTimeout(() => {
+        triggered = true;
+        clearAllHistory();
+      }, 600);
+    };
+    const clear = () => { if (timer) clearTimeout(timer); };
+    return {
+      onMouseDown: start,
+      onMouseUp: (_e: any) => { const wasTriggered = triggered; clear(); if (!wasTriggered) { setShowHoldHint(true); setTimeout(() => setShowHoldHint(false), 1200); } },
+      onMouseLeave: clear,
+      onTouchStart: start,
+      onTouchEnd: (_e: any) => { const wasTriggered = triggered; clear(); if (!wasTriggered) { setShowHoldHint(true); setTimeout(() => setShowHoldHint(false), 1200); } },
     } as any;
   };
 
@@ -362,8 +469,44 @@ export default function HomePage() {
 
     // Use original SSE endpoint by default; NDJSON only when explicitly enabled
     const NDJSON = (process.env.NEXT_PUBLIC_USE_NDJSON === '1');
+    const applyPromptStyle = (q: string, style: PromptStyle): string => {
+      // Append single-line ASCII instructions to avoid issues with SSE URLs
+      switch (style) {
+        case "brief":
+          return `${q} Instruction: Answer extremely concisely in 1-3 short sentences or a compact bulleted list.`;
+        case "detailed":
+          return `${q} Instruction: Provide a thorough, step-by-step explanation with relevant details and examples.`;
+        case "step_by_step":
+          return `${q} Instruction: Explain as numbered steps from setup to outcome; keep each step short.`;
+        case "flashcard":
+          return `${q} Instruction: Format as a flashcard: Question, then a concise Answer.`;
+        case "mnemonic":
+          return `${q} Instruction: Include a short mnemonic or memory hook that captures the rule.`;
+        case "analogy":
+          return `${q} Instruction: Provide a simple analogy that maps the concept to everyday situations.`;
+        case "story":
+          return `${q} Instruction: Give a brief in-game scenario demonstrating the rule in action.`;
+        case "checklist":
+          return `${q} Instruction: Output a checklist of 3-7 items to apply the rule during play.`;
+        case "comparison":
+          return `${q} Instruction: Compare and contrast with the two most similar rules in 2-3 concise lines.`;
+        case "mistakes":
+          return `${q} Instruction: List the top 3 common mistakes and how to avoid them.`;
+        case "if_then":
+          return `${q} Instruction: Express as concise if-then bullets covering typical edge cases.`;
+        case "teach_back":
+          return `${q} Instruction: End with one sentence the user could say to teach this to a friend.`;
+        case "example_first":
+          return `${q} Instruction: Begin with a concrete example, then state the general rule.`;
+        case "self_quiz":
+          return `${q} Instruction: End with 2 short self-quiz questions to check understanding.`;
+        default:
+          return q;
+      }
+    };
+    const augmentedQuestion = applyPromptStyle(question, promptStyle);
     const url = new URL(`${API_BASE}/${NDJSON ? 'stream-ndjson' : 'stream'}`);
-    url.searchParams.set("q", question);
+    url.searchParams.set("q", augmentedQuestion);
     url.searchParams.set("game", selectedGame);
     url.searchParams.set("include_web", String(includeWeb));
     url.searchParams.set("history", workingMessages
@@ -633,19 +776,34 @@ export default function HomePage() {
             {bookmarkLabels.length === 0 ? (
               <div className="muted" style={{ fontSize: 12 }}>No history yet</div>
             ) : (
-              bookmarkLabels.map((b, i) => (
-                <button
-                  key={i}
-                  className="history-pill btn"
-                  onClick={(e) => {
-                    if (historyDraggingFlag.current || historyDragRef.current.dragged) return; // ignore click if just dragged
-                    scrollToAssistant(bookmarkUserIndices[i]);
-                  }}
-                  {...longPressHandlers(i)}
-                >
-                  {b}
-                </button>
-              ))
+              <>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    className="history-pill btn"
+                    title="Hold to clear history"
+                    aria-label="Hold to clear history"
+                    {...longPressClearAllHandlers()}
+                  >
+                    CLEAR ALL
+                  </button>
+                  {showHoldHint && (
+                    <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Hold to clear history</span>
+                  )}
+                </div>
+                {bookmarkLabels.map((b, i) => (
+                  <button
+                    key={i}
+                    className="history-pill btn"
+                    onClick={(e) => {
+                      if (historyDraggingFlag.current || historyDragRef.current.dragged) return; // ignore click if just dragged
+                      scrollToAssistant(bookmarkUserIndices[i]);
+                    }}
+                    {...longPressHandlers(i)}
+                  >
+                    {b}
+                  </button>
+                ))}
+              </>
             )}
           </div>
 
@@ -765,11 +923,22 @@ export default function HomePage() {
         {/* Sidebar (desktop only) */}
         <div className="sidebar-panel">
           <section className="surface pad section">
-            <summary>History</summary>
-            {bookmarkLabels.length === 0 ? (
-              <div className="muted" style={{ fontSize: 13 }}>No bookmarks yet</div>
-            ) : (
-              <div style={{ marginTop: 8 }}>
+            <summary>Past Questions</summary>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
+              {bookmarkLabels.length > 0 ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button className="btn" title="Hold to clear history" aria-label="Hold to clear history" {...longPressClearAllHandlers()}>
+                    CLEAR ALL
+                  </button>
+                  <span className="muted" style={{ fontSize: 12, visibility: showHoldHint ? 'visible' : 'hidden' }}>Hold to clear history</span>
+                </div>
+              ) : (
+                <div className="muted" style={{ fontSize: 13 }}>No bookmarks yet</div>
+              )}
+              <div />
+            </div>
+            {bookmarkLabels.length > 0 && (
+              <div className="history-list" style={{ marginTop: 8 }}>
                 {bookmarkLabels.map((b, i) => (
                   <button key={i} className="bookmark btn" {...longPressHandlers(i)} onClick={() => scrollToAssistant(bookmarkUserIndices[i])}>
                     {b}
@@ -799,6 +968,30 @@ export default function HomePage() {
                   {games.map((g) => (
                     <option key={g} value={g}>{g}</option>
                   ))}
+                </select>
+              </label>
+              <label style={{ display: "grid", gap: 6 }}>
+                <span className="muted">Style (saved per game)</span>
+                <select
+                  className="select"
+                  value={promptStyle}
+                  onChange={(e) => setPromptStyle((e.target.value as any) || "default")}
+                >
+                  <option value="default">Normal</option>
+                  <option value="brief">Brief</option>
+                  <option value="detailed">Detailed</option>
+                  <option value="step_by_step">Step-by-step</option>
+                  <option value="flashcard">Flashcard (Q→A)</option>
+                  <option value="mnemonic">Mnemonic</option>
+                  <option value="analogy">Analogy</option>
+                  <option value="story">Story/Scenario</option>
+                  <option value="checklist">Checklist</option>
+                  <option value="comparison">Comparison</option>
+                  <option value="mistakes">Common mistakes + fixes</option>
+                  <option value="if_then">If–then rules</option>
+                  <option value="teach_back">Teach-back</option>
+                  <option value="example_first">Example-first</option>
+                  <option value="self_quiz">Self-quiz</option>
                 </select>
               </label>
               <label className="row" style={{ gap: 10 }}>
@@ -861,6 +1054,30 @@ export default function HomePage() {
                 {games.map((g) => (
                   <option key={g} value={g}>{g}</option>
                 ))}
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 6 }}>
+              <span className="muted">Answer style (saved per game)</span>
+              <select
+                className="select"
+                value={promptStyle}
+                onChange={(e) => setPromptStyle((e.target.value as any) || "default")}
+              >
+                <option value="default">Normal</option>
+                <option value="brief">Brief</option>
+                <option value="detailed">Detailed</option>
+                <option value="step_by_step">Step-by-step</option>
+                <option value="flashcard">Flashcard (Q→A)</option>
+                <option value="mnemonic">Mnemonic</option>
+                <option value="analogy">Analogy</option>
+                <option value="story">Story/Scenario</option>
+                <option value="checklist">Checklist</option>
+                <option value="comparison">Comparison</option>
+                <option value="mistakes">Common mistakes + fixes</option>
+                <option value="if_then">If–then rules</option>
+                <option value="teach_back">Teach-back</option>
+                <option value="example_first">Example-first</option>
+                <option value="self_quiz">Self-quiz</option>
               </select>
             </label>
             <label className="row" style={{ gap: 10 }}>
