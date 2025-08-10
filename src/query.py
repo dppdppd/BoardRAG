@@ -64,6 +64,10 @@ from . import config as cfg
 # Verbose logging toggle (set VERBOSE=true to enable extra prints)
 # ---------------------------------------------------------------------------
 VERBOSE_LOGGING = os.getenv("VERBOSE", "False").lower() in {"1", "true", "yes"}
+# Performance knobs (env-tunable)
+RAG_MAX_DOCS = int(os.getenv("RAG_MAX_DOCS", "12"))  # how many top docs to include
+RAG_CONTEXT_CHAR_LIMIT = int(os.getenv("RAG_CONTEXT_CHAR_LIMIT", "8000"))  # cap context size
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))  # cap model output for quicker replies
 REQUEST_TIMEOUT_S = float(os.getenv("LLM_REQUEST_TIMEOUT", "60"))
 STREAM_TIMEOUT_S = float(os.getenv("LLM_STREAM_TIMEOUT", "90"))
 
@@ -675,7 +679,8 @@ def query_rag(
 
 
     # Get results from database (more if filtering is needed)
-    k_results = 200 if selected_game else 40  # balanced pool size for game-specific searches
+    # Fewer retrievals yield faster prompts; keep small but sufficient
+    k_results = 40 if selected_game else 20
             # Try server-side metadata filtering first (if supported)
     metadata_filter = None
     if selected_game:
@@ -744,7 +749,8 @@ def query_rag(
             )
 
     # Server-side filtering already handled game selection
-    results = all_results
+    # Keep only the top-N results for prompt building
+    results = all_results[: RAG_MAX_DOCS]
     print(f"  Found {len(results)} results")
     if results:
         print(f"  Best match score: {results[0][1]:.4f}")
@@ -779,7 +785,20 @@ def query_rag(
 
     # Build the prompt
     print("🔮 Building the prompt …")
-    context_text = "\n\n---\n\n".join([doc.page_content for doc, _score in results])
+    # Build context with a hard character cap
+    parts = []
+    used = 0
+    for doc, _score in results:
+        t = doc.page_content
+        if not t:
+            continue
+        if used + len(t) + 8 > RAG_CONTEXT_CHAR_LIMIT:
+            t = t[: max(0, RAG_CONTEXT_CHAR_LIMIT - used)]
+        parts.append(t)
+        used += len(t) + 8
+        if used >= RAG_CONTEXT_CHAR_LIMIT:
+            break
+    context_text = "\n\n---\n\n".join(parts)
 
     # Combine chat history with the latest question so the LLM has conversational context
     if chat_history:
@@ -820,14 +839,14 @@ def query_rag(
         # Import here to avoid requiring Ollama for OpenAI users.
         from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
 
-        model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL, **model_kwargs)
+        model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL, num_predict=LLM_MAX_TOKENS, **model_kwargs)
     elif cfg.LLM_PROVIDER.lower() == "anthropic":
-        model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0, **model_kwargs)
+        model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS, **model_kwargs)
     elif cfg.LLM_PROVIDER.lower() == "openai":
         if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
-            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, max_tokens=LLM_MAX_TOKENS, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
         else:
-            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
     else:
         raise ValueError(
             f"Unsupported LLM_PROVIDER: {LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
