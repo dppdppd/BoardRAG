@@ -21,11 +21,13 @@ export default function AdminPage() {
     { revalidateOnMount: true, revalidateOnFocus: true }
   );
   const { data: storageData, mutate: refetchStorage } = useSWR<{ markdown: string }>(`${API_BASE}/storage`, fetcher);
+  const { data: blockedData, mutate: refetchBlocked } = useSWR<{ sessions: { sid: string; since?: string | null }[] }>(`${API_BASE}/admin/blocked`, fetcher, { revalidateOnFocus: true });
   const appendConsole = (line: string) => setConsoleText((cur) => (cur ? cur + "\n" + line : line));
 
   const [deleteSelection, setDeleteSelection] = useState<string[]>([]);
   const [renameSelection, setRenameSelection] = useState<string[]>([]);
   const [newName, setNewName] = useState<string>("");
+  const [unblockSelection, setUnblockSelection] = useState<string[]>([]);
 
   // --- Global Model Selector (applies to all users) -------------------------
   const [modelLabel, setModelLabel] = useState<string>("");
@@ -212,6 +214,7 @@ export default function AdminPage() {
 
   const games = gamesData?.games || [];
   const pdfChoices = pdfChoicesData?.choices || [];
+  const blockedSessions = blockedData?.sessions || [];
 
   const saveModel = async () => {
     setSavingModel(true);
@@ -232,6 +235,24 @@ export default function AdminPage() {
     }
   };
 
+  const unblockSelected = async () => {
+    if (unblockSelection.length === 0) return;
+    try {
+      const resp = await fetch(`${API_BASE}/admin/blocked/unblock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sids: unblockSelection }),
+      });
+      const data = await resp.json();
+      if (data?.message) appendConsole(data.message);
+      setMessage(data?.message || "");
+      setUnblockSelection([]);
+      await refetchBlocked();
+    } catch (e) {
+      appendConsole("❌ Failed to unblock sessions");
+    }
+  };
+
   return (
     <div style={{ display: "grid", gap: 8, padding: 8, gridTemplateColumns: "1fr", height: "100vh", overflowY: "auto", alignContent: "start", fontSize: 14 }}>
       {message && <div style={{ color: "#444", background: "#f3f3f3", padding: 6, borderRadius: 4 }}>{message}</div>}
@@ -245,6 +266,35 @@ export default function AdminPage() {
           <button onClick={refresh} disabled={busy!==null} style={{ padding: "6px 10px" }}>
             {busy === "refresh" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Processing…</span>) : "🔄 Process New PDFs"}
           </button>
+        </div>
+      </div>
+
+      <div className="admin-tool alt">
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Blocked Sessions</h3>
+        <div style={{ display: "grid", gap: 6 }}>
+          {blockedSessions.length === 0 ? (
+            <div className="muted" style={{ fontSize: 13 }}>No blocked sessions</div>
+          ) : (
+            <>
+              <select
+                multiple
+                size={Math.min(8, Math.max(3, blockedSessions.length))}
+                value={unblockSelection}
+                onChange={(e) => setUnblockSelection(Array.from(e.target.selectedOptions).map((o) => o.value))}
+                style={{ width: "100%", fontSize: 12, padding: 4 }}
+              >
+                {blockedSessions.map((s) => (
+                  <option key={s.sid} value={s.sid} title={s.sid}>
+                    {s.sid} {s.since ? `(since ${new Date(s.since).toLocaleString()})` : ""}
+                  </option>
+                ))}
+              </select>
+              <div>
+                <button onClick={unblockSelected} disabled={unblockSelection.length === 0} style={{ padding: "6px 10px" }}>Unblock Selected</button>
+                <button onClick={() => refetchBlocked()} style={{ padding: "6px 10px", marginLeft: 6 }}>Refresh</button>
+              </div>
+            </>
+          )}
         </div>
       </div>
 

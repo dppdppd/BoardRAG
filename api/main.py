@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+import time
+from datetime import datetime
 from typing import AsyncIterator, Dict, List, Optional, Set
+import time
+import re
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -322,6 +326,91 @@ def _sse_event(data: Dict) -> str:
 
 _admin_log_subscribers: Set[asyncio.Queue[str]] = set()
 
+# ----------------------------------------------------------------------------
+# Abuse/off-topic prefilter and per-session blocking
+# ----------------------------------------------------------------------------
+
+# In-memory set of blocked browser session ids. When a session id is present
+# here, any subsequent queries will immediately receive an error SSE event
+# without invoking any model logic.
+_blocked_sessions: Set[str] = set()
+_blocked_sessions_since: Dict[str, float] = {}
+
+
+_SUSPICIOUS_PATTERNS = [
+    r"\bjailbreak\b",
+    r"\bDAN\b",
+    r"\bdeveloper\s+mode\b",
+    r"\bsystem\s+prompt\b",
+    r"\bignore\s+(all\s+)?previous\s+(instructions|directions)\b",
+    r"\bprompt\s*injection\b",
+    r"\bexploit\b",
+    r"\bhack(?:ing|)\b",
+    r"\bSQL\s+injection\b",
+    r"\bpasswords?\b",
+    r"\bcredit\s+card\b",
+    r"\bssn\b",
+    r"\bterror\b",
+    r"\bbomb\b",
+    r"\bkill\b",
+    r"\bviolence\b",
+    r"\bporn\b",
+    r"\bsex(?:ual|)\b",
+]
+
+_DEV_OFFTOPIC = [
+    r"\bpython\b",
+    r"\bjavascript\b",
+    r"\btypescript\b",
+    r"\breact\b",
+    r"\bsql\b",
+    r"\bdocker\b",
+    r"\bkubernetes\b",
+    r"\bapi\b",
+    r"\bserver\b",
+    r"\bnpm\b",
+]
+
+_BOARDGAME_TERMS = [
+    r"\brules?\b",
+    r"\bsetup\b",
+    r"\bturn\b",
+    r"\bcards?\b",
+    r"\bdice\b",
+    r"\bboard\b",
+    r"\bmeeples?\b",
+    r"\bscor(?:e|ing)\b",
+    r"\bwin(?:ning)?\s+conditions?\b",
+]
+
+
+def _prefilter_bad_actor(query: str, game: Optional[str]) -> bool:
+    """Return True if the query appears abusive or clearly off-topic.
+
+    This is intentionally conservative to avoid false positives. It blocks only
+    when strong signals are present: jailbreak/injection attempts, explicit
+    sexual/violent/illegal content, or clearly off-topic developer/hacking
+    topics with no board-game context or selected game reference.
+    """
+    q = (query or "").lower()
+    if not q:
+        return False
+
+    # Strong abuse/injection signals
+    for pat in _SUSPICIOUS_PATTERNS:
+        if re.search(pat, q, flags=re.IGNORECASE):
+            return True
+
+    # Off-topic developer/hacking topics without any board-game context
+    contains_dev = any(re.search(p, q, flags=re.IGNORECASE) for p in _DEV_OFFTOPIC)
+    has_boardgame_context = any(re.search(p, q, flags=re.IGNORECASE) for p in _BOARDGAME_TERMS)
+    mentions_selected_game = bool((game or "").strip()) and (game or "").strip().lower() in q
+
+    if contains_dev and not has_boardgame_context and not mentions_selected_game:
+        return True
+
+    return False
+
 
 async def _admin_log_publish(line: str) -> None:
     # Push to all subscribers (best-effort)
@@ -361,10 +450,43 @@ async def admin_log_stream():
 
 
 @app.get("/stream")
-async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None):
+async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[bool] = None, history: Optional[str] = None, game_names: Optional[str] = None, sid: Optional[str] = None):
     # Prepare inputs for existing stream_query_rag
     game_filter = [game] if game else None
     game_names_list = game_names.split(",") if game_names else ([game] if game else None)
+
+    # If this browser session is already blocked, short-circuit with an error
+    if sid and sid in _blocked_sessions:
+        async def blocked_stream() -> AsyncIterator[bytes]:
+            yield _sse_event({"type": "error", "error": "blocked"}).encode("utf-8")
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(blocked_stream(), media_type="text/event-stream", headers=headers)
+
+    # Run prefilter to detect abuse/off-topic before touching any model
+    try:
+        if _prefilter_bad_actor(q, game):
+            if sid:
+                _blocked_sessions.add(sid)
+                try:
+                    _blocked_sessions_since[sid] = time.time()
+                except Exception:
+                    pass
+            async def flagged_stream() -> AsyncIterator[bytes]:
+                yield _sse_event({"type": "error", "error": "blocked"}).encode("utf-8")
+            headers = {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+            return StreamingResponse(flagged_stream(), media_type="text/event-stream", headers=headers)
+    except Exception:
+        # If prefilter itself fails, do not block; fall through to normal handling
+        # (we avoid false positives due to internal errors)
+        pass
 
     token_gen, meta = stream_query_rag(
         query_text=q,
@@ -375,18 +497,78 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
     )
 
     async def event_stream() -> AsyncIterator[bytes]:
+        # Initial prelude to open the stream for proxies/CDNs
+        yield b": open\n\n"
         try:
+            last_ping = time.time()
             for chunk in token_gen:
+                # Periodic heartbeat to defeat proxy buffering (every ~10s)
+                now = time.time()
+                if now - last_ping > 10:
+                    yield b": ping\n\n"
+                    last_ping = now
                 yield _sse_event({"type": "token", "data": chunk}).encode("utf-8")
             yield _sse_event({"type": "done", "meta": meta}).encode("utf-8")
         except Exception as e:  # pragma: no cover - runtime safety
+            # Log to admin console for visibility
+            try:
+                await _admin_log_publish(f"❌ Query error: {str(e)}")
+            except Exception:
+                pass
             yield _sse_event({"type": "error", "error": str(e)}).encode("utf-8")
 
     headers = {
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
+
+# ----------------------------------------------------------------------------
+# Admin: list/unblock blocked sessions
+# ----------------------------------------------------------------------------
+
+@app.get("/admin/blocked")
+async def admin_list_blocked():
+    sessions = []
+    for sid in sorted(_blocked_sessions):
+        ts = _blocked_sessions_since.get(sid)
+        since = None
+        if ts:
+            try:
+                since = datetime.utcfromtimestamp(ts).isoformat() + "Z"
+            except Exception:
+                since = None
+        sessions.append({"sid": sid, "since": since})
+    return {"sessions": sessions}
+
+
+class UnblockPayload(BaseModel):
+    sids: List[str]
+
+
+@app.post("/admin/blocked/unblock")
+async def admin_unblock_sessions(payload: UnblockPayload):
+    removed = 0
+    for sid in payload.sids or []:
+        if sid in _blocked_sessions:
+            _blocked_sessions.discard(sid)
+            try:
+                _blocked_sessions_since.pop(sid, None)
+            except Exception:
+                pass
+            removed += 1
+    # Return updated list for convenience
+    sessions = []
+    for sid in sorted(_blocked_sessions):
+        ts = _blocked_sessions_since.get(sid)
+        since = None
+        if ts:
+            try:
+                since = datetime.utcfromtimestamp(ts).isoformat() + "Z"
+            except Exception:
+                since = None
+        sessions.append({"sid": sid, "since": since})
+    return {"message": f"Unblocked {removed} session(s)", "sessions": sessions}
