@@ -11,27 +11,24 @@ export default function ResetPage() {
     try {
       // Always clear session-only data (role, etc.)
       sessionStorage.clear();
+      // Remove auth-related items from localStorage (preserve conversations by default)
+      ["boardrag_role", "boardrag_token", "boardrag_saved_pw"].forEach((k) => {
+        try { localStorage.removeItem(k); } catch {}
+      });
 
-      // Optional: also clear select localStorage keys when ?all=1
+      // If all=1, clear everything app-related (auth + conversations + prefs + session id)
       const clearAll = params.get("all") === "1";
       if (clearAll) {
-        // Only remove app-related keys to avoid being destructive
-        const keysToRemove = [
-          "boardrag_role",
-          "boardrag_session_id",
-          "boardrag_token",
-          "boardrag_saved_pw",
-        ];
-        keysToRemove.forEach((k) => {
-          try { localStorage.removeItem(k); } catch {}
-        });
-        // Remove any per-conversation entries
         try {
           const toDelete: string[] = [];
           for (let i = 0; i < localStorage.length; i++) {
             const key = localStorage.key(i);
             if (!key) continue;
+            // Delete all known app keys
+            if (key === "boardrag_session_id") toDelete.push(key);
+            if (key === "boardrag_last_game") toDelete.push(key);
             if (key.startsWith("boardrag_conv:")) toDelete.push(key);
+            if (key.startsWith("boardrag_style:")) toDelete.push(key);
           }
           toDelete.forEach((k) => localStorage.removeItem(k));
         } catch {}

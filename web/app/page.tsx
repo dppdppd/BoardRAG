@@ -621,6 +621,18 @@ export default function HomePage() {
         const controller = new AbortController();
         abortRef.current = controller;
         const resp = await fetch(url.toString(), { headers, cache: "no-store", signal: controller.signal });
+        // If unauthorized, force full reset and re-login
+        if (!resp.ok && resp.status === 401) {
+          try {
+            sessionStorage.removeItem("boardrag_role");
+            sessionStorage.removeItem("boardrag_token");
+            localStorage.removeItem("boardrag_role");
+            localStorage.removeItem("boardrag_token");
+            localStorage.removeItem("boardrag_saved_pw");
+          } catch {}
+          try { window.location.href = "/reset"; } catch {}
+          return;
+        }
         const reader = resp.body?.getReader();
         if (!reader) throw new Error("no reader");
         const decoder = new TextDecoder();
@@ -704,10 +716,23 @@ export default function HomePage() {
       sseReceived = true;
       handleSseData(ev.data);
     };
-    es.onerror = () => {
+    es.onerror = (ev: any) => {
       clearTimeout(switchTimer);
       try { es.close(); } catch {}
       eventRef.current = null;
+      // If the server immediately closed due to auth, force reset; otherwise fallback to fetch
+      try {
+        // Heuristic: if we have no token anywhere, force reset (non-destructive); else try fetch fallback
+        const st = sessionStorage.getItem('boardrag_token');
+        const lt = localStorage.getItem('boardrag_token');
+        if (!st && !lt) {
+          sessionStorage.removeItem('boardrag_role');
+          localStorage.removeItem('boardrag_role');
+          localStorage.removeItem('boardrag_saved_pw');
+          window.location.href = '/reset';
+          return;
+        }
+      } catch {}
       // Try fetch-based streaming immediately on error
       try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `[client] SSE error; falling back to fetch` }) }); } catch {}
       streamWithFetch();

@@ -127,11 +127,21 @@ export default function AdminPage() {
         if (!t) t = localStorage.getItem("boardrag_token");
         if (t) headers["Authorization"] = `Bearer ${t}`;
       } catch {}
-      await fetch(`${API_BASE}/admin/log`, {
+      const resp = await fetch(`${API_BASE}/admin/log`, {
         method: "POST",
         headers,
         body: JSON.stringify({ line }),
       });
+      if (!resp.ok && resp.status === 401) {
+        try {
+          sessionStorage.removeItem("boardrag_role");
+          sessionStorage.removeItem("boardrag_token");
+          localStorage.removeItem("boardrag_role");
+          localStorage.removeItem("boardrag_token");
+          localStorage.removeItem("boardrag_saved_pw");
+        } catch {}
+        try { window.location.href = "/reset"; } catch {}
+      }
     } catch {}
   };
 
