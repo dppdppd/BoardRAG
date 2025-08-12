@@ -456,7 +456,7 @@ export default function HomePage() {
     } as any;
   };
 
-  const startQuery = (question: string, reuseUserIndex?: number | null) => {
+  const startQuery = async (question: string, reuseUserIndex?: number | null) => {
     if (!selectedGame || !question) return;
     setIsStreaming(true);
     let workingMessages = messages;
@@ -541,12 +541,45 @@ export default function HomePage() {
     // Send stable browser session id for server-side blocking
     url.searchParams.set("sid", sessionId || "");
     url.searchParams.set("_", String(Date.now()));
-    // Include auth token for EventSource (which cannot send headers reliably)
-    try {
-      let token: string | null = sessionStorage.getItem("boardrag_token");
-      if (!token) token = localStorage.getItem("boardrag_token");
-      if (token) url.searchParams.set("token", token);
-    } catch {}
+    // Ensure we have a token; if missing, try to re-unlock with saved password once
+    const ensureToken = async (): Promise<string | null> => {
+      try {
+        let tok = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+        if (tok) return tok;
+        const savedPw = localStorage.getItem("boardrag_saved_pw");
+        if (!savedPw) return null;
+        const form = new FormData();
+        form.append("password", savedPw);
+        const resp = await fetch(`${API_BASE}/auth/unlock`, { method: 'POST', body: form });
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        const t = String(data?.token || "");
+        const r = String(data?.role || "user");
+        if (!t) return null;
+        try { sessionStorage.setItem('boardrag_token', t); } catch {}
+        try { sessionStorage.setItem('boardrag_role', r); } catch {}
+        try { localStorage.setItem('boardrag_token', t); } catch {}
+        try { localStorage.setItem('boardrag_role', r); } catch {}
+        return t;
+      } catch { return null; }
+    };
+    // Ensure a valid token before opening stream
+    let tokenNow: string | null = null;
+    try { tokenNow = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token"); } catch {}
+    if (!tokenNow) {
+      tokenNow = await ensureToken();
+    }
+    if (tokenNow) {
+      try { url.searchParams.set('token', tokenNow); } catch {}
+    } else {
+      // No token available → cannot proceed; force a lightweight reset to prompt login
+      setIsStreaming(false);
+      try {
+        fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: '[client] No auth token available; redirecting to /reset' }) });
+      } catch {}
+      try { window.location.href = '/reset'; } catch {}
+      return;
+    }
 
     // Unified SSE event handler (used by EventSource or fetch-stream parser)
     let acc = "";
@@ -616,11 +649,38 @@ export default function HomePage() {
           let t: string | null = sessionStorage.getItem("boardrag_token");
           if (!t) t = localStorage.getItem("boardrag_token");
           if (t) headers['Authorization'] = `Bearer ${t}`;
+          // Also ensure token is on URL for servers that read query param only
+          if (t) try { url.searchParams.set('token', t); } catch {}
         } catch {}
         // Create/replace an AbortController so Stop can cancel the fetch
         const controller = new AbortController();
         abortRef.current = controller;
-        const resp = await fetch(url.toString(), { headers, cache: "no-store", signal: controller.signal });
+        let resp = await fetch(url.toString(), { headers, cache: "no-store", signal: controller.signal });
+        if (resp.status === 401) {
+          // Try to transparently refresh token once via saved password
+          try {
+            const savedPw = localStorage.getItem('boardrag_saved_pw');
+            if (savedPw) {
+              const form = new FormData();
+              form.append('password', savedPw);
+              const unlockResp = await fetch(`${API_BASE}/auth/unlock`, { method: 'POST', body: form });
+              if (unlockResp.ok) {
+                const data = await unlockResp.json();
+                const t = String(data?.token || '');
+                const r = String(data?.role || 'user');
+                if (t) {
+                  try { sessionStorage.setItem('boardrag_token', t); } catch {}
+                  try { localStorage.setItem('boardrag_token', t); } catch {}
+                  try { sessionStorage.setItem('boardrag_role', r); } catch {}
+                  try { localStorage.setItem('boardrag_role', r); } catch {}
+                  try { url.searchParams.set('token', t); } catch {}
+                  headers['Authorization'] = `Bearer ${t}`;
+                  resp = await fetch(url.toString(), { headers, cache: 'no-store', signal: controller.signal });
+                }
+              }
+            }
+          } catch {}
+        }
         // If unauthorized, force full reset and re-login
         if (!resp.ok && resp.status === 401) {
           try {
@@ -630,7 +690,7 @@ export default function HomePage() {
             localStorage.removeItem("boardrag_token");
             localStorage.removeItem("boardrag_saved_pw");
           } catch {}
-          try { window.location.href = "/reset"; } catch {}
+          try { window.location.reload(); } catch {}
           return;
         }
         const reader = resp.body?.getReader();
@@ -720,19 +780,7 @@ export default function HomePage() {
       clearTimeout(switchTimer);
       try { es.close(); } catch {}
       eventRef.current = null;
-      // If the server immediately closed due to auth, force reset; otherwise fallback to fetch
-      try {
-        // Heuristic: if we have no token anywhere, force reset (non-destructive); else try fetch fallback
-        const st = sessionStorage.getItem('boardrag_token');
-        const lt = localStorage.getItem('boardrag_token');
-        if (!st && !lt) {
-          sessionStorage.removeItem('boardrag_role');
-          localStorage.removeItem('boardrag_role');
-          localStorage.removeItem('boardrag_saved_pw');
-          window.location.href = '/reset';
-          return;
-        }
-      } catch {}
+      // Fall back to fetch-based streaming (which can send Authorization header)
       // Try fetch-based streaming immediately on error
       try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `[client] SSE error; falling back to fetch` }) }); } catch {}
       streamWithFetch();

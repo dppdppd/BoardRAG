@@ -140,7 +140,7 @@ export default function AdminPage() {
           localStorage.removeItem("boardrag_token");
           localStorage.removeItem("boardrag_saved_pw");
         } catch {}
-        try { window.location.href = "/reset"; } catch {}
+        try { window.location.reload(); } catch {}
       }
     } catch {}
   };
