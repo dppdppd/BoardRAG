@@ -18,3 +18,4 @@ watchdog==3.0.0
 fastapi>=0.115.2,<1.0
 uvicorn==0.30.6
 python-multipart
+cryptography>=3.4

@@ -20,6 +20,7 @@ export default function ResetPage() {
           "boardrag_role",
           "boardrag_session_id",
           "boardrag_token",
+          "boardrag_saved_pw",
         ];
         keysToRemove.forEach((k) => {
           try { localStorage.removeItem(k); } catch {}

@@ -54,7 +54,16 @@ export default function AdminPage() {
         setRole(fromSession);
         return;
       }
-      // Backward compatibility: if an older tab stored localStorage, respect it once
+      // Prefer full adoption when both role & token are present in localStorage
+      const localRole = localStorage.getItem("boardrag_role");
+      const localToken = localStorage.getItem("boardrag_token");
+      if (localRole && localToken) {
+        try { sessionStorage.setItem("boardrag_role", localRole); } catch {}
+        try { sessionStorage.setItem("boardrag_token", localToken); } catch {}
+        setRole(localRole);
+        return;
+      }
+      // Backward compatibility: if only role exists, adopt it
       const fromLocal = localStorage.getItem("boardrag_role");
       if (fromLocal) {
         sessionStorage.setItem("boardrag_role", fromLocal);
@@ -112,9 +121,15 @@ export default function AdminPage() {
     try {
       // Local echo for instant feedback
       setConsoleText((cur) => (cur ? cur + "\n" + line : line));
+      const headers: any = { "Content-Type": "application/json" };
+      try {
+        let t: string | null = sessionStorage.getItem("boardrag_token");
+        if (!t) t = localStorage.getItem("boardrag_token");
+        if (t) headers["Authorization"] = `Bearer ${t}`;
+      } catch {}
       await fetch(`${API_BASE}/admin/log`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ line }),
       });
     } catch {}
@@ -128,7 +143,15 @@ export default function AdminPage() {
     if (resp.ok) {
       const data = await resp.json();
       setRole(data.role);
-      try { sessionStorage.setItem("boardrag_role", data.role); } catch {}
+      try {
+        sessionStorage.setItem("boardrag_role", data.role);
+        if (data.token) sessionStorage.setItem("boardrag_token", data.token);
+      } catch {}
+      try {
+        // Persist for cross-restart persistence
+        localStorage.setItem("boardrag_role", data.role);
+        if (data.token) localStorage.setItem("boardrag_token", data.token);
+      } catch {}
       appendConsole("🔓 Admin unlocked");
     } else {
       setMessage("Invalid password");

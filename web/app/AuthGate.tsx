@@ -13,22 +13,52 @@ export default function AuthGate({ children }: Props) {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    try {
-      const fromSession = sessionStorage.getItem("boardrag_role");
-      const token = sessionStorage.getItem("boardrag_token");
-      if (fromSession && token) {
-        setRole(fromSession);
-        return;
-      }
-      // Migrate from localStorage if present (older versions stored here)
-      const fromLocal = localStorage.getItem("boardrag_role");
-      if (fromLocal) {
-        sessionStorage.setItem("boardrag_role", fromLocal);
-        // Do not auto-unlock without token; force re-enter to obtain token
-        // setRole(fromLocal); // intentionally not setting role
-      }
-    } catch {}
-    setRole("none");
+    (async () => {
+      try {
+        // Prefer sessionStorage role+token
+        const fromSession = sessionStorage.getItem("boardrag_role");
+        const token = sessionStorage.getItem("boardrag_token");
+        if (fromSession && token) {
+          setRole(fromSession);
+          return;
+        }
+
+        // If both role and token exist in localStorage, adopt them for this tab
+        const localRole = localStorage.getItem("boardrag_role");
+        const localToken = localStorage.getItem("boardrag_token");
+        if (localRole && localToken) {
+          try { sessionStorage.setItem("boardrag_role", localRole); } catch {}
+          try { sessionStorage.setItem("boardrag_token", localToken); } catch {}
+          setRole(localRole);
+          return;
+        }
+
+        // If saved password present, auto-unlock to refresh token
+        const savedPw = localStorage.getItem("boardrag_saved_pw");
+        if (savedPw) {
+          const form = new FormData();
+          form.append("password", savedPw);
+          try {
+            const resp = await fetch(`${API_BASE}/auth/unlock`, { method: "POST", body: form });
+            if (resp.ok) {
+              const data = await resp.json();
+              const r = data.role || "user";
+              try { sessionStorage.setItem("boardrag_role", r); } catch {}
+              try {
+                if (data.token) {
+                  sessionStorage.setItem("boardrag_token", data.token);
+                  localStorage.setItem("boardrag_token", data.token);
+                }
+                localStorage.setItem("boardrag_role", r);
+              } catch {}
+              setRole(r);
+              return;
+            }
+          } catch {}
+        }
+      } catch {}
+      setRole("none");
+    })();
   }, []);
 
   const unlock = async () => {
@@ -47,6 +77,12 @@ export default function AuthGate({ children }: Props) {
       if (data.token) {
         try { sessionStorage.setItem("boardrag_token", data.token); } catch {}
       }
+      // Always persist to localStorage for cross-restart persistence
+      try {
+        localStorage.setItem("boardrag_role", data.role || "user");
+        if (data.token) localStorage.setItem("boardrag_token", data.token);
+        localStorage.setItem("boardrag_saved_pw", pw);
+      } catch {}
       setRole(data.role || "user");
     } catch (e) {
       setError("Network error");

@@ -543,7 +543,8 @@ export default function HomePage() {
     url.searchParams.set("_", String(Date.now()));
     // Include auth token for EventSource (which cannot send headers reliably)
     try {
-      const token = sessionStorage.getItem("boardrag_token");
+      let token: string | null = sessionStorage.getItem("boardrag_token");
+      if (!token) token = localStorage.getItem("boardrag_token");
       if (token) url.searchParams.set("token", token);
     } catch {}
 
@@ -612,7 +613,8 @@ export default function HomePage() {
         const headers: any = NDJSON ? { Accept: 'application/x-ndjson' } : { Accept: 'text/event-stream' };
         // Prefer Authorization header for fetch path if token present
         try {
-          const t = sessionStorage.getItem("boardrag_token");
+          let t: string | null = sessionStorage.getItem("boardrag_token");
+          if (!t) t = localStorage.getItem("boardrag_token");
           if (t) headers['Authorization'] = `Bearer ${t}`;
         } catch {}
         // Create/replace an AbortController so Stop can cancel the fetch
