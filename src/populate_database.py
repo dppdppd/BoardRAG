@@ -79,7 +79,6 @@ def load_documents(target_paths: List[str] | None = None):
     # Default: load everything (original behaviour)
     if not target_paths:
         # Scan for PDF files first to show progress
-        import os
         from pathlib import Path
         
         pdf_files = list(Path(DATA_PATH).rglob("*.pdf"))
@@ -137,7 +136,29 @@ def split_documents(documents: List[Document]):
     retrieval quality compared with naive fixed-width splitting.
     """
 
-    HEADER_RE = re.compile(r"^\s*(?:[A-Z0-9]+(?:\.[A-Z0-9]+)*\.?)?\s*[A-Z][A-Z0-9 &'\-/]{2,}(?::\s*.*)?$")
+    # Prefer numeric headers (e.g., "3.6 Interdiction", "2.3.4 Morale Check").
+    # Separate regexes make precedence explicit and reduce false-positives.
+    # Dotted numeric headers only (e.g., "3.0 Sequence of Play", "3.2.1 Morale Check").
+    # This avoids mistaking page numbers like "7" or years like "2021" as headers.
+    NUMERIC_TITLE_RE = re.compile(r"^\s*(((?:\d+\.)+\d+))\s+(.+?)\s*$")
+    # Numeric-only line that represents a header must contain a dot (e.g., "3.0", "3.2.1").
+    NUMERIC_ONLY_HEADER_RE = re.compile(r"^\s*((?:\d+\.)+\d+)\s*:?\s*$")
+
+    # As a last resort, allow non-numeric headers, but guard against short tokens
+    # like "RtPh:" or codes like "X3Z1" by requiring length and at least two words.
+    # Generic headers (very strict):
+    #  - Either ALL-CAPS style headings with length
+    #  - Or Title Case headings that END WITH a colon
+    GENERIC_HEADER_RE = re.compile(
+        r"^\s*(?:"
+        r"[A-Z][A-Z0-9 &'\-/()]{3,}"  # ALL CAPS style, at least 4 chars
+        r"|"
+        r"(?:[A-Z][A-Za-z0-9&'\-/()]+(?:\s+[A-Z][A-Za-z0-9&'\-/()]+)+):"  # Two+ TitleCased words ending with ':'
+        r")\s*$"
+    )
+
+    # Detect Table of Contents entries with dot leaders and trailing page numbers
+    TOC_ENTRY_RE = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+.+?\.{2,}\s*\d+\s*$")
 
     # Track section state across pages to handle continuations
     last_section_on_previous_page = "intro"
@@ -148,9 +169,29 @@ def split_documents(documents: List[Document]):
         Returns: (chunks, last_section_on_this_page)
         """
         lines = page_doc.page_content.splitlines()
+        # TOC heuristic: if a page contains multiple TOC-like entries, treat it as TOC
+        toc_like_count = sum(1 for ln in lines if TOC_ENTRY_RE.match(ln))
+        is_toc_page = toc_like_count >= 3
         current_header = inherited_section  # Start with inherited section, not always "intro"
+        pending_header_text: str | None = None  # header line to prepend to the next section's content
         buffer: list[str] = []
         out: List[Document] = []
+
+        def _normalize_section_number(raw: str) -> str:
+            """Normalize numeric section like '3' → '3.0' for chapter headings.
+            Leaves dotted forms unchanged (e.g., '3.2' stays '3.2').
+            """
+            try:
+                raw = raw.strip()
+                if not raw:
+                    return raw
+                # If it already contains a dot, keep as-is
+                if "." in raw:
+                    return raw
+                # Otherwise map top-level chapter numbers to N.0
+                return f"{raw}.0"
+            except Exception:
+                return raw
 
         def _flush(buf: list[str], header: str):
             if not buf:
@@ -158,21 +199,105 @@ def split_documents(documents: List[Document]):
             content = "\n".join(buf).strip()
             if content:
                 meta = dict(page_doc.metadata)
+                # Store rich section metadata to improve downstream matching
                 meta["section"] = header
+                meta["section_full"] = header
+                try:
+                    m_num = re.match(r"^\s*(\d+(?:\.\d+)*)\b", header)
+                    if m_num:
+                        sec_num = m_num.group(1)
+                        meta["section_number"] = _normalize_section_number(sec_num)
+                except Exception:
+                    pass
                 out.append(Document(page_content=content, metadata=meta))
 
-        for line in lines:
-            if HEADER_RE.match(line):
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+
+            # Safety: if we have a pending header and the next line is also detected as a header,
+            # emit a minimal chunk containing just the pending header to avoid losing it.
+            if pending_header_text is not None and not buffer:
+                if (
+                    NUMERIC_TITLE_RE.match(line)
+                    or NUMERIC_ONLY_HEADER_RE.match(line)
+                    or GENERIC_HEADER_RE.match(line)
+                ):
+                    buffer.append(pending_header_text)
+                    pending_header_text = None
+                    _flush(buffer, current_header)
+                    buffer = []
+            # Skip header detection on Table of Contents pages
+            if is_toc_page:
+                if pending_header_text is not None and not buffer:
+                    buffer.append(pending_header_text)
+                    pending_header_text = None
+                buffer.append(line)
+                i += 1
+                continue
+
+            # Case A: Numeric header with title on the same line (e.g., "3.3 Movement Phase (MPh)")
+            m_num_title = NUMERIC_TITLE_RE.match(line)
+            if m_num_title:
                 _flush(buffer, current_header)
                 buffer = []
-                # Extract just the section title (before any colon)
-                header_text = line.strip()
-                if ':' in header_text:
-                    current_header = header_text.split(':', 1)[0].strip()
-                else:
-                    current_header = header_text
-            else:
-                buffer.append(line)
+                section_number_raw = m_num_title.group(1)
+                section_number = _normalize_section_number(section_number_raw)
+                title_text = m_num_title.group(3)
+                # Remove trailing subtitle after a colon in the same line to make a stable label
+                clean_title = title_text.split(':', 1)[0].strip()
+                combined_header = f"{section_number} {clean_title}"
+                current_header = combined_header
+                pending_header_text = combined_header
+                i += 1
+                continue
+
+            # Case B: Numeric-only line e.g., "3.0" with title on the next non-empty line
+            m_num = NUMERIC_ONLY_HEADER_RE.match(line)
+            if m_num:
+                j = i + 1
+                next_title = None
+                while j < len(lines):
+                    if lines[j].strip():
+                        next_title = lines[j].strip()
+                        break
+                    j += 1
+                if next_title:
+                    _flush(buffer, current_header)
+                    buffer = []
+                    section_number = _normalize_section_number(m_num.group(1))
+                    combined_header = f"{section_number} {next_title.split(':',1)[0].strip()}"
+                    current_header = combined_header
+                    pending_header_text = f"{combined_header}"
+                    i = j + 1
+                    continue
+
+            # Case C: Fallback generic header (non-numeric). Guard against short codes.
+            if GENERIC_HEADER_RE.match(line):
+                text = line.strip()
+                _flush(buffer, current_header)
+                buffer = []
+                header_text = text
+                # Trim trailing colon in display label
+                if header_text.endswith(":"):
+                    header_text = header_text[:-1].strip()
+                current_header = header_text
+                pending_header_text = header_text
+                i += 1
+                continue
+
+            # Default: accumulate content
+            if pending_header_text is not None and not buffer:
+                buffer.append(pending_header_text)
+                pending_header_text = None
+            buffer.append(line)
+            i += 1
+
+        # If the page ended right after a header, still emit a minimal chunk with just the header
+        if pending_header_text is not None and not buffer:
+            buffer.append(pending_header_text)
+            pending_header_text = None
+
         _flush(buffer, current_header)
 
         # If no headers were found, return the original page so that downstream

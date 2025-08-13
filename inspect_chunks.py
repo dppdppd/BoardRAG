@@ -50,8 +50,8 @@ def print_chunks(max_rows: int, show_content: bool, filter_str: str | None):
         filtered = list(zip(documents, metadatas, ids))
 
     total = len(filtered)
-    print(f"\n📚 Chunks matching filter: {total}")
-    print(f"🔎 Showing the first {min(max_rows, total)}\n")
+    print(f"\nChunks matching filter: {total}")
+    print(f"Showing the first {min(max_rows, total)}\n")
 
     wrap_width = 110
 

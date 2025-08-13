@@ -5,7 +5,7 @@ import { mutate as swrMutate } from "swr";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
 
-type Message = { role: "user" | "assistant"; content: string };
+type Message = { role: "user" | "assistant"; content: string; pinned?: boolean };
 
 import { API_BASE } from "../lib/config";
 
@@ -45,6 +45,12 @@ const stripMarkdown = (input: string): string => {
 };
 
 export default function HomePage() {
+  // Turn bare section citations like [3.5] or [3.5.1] into clickable links we can intercept
+  const decorateCitations = (input: string): string => {
+    if (!input) return input;
+    // Replace [3.5] with markdown link [3.5](section:3.5) only when not already a link
+    return input.replace(/\[(\d+(?:\.\d+)+)\](?!\()/g, "[$1](section:$1)");
+  };
   // State
   const [sessionId, setSessionId] = useState<string>("");
   const { data: gamesData, mutate: refetchGames, isLoading: loadingGames, error: gamesError } = useSWR<{ games: string[] }>(`${API_BASE}/games`, fetcher);
@@ -228,24 +234,30 @@ export default function HomePage() {
     // intentionally empty to avoid continuous auto scroll during streaming
   }, [messages]);
 
-  const { bookmarkLabels, bookmarkUserIndices } = useMemo(() => {
-    // Build labels for assistant replies and map each to its preceding user index
+  const { bookmarkLabels, bookmarkUserIndices, bookmarkAssistantIndices } = useMemo(() => {
+    // Build labels only for pinned assistant replies and map each to its preceding user index
     const labels: string[] = [];
     const userIdxs: number[] = [];
+    const assistantAbsIdxs: number[] = [];
     let userCount = 0;
+    let assistantCount = -1;
     for (let i = 0; i < messages.length; i++) {
       const m = messages[i];
       if (m.role === "user") {
         userCount += 1;
       } else if (m.role === "assistant") {
-        const first = m.content.split("\n").find((l) => l.trim().length > 0) || m.content;
-        const cleaned = stripMarkdown(first);
-        const trimmed = cleaned.slice(0, 60);
-        labels.push(trimmed);
-        userIdxs.push(Math.max(0, userCount - 1));
+        assistantCount += 1;
+        if (m.pinned) {
+          const first = m.content.split("\n").find((l) => l.trim().length > 0) || m.content;
+          const cleaned = stripMarkdown(first);
+          const trimmed = cleaned.slice(0, 60);
+          labels.push(trimmed);
+          userIdxs.push(Math.max(0, userCount - 1));
+          assistantAbsIdxs.push(assistantCount);
+        }
       }
     }
-    return { bookmarkLabels: labels, bookmarkUserIndices: userIdxs };
+    return { bookmarkLabels: labels, bookmarkUserIndices: userIdxs, bookmarkAssistantIndices: assistantAbsIdxs };
   }, [messages]);
 
   // Ensure history strip shows the most recent question
@@ -456,6 +468,27 @@ export default function HomePage() {
     } as any;
   };
 
+  // Long-press delete for an assistant QA pair inside the chat
+  const longPressDeleteAssistant = (assistantIndex: number) => {
+    let timer: any;
+    let triggered = false;
+    const start = () => {
+      triggered = false;
+      timer = setTimeout(() => {
+        triggered = true;
+        deleteHistoryAt(assistantIndex);
+      }, 600);
+    };
+    const clear = () => { if (timer) clearTimeout(timer); };
+    return {
+      onMouseDown: start,
+      onMouseUp: (_e: any) => { clear(); },
+      onMouseLeave: clear,
+      onTouchStart: start,
+      onTouchEnd: (_e: any) => { clear(); },
+    } as any;
+  };
+
   const startQuery = async (question: string, reuseUserIndex?: number | null) => {
     if (!selectedGame || !question) return;
     setIsStreaming(true);
@@ -615,8 +648,8 @@ export default function HomePage() {
           acc = mergeChunk(acc, String(parsed.data));
           setMessages((cur) => {
             const last = cur[cur.length - 1];
-            if (!last || last.role !== "assistant") return [...cur, { role: "assistant", content: acc }];
-            const updated = [...cur]; updated[updated.length - 1] = { role: "assistant", content: acc }; return updated;
+            if (!last || last.role !== "assistant") return [...cur, { role: "assistant", content: acc, pinned: false }];
+            const updated = [...cur]; updated[updated.length - 1] = { ...last, content: acc }; return updated;
           });
         } else if (parsed.type === "done") {
           if (parsed.req && typeof parsed.req === 'string' && streamReqIdRef.current && parsed.req !== streamReqIdRef.current) {
@@ -757,35 +790,44 @@ export default function HomePage() {
       return;
     }
 
-    // Default path: EventSource with rapid fallback to fetch if buffered
+    // Default path: EventSource only (no transport fallback)
     const es = new EventSource(url.toString());
     eventRef.current = es;
-    let sseReceived = false;
-    const switchTimer = window.setTimeout(() => {
-      // Only fall back to fetch if we have not received any SSE data yet
-      if (!sseReceived) {
-        try { es.close(); } catch {}
-        eventRef.current = null;
-        streamWithFetch();
-      }
-    }, 1500);
-    switchTimerRef.current = switchTimer as unknown as number;
 
     es.onmessage = (ev) => {
-      clearTimeout(switchTimer);
-      sseReceived = true;
       handleSseData(ev.data);
     };
-    es.onerror = (ev: any) => {
-      clearTimeout(switchTimer);
+    es.onerror = (_ev: any) => {
       try { es.close(); } catch {}
       eventRef.current = null;
-      // Fall back to fetch-based streaming (which can send Authorization header)
-      // Try fetch-based streaming immediately on error
-      try { fetch(`${API_BASE}/admin/log`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ line: `[client] SSE error; falling back to fetch` }) }); } catch {}
-      streamWithFetch();
+      // Stop streaming and allow user to retry if SSE fails
+      setIsStreaming(false);
+      addRetryable(lastSubmittedUserIndexRef.current);
     };
   };
+  const togglePin = (assistantIndex: number) => {
+    // Find absolute assistant position in messages
+    let seenAssistants = -1;
+    let absAssistant = -1;
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i].role === "assistant") {
+        seenAssistants += 1;
+        if (seenAssistants === assistantIndex) { absAssistant = i; break; }
+      }
+    }
+    if (absAssistant < 0) return;
+    const target = messages[absAssistant];
+    const newMsgs = [...messages];
+    newMsgs[absAssistant] = { ...target, pinned: !target.pinned } as Message;
+    setMessages(newMsgs);
+    try {
+      if (selectedGame) {
+        const key = `boardrag_conv:${sessionId}:${selectedGame}`;
+        localStorage.setItem(key, JSON.stringify(newMsgs));
+      }
+    } catch {}
+  };
+
 
   const onSubmit = () => {
     const q = input.trim();
@@ -871,29 +913,8 @@ export default function HomePage() {
 
           {/* Horizontal history strip */}
           <div className="history-strip" ref={historyStripRef}>
-            {bookmarkLabels.length === 0 ? (
-              <div className="muted" style={{ fontSize: 12 }}>No history yet</div>
-            ) : (
+            {bookmarkLabels.length > 0 && (
               <>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <button
-                    className="history-pill btn flat-left"
-                    title="Hold to clear history"
-                    aria-label="Hold to clear history"
-                    {...longPressClearAllHandlers()}
-                    style={{ width: 43, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center' }}
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style={{ display: 'block', marginLeft: -8 }}>
-                      <path d="M3 6h18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
-                      <path d="M10 11v7M14 11v7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                    </svg>
-                  </button>
-                  {showHoldHint && (
-                    <span className="muted" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Hold to clear history</span>
-                  )}
-                </div>
                 {bookmarkLabels.map((b, i) => (
                   <button
                     key={i}
@@ -902,7 +923,7 @@ export default function HomePage() {
                       if (historyDraggingFlag.current || historyDragRef.current.dragged) return; // ignore click if just dragged
                       scrollToAssistant(bookmarkUserIndices[i]);
                     }}
-                    {...longPressHandlers(i)}
+                    {...longPressHandlers(bookmarkAssistantIndices[i])}
                   >
                     {b}
                   </button>
@@ -920,20 +941,126 @@ export default function HomePage() {
               let userCounter = -1;
               return messages.map((m, i) => {
                 const props: any = { key: i, className: `bubble ${m.role}` };
+                let acForHandlers: number | null = null;
+                let ucForHandlers: number | null = null;
                 if (m.role === "assistant") {
                   assistantCounter += 1;
                   props["data-assistant-index"] = assistantCounter;
+                  acForHandlers = assistantCounter;
                 } else if (m.role === "user") {
                   userCounter += 1;
                   props["data-user-index"] = userCounter;
+                  ucForHandlers = userCounter;
                 }
                 const isUser = m.role === "user";
-                const showActions = isUser && retryableUsers.includes(userCounter);
+                const showActions = isUser && ucForHandlers != null && retryableUsers.includes(ucForHandlers);
                 return (
                   <React.Fragment key={i}>
-                    <div {...props}>
-                      <ReactMarkdown>{m.content}</ReactMarkdown>
-                    </div>
+                    {m.role === 'assistant' ? (
+                      <div className="assistant-row" style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto', columnGap: 6, alignItems: 'end' }}>
+                        <div {...props} style={{ ...(props.style || {}), maxWidth: '100%' }}>
+                          <ReactMarkdown
+                            // Allow custom schemes like section: without sanitization interfering
+                            {...({ urlTransform: (url: string) => url } as any)}
+                            components={{
+                              a({ href, children, ...props }: { href?: string; children?: any }) {
+                                if (href && typeof href === 'string' && href.startsWith('section:')) {
+                                  const sec = href.slice('section:'.length);
+                                  return (
+                                    <button
+                                      className="btn link"
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        // Trigger a quote query for this section
+                                        startQuery(`quote ${sec}`, null);
+                                      }}
+                                      style={{
+                                        padding: 0,
+                                        background: 'none',
+                                        border: 'none',
+                                        color: 'var(--accent)',
+                                        textDecoration: 'underline',
+                                        cursor: 'pointer',
+                                      }}
+                                    >
+                                      {"["}{children}{"]"}
+                                    </button>
+                                  );
+                                }
+                                return <a href={href as string} {...(props as any)}>{children}</a>;
+                              },
+                            }}
+                          >
+                            {decorateCitations(m.content)}
+                          </ReactMarkdown>
+                        </div>
+                        <div className="assistant-actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignSelf: 'end' }}>
+                          <button
+                            className="btn"
+                            title={m.pinned ? "Remove bookmark" : "Add bookmark"}
+                            aria-label={m.pinned ? "Remove bookmark" : "Add bookmark"}
+                            aria-pressed={!!m.pinned}
+                            onClick={() => acForHandlers != null && togglePin(acForHandlers)}
+                            style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center', color: m.pinned ? '#fff' : 'var(--text)', borderColor: m.pinned ? 'var(--accent)' : 'var(--control-border)', background: m.pinned ? 'var(--accent)' : 'var(--control-bg)' }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                              <path d="M6 2h8a2 2 0 0 1 2 2v16l-6-4-6 4V4a2 2 0 0 1 2-2z" fill={m.pinned ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                            </svg>
+                          </button>
+                          <button
+                            className="btn"
+                            title="Hold to delete"
+                            aria-label="Delete QA (hold)"
+                            {...(acForHandlers != null ? longPressDeleteAssistant(acForHandlers) : {})}
+                            style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center', background: 'var(--control-bg)', borderColor: 'var(--control-border)' }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                              <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+                              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
+                              <path d="M10 11v7M14 11v7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div {...props}>
+                        <ReactMarkdown
+                          // Allow custom schemes like section: without sanitization interfering
+                          {...({ urlTransform: (url: string) => url } as any)}
+                          components={{
+                            a({ href, children, ...props }: { href?: string; children?: any }) {
+                              if (href && typeof href === 'string' && href.startsWith('section:')) {
+                                const sec = href.slice('section:'.length);
+                                return (
+                                  <button
+                                    className="btn link"
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      // Trigger a quote query for this section
+                                      startQuery(`quote ${sec}`, null);
+                                    }}
+                                    style={{
+                                      padding: 0,
+                                      background: 'none',
+                                      border: 'none',
+                                      color: 'var(--accent)',
+                                      textDecoration: 'underline',
+                                      cursor: 'pointer',
+                                    }}
+                                  >
+                                    {"["}{children}{"]"}
+                                  </button>
+                                );
+                              }
+                              return <a href={href as string} {...(props as any)}>{children}</a>;
+                            },
+                          }}
+                        >
+                          {m.content}
+                        </ReactMarkdown>
+                      </div>
+                    )}
                     {showActions && (
                       <div style={{ maxWidth: "92%", marginLeft: "auto", marginTop: 6 }}>
                         <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
@@ -941,7 +1068,7 @@ export default function HomePage() {
                             className="btn"
                             title="Retry"
                             aria-label="Retry"
-                            onClick={() => { setRetryableUsers((cur) => cur.filter((n) => n !== userCounter)); startQuery(m.content, userCounter); }}
+                            onClick={() => { if (ucForHandlers == null) return; setRetryableUsers((cur) => cur.filter((n) => n !== ucForHandlers!)); startQuery(m.content, ucForHandlers!); }}
                             style={{ width: 44, height: 44, minHeight: 44, padding: 0, fontSize: 18, color: "#fff", borderColor: "var(--accent)", background: "var(--accent)", display: "inline-grid", placeItems: "center" }}
                           >↻</button>
                           <button
@@ -950,18 +1077,18 @@ export default function HomePage() {
                             aria-label="Delete"
                             onClick={() => {
                               // Remove this user message
-                              const targetUserIdx = userCounter;
+                              const targetUserIdx = ucForHandlers;
                               let seen = -1;
                               const newList: Message[] = [];
                               for (const msg of messages) {
                                 if (msg.role === 'user') {
                                   seen += 1;
-                                  if (seen === targetUserIdx) continue; // skip this one
+                                  if (targetUserIdx != null && seen === targetUserIdx) continue; // skip this one
                                 }
                                 newList.push(msg);
                               }
                               setMessages(newList);
-                              setRetryableUsers((cur) => cur.filter((n) => n !== userCounter));
+                              if (ucForHandlers != null) setRetryableUsers((cur) => cur.filter((n) => n !== ucForHandlers!));
                               try {
                                 if (selectedGame) {
                                   const key = `boardrag_conv:${sessionId}:${selectedGame}`;
@@ -1029,25 +1156,6 @@ export default function HomePage() {
           <section className="surface pad section">
             <div className="row" style={{ alignItems: 'center' }}>
               <summary style={{ margin: 0 }}>Past Questions</summary>
-              {bookmarkLabels.length > 0 && (
-                <>
-                  <button
-                    className="btn"
-                    title="Hold to clear history"
-                    aria-label="Hold to clear history"
-                    {...longPressClearAllHandlers()}
-                    style={{ width: 28, height: 28, minHeight: 28, padding: 0, display: 'inline-grid', placeItems: 'center', marginLeft: 8 }}
-                  >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                      <path d="M3 6h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-                      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/>
-                      <path d="M10 11v7M14 11v7" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
-                    </svg>
-                  </button>
-                  <span className="muted" style={{ fontSize: 12, marginLeft: 6, visibility: showHoldHint ? 'visible' : 'hidden' }}>Hold to clear history</span>
-                </>
-              )}
             </div>
             {bookmarkLabels.length === 0 && (
               <div className="muted" style={{ fontSize: 13, marginTop: 8 }}>No bookmarks yet</div>

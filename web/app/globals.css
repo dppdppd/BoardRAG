@@ -246,28 +246,11 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   position: relative;
   scroll-snap-align: start;
   z-index: 1;
-  /* Arrow-box shape: angled tail and pointed head */
-  /* Flipped: concave tail on the left, pointed head on the right */
-  clip-path: polygon(
-    0 0,
-    calc(100% - 16px) 0,
-    100% 50%,
-    calc(100% - 16px) 100%,
-    0 100%,
-    16px 50%
-  );
+  border-radius: var(--radius);
 }
 .history-pill.flat-left {
-  /* Flatten the left side: remove concave tail on the left */
-  clip-path: polygon(
-    0 0,
-    calc(100% - 16px) 0,
-    100% 50%,
-    calc(100% - 16px) 100%,
-    0 100%
-  );
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+  border-top-left-radius: var(--radius);
+  border-bottom-left-radius: var(--radius);
 }
 .history-pill:hover {
   background: linear-gradient(
@@ -295,7 +278,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   .history-strip { display: flex; scroll-snap-type: x proximity; gap: 0px; padding: 10px 12px; }
   /* Faint background label across the mobile history strip */
   .history-strip::before {
-    content: "Past Questions";
+    content: "BOOKMARKS";
     position: absolute;
     inset: 0;
     display: grid;

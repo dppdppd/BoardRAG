@@ -20,6 +20,7 @@ Example:
 
 import argparse
 import os
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -683,6 +684,7 @@ def query_rag(
     k_results = 40 if selected_game else 20
             # Try server-side metadata filtering first (if supported)
     metadata_filter = None
+    target_files = None  # set of lowercase PDF filenames used for filtering, when available
     if selected_game:
         # Debug: normalize selected_game input
         def _normalize_game_input(game_input):
@@ -734,6 +736,44 @@ def query_rag(
             available_games = sorted(set(gname.lower() for gname in stored_map.values()))
             raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
         metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
+
+    # Numeric section targeting: if query asks to quote a specific section number,
+    # pull exact section chunks for the selected game and prioritize them.
+    requested_section = None
+    try:
+        m_sec = re.search(r"\bquote\s+((?:\d+(?:\.\d+)*))\b", query_text, re.IGNORECASE)
+        if m_sec:
+            requested_section = m_sec.group(1)
+            print(f"🔎 Requested explicit section: {requested_section}")
+    except Exception:
+        requested_section = None
+
+    prioritized_results = []
+    if requested_section:
+        try:
+            all_docs = db.get()
+            docs = all_docs.get("documents", [])
+            metas = all_docs.get("metadatas", [])
+            ids = all_docs.get("ids", [])
+            for doc_text, meta, _id in zip(docs, metas, ids):
+                if not isinstance(meta, dict):
+                    continue
+                if target_files:
+                    pdf_fn = (meta.get("pdf_filename") or "").lower()
+                    if pdf_fn not in target_files:
+                        continue
+                sec_num = (meta.get("section_number") or "").strip()
+                sec_label = (meta.get("section") or "").strip()
+                if sec_num and (sec_num == requested_section or sec_num.startswith(requested_section + ".")):
+                    from langchain.schema.document import Document as _Doc
+                    prioritized_results.append((_Doc(page_content=doc_text, metadata=meta), 0.0))
+                    continue
+                # Fallback: label prefix match
+                if sec_label.startswith(requested_section):
+                    from langchain.schema.document import Document as _Doc
+                    prioritized_results.append((_Doc(page_content=doc_text, metadata=meta), 0.0))
+        except Exception as e:
+            print(f"⚠️ Section prioritization failed: {e}")
     try:
             all_results = (
                 db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
@@ -748,9 +788,38 @@ def query_rag(
                 else db.similarity_search_with_score(search_query, k=k_results)
             )
 
-    # Server-side filtering already handled game selection
+    # Merge similarity hits with simple dedupe
+    results = []
+    seen_keys = set()
+    def _key_for(d):
+        m = getattr(d, "metadata", {}) or {}
+        return (m.get("source"), m.get("page"), (m.get("section") or "").strip())
+
+    # Prepend prioritized section hits (if any), then similarity hits
+    for d, s in (prioritized_results or []):
+        k = _key_for(d)
+        if k not in seen_keys:
+            results.append((d, s))
+            seen_keys.add(k)
+
+    for d, s in all_results:
+        k = _key_for(d)
+        if k not in seen_keys:
+            results.append((d, s))
+            seen_keys.add(k)
+
     # Keep only the top-N results for prompt building
-    results = all_results[: RAG_MAX_DOCS]
+    results = results[: RAG_MAX_DOCS]
+
+    # Heuristic re-rank: for phase-related queries, prefer chunks with numeric section headers
+    try:
+        if re.search(r"\bphase(s)?\b", query_text, re.IGNORECASE):
+            def _is_numeric_section(doc):
+                sec = (getattr(doc, 'metadata', {}) or {}).get('section') or ''
+                return bool(re.match(r"^\s*\d+(?:\.\d+)*\b", str(sec)))
+            results.sort(key=lambda pair: (not _is_numeric_section(pair[0]), pair[1]))
+    except Exception:
+        pass
     print(f"  Found {len(results)} results")
     if results:
         print(f"  Best match score: {results[0][1]:.4f}")
@@ -786,19 +855,71 @@ def query_rag(
     # Build the prompt
     print("🔮 Building the prompt …")
     # Build context with a hard character cap
+    # Sanitizer to remove TOC-like lines and bare page numbers that can mislead citation generation
+    def _sanitize_for_context(text: str) -> str:
+        try:
+            lines = text.splitlines()
+            cleaned = []
+            toc_re = re.compile(r"^\s*\d+(?:\.\d+)+\s+.+?\.{2,}\s*\d+\s*$")
+            page_num_re = re.compile(r"^\s*\d+\s*$")
+            for ln in lines:
+                if toc_re.match(ln):
+                    continue
+                if page_num_re.match(ln):
+                    continue
+                cleaned.append(ln)
+            return "\n".join(cleaned)
+        except Exception:
+            return text
+
     parts = []
+    included_chunks_debug = []  # Collect details of chunks actually included in context
     used = 0
     for doc, _score in results:
-        t = doc.page_content
+        t = _sanitize_for_context(doc.page_content or "")
         if not t:
             continue
         if used + len(t) + 8 > RAG_CONTEXT_CHAR_LIMIT:
             t = t[: max(0, RAG_CONTEXT_CHAR_LIMIT - used)]
         parts.append(t)
+        try:
+            meta = getattr(doc, 'metadata', {}) or {}
+            included_chunks_debug.append({
+                "source": (meta.get("source") or "unknown"),
+                "page": meta.get("page"),
+                "section": (meta.get("section") or "").strip(),
+                "section_number": (meta.get("section_number") or "").strip(),
+                "length": len(t),
+                "preview": t.replace("\n", " ")[:160],
+            })
+        except Exception:
+            pass
         used += len(t) + 8
         if used >= RAG_CONTEXT_CHAR_LIMIT:
             break
     context_text = "\n\n---\n\n".join(parts)
+
+    # Provide an explicit allowlist of section numbers derived from retrieved sources
+    try:
+        allowed_sections = []
+        seen_allow = set()
+        for doc, _ in results:
+            meta = getattr(doc, 'metadata', {}) or {}
+            sec = (meta.get('section_number') or '').strip()
+            if not sec:
+                m = re.match(r"^(\d+(?:\.\d+)*)\b", (meta.get('section') or '').strip())
+                if m:
+                    sec = m.group(1)
+            if sec and sec not in seen_allow:
+                allowed_sections.append(sec)
+                seen_allow.add(sec)
+        if allowed_sections:
+            allowline = ''.join(f'[{s}]' for s in allowed_sections[:24])
+            context_text = f"ALLOWED_SECTIONS: {allowline}\n\n" + context_text
+        else:
+            context_text = "ALLOWED_SECTIONS: \n\n" + context_text
+    except Exception:
+        pass
 
     # Combine chat history with the latest question so the LLM has conversational context
     if chat_history:
@@ -817,6 +938,23 @@ def query_rag(
         )
     except Exception:
         prompt = load_jinja2_prompt(context=context_text, question=composite_question)
+    # Debug: spew full prompt and list included chunks
+    try:
+        print("\n===== FULL PROMPT (BEGIN) =====")
+        print(prompt)
+        print("===== FULL PROMPT (END) =====\n")
+        print("Included chunks (in order):")
+        for idx, info in enumerate(included_chunks_debug, 1):
+            try:
+                from pathlib import Path as _Path
+                src_name = _Path(info.get("source") or "").name
+            except Exception:
+                src_name = info.get("source") or "unknown"
+            print(f"  {idx:02d}. src={src_name} page={info.get('page')} section='{info.get('section')}' num='{info.get('section_number')}' len={info.get('length')}")
+            print(f"      {info.get('preview')}")
+    except Exception:
+        pass
+
 
     print("🍳 Generating the response (streaming)…")
 
@@ -852,12 +990,33 @@ def query_rag(
             f"Unsupported LLM_PROVIDER: {cfg.LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
         )
 
+    # If the user requested a specific numeric section but none were found in results,
+    # avoid generating with misleading content.
+    if requested_section:
+        has_requested = False
+        for doc, _ in results:
+            sec_num = ((doc.metadata or {}).get("section_number") or "").strip()
+            sec_label = ((doc.metadata or {}).get("section") or "").strip()
+            if sec_num.startswith(requested_section) or sec_label.startswith(requested_section):
+                has_requested = True
+                break
+        if not has_requested:
+            return {
+                "response_text": f"Section {requested_section} not found in the selected game.",
+                "sources": [],
+                "original_query": query_text,
+                "context": context_text,
+                "prompt": prompt,
+            }
+
     response_raw = model.invoke(prompt)
     # Convert LangChain message objects to string content when necessary.
     if hasattr(response_raw, "content"):
         response_text = response_raw.content
     else:
         response_text = response_raw
+
+    # Remove trailing auto-appended numeric citations; do not modify model output here
 
     # Build structured source metadata for citations (filter by relevance)
     sources = []
@@ -1040,6 +1199,8 @@ def stream_query_rag(
             )
     print(f"📊 Database returned {len(all_results)} total results")
 
+    # No hardcoded section fast path: rely on standard retrieval and ranking
+
     if len(all_results) == 0:
         print("❌ ERROR: No results from database! This will cause 'I don't know' response")
         print("  Check if:")
@@ -1047,9 +1208,31 @@ def stream_query_rag(
         print("  - Embedding function is working")
         print("  - Query is not too specific")
 
-    # Server-side filtering already handled game selection perfectly
+    # Merge similarity hits with simple dedupe
+    results = []
+    seen_keys = set()
+    def _key_for(d):
+        m = getattr(d, "metadata", {}) or {}
+        return (m.get("source"), m.get("page"), (m.get("section") or "").strip())
+
+    for d, s in all_results:
+        k = _key_for(d)
+        if k not in seen_keys:
+            results.append((d, s))
+            seen_keys.add(k)
+
     # Use only the top-N results and cap total context size to control token usage
-    results = all_results[: RAG_MAX_DOCS]
+    results = results[: RAG_MAX_DOCS]
+
+    # Heuristic re-rank for streaming: prefer numeric-section chunks for phase queries
+    try:
+        if re.search(r"\bphase(s)?\b", query_text, re.IGNORECASE):
+            def _is_numeric_section(doc):
+                sec = (getattr(doc, 'metadata', {}) or {}).get('section') or ''
+                return bool(re.match(r"^\s*\d+(?:\.\d+)*\b", str(sec)))
+            results.sort(key=lambda pair: (not _is_numeric_section(pair[0]), pair[1]))
+    except Exception:
+        pass
     print(f"📊 Using top {len(results)} results (capped by RAG_MAX_DOCS={RAG_MAX_DOCS})")
 
     # Show final results summary
@@ -1157,6 +1340,22 @@ def stream_query_rag(
     else:
         raise ValueError("Unsupported LLM_PROVIDER: " + cfg.LLM_PROVIDER)
 
+    # Pre-compute numeric sections from retrieved results for fallback citation injection
+    numeric_sections: List[str] = []
+    try:
+        seen_sec: set[str] = set()
+        for d, _s in results:
+            sec_label = (d.metadata or {}).get("section") or ""
+            m = re.match(r"^\s*(\d+(?:\.\d+)*)\b", str(sec_label))
+            if m:
+                sec = m.group(1)
+                if sec not in seen_sec:
+                    seen_sec.add(sec)
+                    numeric_sections.append(sec)
+        numeric_sections = numeric_sections[:12]
+    except Exception:
+        numeric_sections = []
+
     # ---- Token generator ----
 
     def _token_gen():
@@ -1167,6 +1366,7 @@ def stream_query_rag(
             return ("429" in s) or ("rate_limit" in s) or ("rate limit" in s) or ("overload" in s)
 
         max_attempts = 3
+        saw_citation = False
         for attempt in range(max_attempts):
             # On retries, shrink prompt to reduce input tokens pressure
             attempt_prompt = prompt
@@ -1184,8 +1384,10 @@ def stream_query_rag(
                     if text_part is None:
                         text_part = str(chunk)
                     if text_part:
+                        if not saw_citation and re.search(r"\[\d+\.\d+[^\]]*\]", text_part or ""):
+                            saw_citation = True
                         yield text_part
-                # Completed successfully – exit generator
+                # Do not append fallback bracket list of numeric citations
                 return
             except Exception as e:
                 print(f"❌ ERROR during token generation: {e}")
@@ -1253,6 +1455,29 @@ def stream_query_rag(
             })
     
     print(f"📚 Final sources: {sources}")
+
+    # Post-generation fallback: ensure at least some numeric citations are present
+    try:
+        has_numeric_cite = re.search(r"\[\d+\.\d+[^\]]*\]", prompt) is not None
+        if not has_numeric_cite:
+            numeric_sections = []
+            for src in sources:
+                if isinstance(src, dict):
+                    sec = (src.get('section') or '').strip()
+                    m = re.match(r"^(\d+(?:\.\d+)*)\b", sec)
+                    if m:
+                        numeric_sections.append(m.group(1))
+            seen = set()
+            dedup = []
+            for s in numeric_sections:
+                if s not in seen:
+                    dedup.append(s)
+                    seen.add(s)
+            if dedup:
+                # Prepend minimal bracket list to the context so the model sees them on retry attempts
+                context_text = f"{''.join(f'[{s}]' for s in dedup[:12])}\n\n{context_text}"
+    except Exception:
+        pass
 
     meta = {
         "sources": sources,
