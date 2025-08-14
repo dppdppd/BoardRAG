@@ -45,11 +45,23 @@ const stripMarkdown = (input: string): string => {
 };
 
 export default function HomePage() {
-  // Turn bare section citations like [3.5] or [3.5.1] into clickable links we can intercept
+  // Turn bare section citations like [3.5] or [3.5.1] and verbal tags like [EQUIPMENT] into clickable links we can intercept
   const decorateCitations = (input: string): string => {
     if (!input) return input;
+    let out = input;
     // Replace [3.5] with markdown link [3.5](section:3.5) only when not already a link
-    return input.replace(/\[(\d+(?:\.\d+)+)\](?!\()/g, "[$1](section:$1)");
+    out = out.replace(/\[(\d+(?:\.\d+)+)\](?!\()/g, "[$1](section:$1)");
+    // Replace verbal-only tags like [EQUIPMENT], [ATTACKING], [The 56 RISK@ Cards]
+    // Only when not already a link and contains at least one letter
+    out = out.replace(/\[((?=[^\]]*[A-Za-z])[^\]\n]{2,80})\](?!\()/g, (_m, p1) => {
+      try {
+        const enc = encodeURIComponent(String(p1));
+        return `[${p1}](section:${enc})`;
+      } catch {
+        return `[${p1}]`;
+      }
+    });
+    return out;
   };
   // State
   const [sessionId, setSessionId] = useState<string>("");
@@ -882,6 +894,43 @@ export default function HomePage() {
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const forcedOnceRef = useRef<boolean>(false);
+  // Modal state for section chunks
+  const [sectionModalOpen, setSectionModalOpen] = useState<boolean>(false);
+  const [sectionLoading, setSectionLoading] = useState<boolean>(false);
+  const [sectionError, setSectionError] = useState<string>("");
+  const [sectionTitle, setSectionTitle] = useState<string>("");
+  const [sectionChunks, setSectionChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
+
+  const openSectionModal = async (sec: string, uid?: string) => {
+    if (!sec) return;
+    setSectionTitle(sec);
+    setSectionError("");
+    setSectionChunks([]);
+    setSectionLoading(true);
+    setSectionModalOpen(true);
+    try {
+      // Ensure token
+      let t: string | null = null;
+      try { t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token"); } catch {}
+      const url = new URL(`${API_BASE}/section-chunks`);
+      url.searchParams.set("section", sec);
+      if (uid) url.searchParams.set("id", uid);
+      if (selectedGame) url.searchParams.set("game", selectedGame);
+      if (t) url.searchParams.set("token", t);
+      const resp = await fetch(url.toString(), { headers: t ? { Authorization: `Bearer ${t}` } as any : undefined });
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => "error");
+        throw new Error(`HTTP ${resp.status}: ${txt}`);
+      }
+      const data = await resp.json();
+      const chunks = Array.isArray(data?.chunks) ? data.chunks : [];
+      setSectionChunks(chunks);
+    } catch (e: any) {
+      setSectionError(String(e?.message || e || "Failed to load section"));
+    } finally {
+      setSectionLoading(false);
+    }
+  };
 
   // On first mobile visit, if no saved game and none selected, auto-open menu to prompt game choice
   useEffect(() => {
@@ -964,15 +1013,14 @@ export default function HomePage() {
                             {...({ urlTransform: (url: string) => url } as any)}
                             components={{
                               a({ href, children, ...props }: { href?: string; children?: any }) {
-                                if (href && typeof href === 'string' && href.startsWith('section:')) {
-                                  const sec = href.slice('section:'.length);
+                              if (href && typeof href === 'string' && href.startsWith('section:')) {
+                                  const sec = decodeURIComponent(href.slice('section:'.length));
                                   return (
                                     <button
                                       className="btn link"
                                       onClick={(e) => {
                                         e.preventDefault();
-                                        // Trigger a quote query for this section
-                                        startQuery(`quote ${sec}`, null);
+                                        openSectionModal(sec);
                                       }}
                                       style={{
                                         padding: 0,
@@ -1031,14 +1079,13 @@ export default function HomePage() {
                           components={{
                             a({ href, children, ...props }: { href?: string; children?: any }) {
                               if (href && typeof href === 'string' && href.startsWith('section:')) {
-                                const sec = href.slice('section:'.length);
+                                const sec = decodeURIComponent(href.slice('section:'.length));
                                 return (
                                   <button
                                     className="btn link"
                                     onClick={(e) => {
                                       e.preventDefault();
-                                      // Trigger a quote query for this section
-                                      startQuery(`quote ${sec}`, null);
+                                      openSectionModal(sec);
                                     }}
                                     style={{
                                       padding: 0,
@@ -1249,6 +1296,42 @@ export default function HomePage() {
           </section>
         </div>
       </div>
+      {/* Section chunks modal */}
+      {sectionModalOpen && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={() => setSectionModalOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="row" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
+              <button className="btn" onClick={() => setSectionModalOpen(false)} aria-label="Close" title="Close" style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center' }}>×</button>
+            </div>
+            <div className="modal-body">
+              {sectionLoading && (
+                <div className="indicator" style={{ gap: 8 }}>
+                  <span className="spinner" />
+                  <span>Loading…</span>
+                </div>
+              )}
+              {!!sectionError && !sectionLoading && (
+                <div className="muted" style={{ color: 'var(--danger, #b00020)' }}>{sectionError}</div>
+              )}
+              {!sectionLoading && !sectionError && sectionChunks.length === 0 && (
+                <div className="muted">No chunks found for this section.</div>
+              )}
+              {!sectionLoading && sectionChunks.length > 0 && (
+                <div className="chunk-list">
+                  {sectionChunks.map((c, i) => (
+                    <div key={c.uid || i} className="chunk-item surface">
+                      <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                        {c.source}{typeof c.page === 'number' ? ` · p.${c.page}` : ''}
+                      </div>
+                      <div className="chunk-text">{c.text}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mobile bottom sheet */}
       <div className={`mobile-sheet ${sheetOpen ? 'open' : ''}`}>

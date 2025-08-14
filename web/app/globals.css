@@ -186,6 +186,14 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .bookmark + .bookmark { margin-top: 6px; }
 .section summary { cursor: pointer; padding: 10px 0; font-weight: 600; }
 
+/* Modal styles */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid; place-items: center; padding: 16px; z-index: 1000; }
+.modal { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); width: min(900px, 96vw); max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+.modal .modal-body { padding: 12px; overflow: auto; }
+.chunk-list { display: grid; gap: 10px; }
+.chunk-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; background: var(--surface); }
+.chunk-text { white-space: pre-wrap; line-height: 1.4; }
+
 /* Tighter markdown headings inside chat bubbles */
 .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
   /* further reduce vertical margins */

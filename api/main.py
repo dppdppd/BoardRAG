@@ -16,6 +16,11 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
 from src.query import stream_query_rag, get_available_games
+from src.query import get_stored_game_names, get_chromadb_settings, suppress_chromadb_telemetry  # for section chunks
+from src.config import CHROMA_PATH
+from src.embedding_function import get_embedding_function
+import chromadb
+from langchain_chroma import Chroma
 from src.services.library_service import rebuild_library, refresh_games, save_uploaded_files
 from src.services.game_service import delete_games, rename_pdfs, get_pdf_dropdown_choices
 from src.services.auth_service import unlock, issue_token, verify_token
@@ -228,6 +233,192 @@ async def list_pdf_choices():
 @app.get("/storage")
 async def storage_stats():
     return {"markdown": format_storage_info()}
+
+
+@app.get("/section-chunks")
+async def section_chunks(section: Optional[str] = None, game: Optional[str] = None, limit: int = 12, id: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _role = _require_auth(authorization, token)
+    sec = (section or "").strip()
+    if not sec and not id:
+        raise HTTPException(status_code=400, detail="missing section or id")
+    # Connect to DB
+    try:
+        embedding_function = get_embedding_function()
+        with suppress_chromadb_telemetry():
+            persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
+            db = Chroma(client=persistent_client, embedding_function=embedding_function)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"db error: {e}")
+
+    # Resolve PDFs for selected game (if provided)
+    target_files: Optional[Set[str]] = None
+    if game:
+        try:
+            name_map = get_stored_game_names()
+            key = (game or "").strip().lower()
+            import os as _os
+            # Match by mapped game name first
+            files = { _os.path.basename(fname).lower() for fname, gname in name_map.items() if (gname or "").strip().lower() == key }
+            if not files:
+                # Fallback: match by filename-style key (e.g., "catan_base")
+                files = { _os.path.basename(fname).lower() for fname in name_map.keys() if _os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == key }
+            target_files = files if files else set()
+        except Exception:
+            target_files = set()
+
+    # Scan all docs and filter by section
+    try:
+        raw = db.get()
+        documents = raw.get("documents", [])
+        metadatas = raw.get("metadatas", [])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"db read error: {e}")
+
+    out = []
+    sec_lower = (sec or "").lower()
+
+    def _clean_chunk_text(s: str) -> str:
+        try:
+            # Remove long unicode ellipsis runs and dot leaders
+            s2 = re.sub(r"[…]{2,}", "", s)
+            s2 = re.sub(r"\.{5,}", "", s2)
+            # Trim dot leaders before trailing page numbers per line
+            cleaned_lines = []
+            for ln in s2.splitlines():
+                ln2 = re.sub(r"\.{2,}\s*\d+\s*$", "", ln)
+                cleaned_lines.append(ln2.rstrip())
+            return "\n".join(cleaned_lines)
+        except Exception:
+            return s
+
+    # Optional: exact fetch by uid
+    import hashlib as _hashlib, base64 as _b64
+
+    def _make_uid(text: str, meta: dict) -> str:
+        try:
+            payload = f"{meta.get('source') or ''}|{meta.get('page') or ''}|{meta.get('section') or ''}|{meta.get('section_number') or ''}|{(text or '')[:160]}".encode("utf-8", errors="ignore")
+            h = _hashlib.sha1(payload).digest()
+            return _b64.urlsafe_b64encode(h).decode("ascii").rstrip("=")
+        except Exception:
+            return ""
+
+    candidates = []
+    for text, meta in zip(documents, metadatas):
+        if not isinstance(meta, dict):
+            continue
+        # Filter by game PDFs if provided
+        if target_files is not None and len(target_files) > 0:
+            pdf_fn = str(meta.get("pdf_filename") or "").lower()
+            if pdf_fn not in target_files:
+                continue
+        sec_num = str(meta.get("section_number") or "").strip()
+        sec_label = str(meta.get("section") or "").strip()
+        uid = _make_uid(str(text or ""), meta)
+        if id and uid == id:
+            # Return this exact chunk immediately
+            try:
+                from pathlib import Path as _Path
+                source_path = str(meta.get("source") or "")
+                return {"section": sec, "game": game, "chunks": [{
+                    "uid": uid,
+                    "text": _clean_chunk_text(str(text or "")),
+                    "source": _Path(source_path).name if source_path else "unknown",
+                    "page": meta.get("page"),
+                    "section": str(meta.get("section") or ""),
+                    "section_number": str(meta.get("section_number") or ""),
+                }]}
+            except Exception:
+                return {"section": sec, "game": game, "chunks": [{
+                    "uid": uid,
+                    "text": _clean_chunk_text(str(text or "")),
+                    "source": str(meta.get("source") or "unknown"),
+                    "page": meta.get("page"),
+                    "section": str(meta.get("section") or ""),
+                    "section_number": str(meta.get("section_number") or ""),
+                }]}
+
+        # If fetching by section, compute match and ranking
+        if sec:
+            exact_num = bool(sec_num) and (sec_num == sec)
+            child_num = bool(sec_num) and sec_num.startswith(sec + ".")
+            # Extract numeric at start of label if present
+            m = re.match(r"^\s*(\d+(?:\.\d+)*)\b", sec_label)
+            label_num = m.group(1) if m else ""
+            exact_label = bool(label_num) and (label_num == sec)
+            child_label = bool(label_num) and label_num.startswith(sec + ".")
+            # Only consider candidates that match by number or numeric label prefix
+            if not (exact_num or child_num or exact_label or child_label):
+                continue
+            # Penalize cross-reference labels like "15.1 & 48.3"
+            cross_ref = bool(re.search(r"&\s*\d", sec_label))
+            # rank: lower is better
+            base_rank = 0 if exact_num else 1 if child_num else 2 if exact_label else 3
+            penalty = 2 if cross_ref and not exact_num else 0
+            rank = base_rank + penalty
+            candidates.append((rank, uid, text, meta))
+
+    if id and not out:
+        # id requested but not found
+        return {"section": sec, "game": game, "chunks": []}
+
+    if sec:
+        # Sort by rank, then prefer shorter rank ties by page number then by text length
+        def _key(item):
+            r, u, t, m = item
+            pg = m.get("page")
+            try:
+                pgk = int(pg) if isinstance(pg, (int, float, str)) and str(pg).isdigit() else 999999
+            except Exception:
+                pgk = 999999
+            return (r, pgk, len(str(t or "")))
+
+        candidates.sort(key=_key)
+        limit_n = max(1, min(50, int(limit) if isinstance(limit, int) else 12))
+        for r, uid, text, meta in candidates[:limit_n]:
+            sec_num = str(meta.get("section_number") or "").strip()
+            sec_label = str(meta.get("section") or "").strip()
+            try:
+                from pathlib import Path as _Path
+                source_path = str(meta.get("source") or "")
+                out.append({
+                    "uid": uid,
+                    "text": _clean_chunk_text(str(text or "")),
+                    "source": _Path(source_path).name if source_path else "unknown",
+                    "page": meta.get("page"),
+                    "section": sec_label,
+                    "section_number": sec_num,
+                })
+            except Exception:
+                out.append({
+                    "uid": uid,
+                    "text": _clean_chunk_text(str(text or "")),
+                    "source": str(meta.get("source") or "unknown"),
+                    "page": meta.get("page"),
+                    "section": sec_label,
+                    "section_number": sec_num,
+                })
+
+    # Final ordering: by PDF source, then page number, then numeric section path
+    if out:
+        def _parse_ints_path(s: str):
+            try:
+                parts = [int(p) for p in str(s or "").split(".") if p.isdigit()]
+                return tuple(parts)
+            except Exception:
+                return tuple()
+        def _final_key(it: dict):
+            src = str(it.get("source") or "").lower()
+            pg = it.get("page")
+            try:
+                pgk = int(pg) if isinstance(pg, (int, float, str)) and str(pg).isdigit() else 999999
+            except Exception:
+                pgk = 999999
+            sec_path = _parse_ints_path(it.get("section_number") or "")
+            return (src, pgk, sec_path)
+        out.sort(key=_final_key)
+
+    return {"section": sec, "game": game, "chunks": out}
 
 
 @app.post("/auth/unlock")

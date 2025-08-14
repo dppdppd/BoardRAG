@@ -184,6 +184,82 @@ def _openai_requires_default_temperature(model_name: str) -> bool:
 
 
 
+def _basic_plural_variants(token: str) -> List[str]:
+    """Return simple singular/plural variants for a token.
+
+    This is a lightweight heuristic to improve recall without external NLP deps.
+    The original token is always included first; duplicates are removed by caller.
+    """
+    try:
+        t = token.strip()
+        if not t or any(ch for ch in t if not ch.isalpha()):
+            return [t]
+        lower = t.lower()
+        variants = [t]
+        # Singularize basic forms
+        if lower.endswith("ies") and len(lower) > 3:
+            singular = lower[:-3] + "y"
+            variants.append(singular)
+        elif lower.endswith("es") and len(lower) > 2:
+            # handle boxes → box, classes → class
+            variants.append(lower[:-2])
+        elif lower.endswith("s") and len(lower) > 1:
+            variants.append(lower[:-1])
+        # Pluralize basic forms
+        if lower.endswith("y") and len(lower) > 1 and lower[-2] not in "aeiou":
+            variants.append(lower[:-1] + "ies")
+        elif lower.endswith(("s", "x", "z", "ch", "sh")):
+            variants.append(lower + "es")
+        else:
+            variants.append(lower + "s")
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        out: List[str] = []
+        for v in variants:
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
+    except Exception:
+        return [token]
+
+
+def generate_query_variants(query_text: str, game_names: Optional[List[str]] = None) -> List[str]:
+    """Generate a small set of retrieval queries to improve recall (generic only).
+
+    Strategy:
+    - Start with the raw user query.
+    - Append plural/singular variants for key tokens (no domain synonyms).
+    Returns a list of 1–5 concise query strings.
+    """
+    raw = (query_text or "").strip()
+    if not raw:
+        return []
+
+    # Heuristic token selection: words >= 4 chars (avoids stopwords); keep originals
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", raw)]
+    variant_terms: List[str] = []
+    for w in words[:6]:  # limit to first few meaningful tokens
+        variant_terms.extend(_basic_plural_variants(w))
+
+    # Build variants (cap to 4–5 total)
+    variants: List[str] = [raw]
+    if variant_terms:
+        # Append a lightweight tail so embeddings see both forms without changing meaning
+        tail = " ".join(dict.fromkeys(variant_terms))[:200]
+        variants.append(f"{raw} {tail}")
+
+    # Deduplicate while preserving order and trim excessive variants
+    seen: set[str] = set()
+    uniq: List[str] = []
+    for v in variants:
+        v2 = v.strip()
+        if v2 and v2 not in seen:
+            seen.add(v2)
+            uniq.append(v2)
+    return uniq[:5]
+
+
 def normalize_game_title(title: str) -> str:
     """
     Normalize game title by moving leading articles to the end.
@@ -774,19 +850,32 @@ def query_rag(
                     prioritized_results.append((_Doc(page_content=doc_text, metadata=meta), 0.0))
         except Exception as e:
             print(f"⚠️ Section prioritization failed: {e}")
-    try:
-            all_results = (
-                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+    # Multi-query retrieval with plural/synonym expansion
+    variant_queries = generate_query_variants(query_text, game_names)
+    if not variant_queries:
+        variant_queries = [query_text]
+    # Build variant search strings including chat history when present
+    search_variants = [
+        (f"{chat_history}\n\n{v}" if chat_history else v) for v in variant_queries
+    ]
+    # Allocate per-variant k to avoid over-fetching
+    per_variant_k = max(8, k_results // max(1, len(search_variants)))
+    all_results = []
+    for vq in search_variants:
+        try:
+            batch = (
+                db.similarity_search_with_score(vq, k=per_variant_k, filter=metadata_filter)
                 if metadata_filter
-                else db.similarity_search_with_score(search_query, k=k_results)
+                else db.similarity_search_with_score(vq, k=per_variant_k)
             )
-    except TypeError:
-            # langchain-chroma version without 'filter' kwarg
-            all_results = (
-                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+        except TypeError:
+            batch = (
+                db.similarity_search_with_score(vq, k=per_variant_k, filter=metadata_filter)
                 if metadata_filter
-                else db.similarity_search_with_score(search_query, k=k_results)
+                else db.similarity_search_with_score(vq, k=per_variant_k)
             )
+        # Extend combined list; we'll dedupe below
+        all_results.extend(batch)
 
     # Merge similarity hits with simple dedupe
     results = []
@@ -1184,19 +1273,29 @@ def stream_query_rag(
             available_games = sorted(set(gname.lower() for gname in stored_map.values()))
             raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
         metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
-    try:
-            all_results = (
-                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+    # Multi-query retrieval with plural/synonym expansion
+    variant_queries = generate_query_variants(query_text, game_names)
+    if not variant_queries:
+        variant_queries = [query_text]
+    search_variants = [
+        (f"{chat_history}\n\n{v}" if chat_history else v) for v in variant_queries
+    ]
+    per_variant_k = max(12, k_results // max(1, len(search_variants)))
+    all_results = []
+    for vq in search_variants:
+        try:
+            batch = (
+                db.similarity_search_with_score(vq, k=per_variant_k, filter=metadata_filter)
                 if metadata_filter
-                else db.similarity_search_with_score(search_query, k=k_results)
+                else db.similarity_search_with_score(vq, k=per_variant_k)
             )
-    except TypeError:
-            # langchain-chroma version without 'filter' kwarg
-            all_results = (
-                db.similarity_search_with_score(search_query, k=k_results, filter=metadata_filter)
+        except TypeError:
+            batch = (
+                db.similarity_search_with_score(vq, k=per_variant_k, filter=metadata_filter)
                 if metadata_filter
-                else db.similarity_search_with_score(search_query, k=k_results)
+                else db.similarity_search_with_score(vq, k=per_variant_k)
             )
+        all_results.extend(batch)
     print(f"📊 Database returned {len(all_results)} total results")
 
     # No hardcoded section fast path: rely on standard retrieval and ranking
