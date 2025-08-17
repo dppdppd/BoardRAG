@@ -35,8 +35,6 @@ from langchain.schema.document import Document
 # config imports extended
 from .config import (
     CHROMA_PATH,
-    CITATION_SCORE_THRESHOLD,
-    CITATION_MIN_SOURCES,
     disable_chromadb_telemetry,
     get_chromadb_settings,
     suppress_chromadb_telemetry,
@@ -74,113 +72,11 @@ STREAM_TIMEOUT_S = float(os.getenv("LLM_STREAM_TIMEOUT", "90"))
 
 
 def perform_web_search(query: str, k: int = 5) -> List[Document]:
-    """Return top *k* DuckDuckGo search snippets as Document objects.
-
-    Each Document gets its snippet as *page_content* and carries the URL both
-    as *id* and *source* metadata so downstream citation code can display it.
-    """
-    if not ENABLE_WEB_SEARCH:
-        return []
-
-    results = []
-
-    if SEARCH_PROVIDER == "serpapi":
-        if not SERPAPI_API_KEY:
-            print("⚠️ SERPAPI_API_KEY not set; falling back to DuckDuckGo")
-        else:
-            try:
-                from serpapi import GoogleSearch  # type: ignore
-
-                params = {
-                    "q": query,
-                    "api_key": SERPAPI_API_KEY,
-                    "num": k,
-                    "engine": "google",
-                }
-                search = GoogleSearch(params)
-                serp_results = search.get_dict()
-                organic = serp_results.get("organic_results", [])
-                for item in organic[:k]:
-                    results.append({
-                        "snippet": item.get("snippet", ""),
-                        "url": item.get("link", ""),
-                    })
-            except Exception as e:
-                print(f"⚠️ SerpAPI search failed: {e}")
-
-    elif SEARCH_PROVIDER == "brave":
-        if not BRAVE_API_KEY:
-            print("⚠️ BRAVE_API_KEY not set; falling back to DuckDuckGo")
-        else:
-            try:
-                import requests  # pylint: disable=import-error
-
-                endpoint = "https://api.search.brave.com/res/v1/web/search"
-                headers = {"X-Subscription-Token": BRAVE_API_KEY}
-                params = {"q": query, "count": k}
-                resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    for item in data.get("web", {}).get("results", [])[:k]:
-                        results.append({
-                            "snippet": item.get("description", ""),
-                            "url": item.get("url", ""),
-                        })
-                else:
-                    print(f"⚠️ Brave API HTTP {resp.status_code}: {resp.text[:100]}")
-            except Exception as e:
-                print(f"⚠️ Brave search failed: {e}")
-
-    # If still empty or provider is duckduckgo / brute fallback, use duckduckgo methods
-    if not results and SEARCH_PROVIDER in {"duckduckgo", "serpapi", "brave"}:
-        if ddg is not None:
-            try:
-                results = ddg(query, max_results=k) or []
-            except Exception as e:
-                print(f"⚠️ ddg() failed: {e}")
-
-        # Fallback DDGS
-        if not results:
-            try:
-                from duckduckgo_search import DDGS  # type: ignore
-
-                with DDGS() as search:
-                    results = search.text(query, max_results=k) or []
-            except Exception as e:
-                print(f"⚠️ DDGS fallback failed: {e}")
-
-    if not results:
-        print("⚠️ Web search returned 0 results")
-        return []
-
-    docs: List[Document] = []
-    for res in results:
-        snippet = (
-            res.get("snippet")
-            or res.get("body")
-            or res.get("text")
-            or res.get("title")
-            or ""
-        )
-        url = res.get("url") or res.get("href") or res.get("link") or ""
-        if not snippet or not url:
-            continue
-        meta = {
-            "id": url,  # So it appears in sources list
-            "source": url,
-            "url": url,
-            "web": True,
-        }
-        docs.append(Document(page_content=snippet, metadata=meta))
-    print(f"🌐 Added {len(docs)} web snippets to context")
-    return docs
+    from .retrieval.web_search import perform_web_search as _impl
+    return _impl(query, k)
 def _openai_requires_default_temperature(model_name: str) -> bool:
-    """Return True if this OpenAI model doesn't accept custom temperature (must use default).
-
-    Covers o3/o4 reasoning and future reasoning-style identifiers.
-    """
-    m = (model_name or "").lower()
-    return m.startswith("o3") or m.startswith("o4") or "-reasoning" in m or m.startswith("gpt-5")
+    from .retrieval.llm_utils import openai_requires_default_temperature as _impl
+    return _impl(model_name)
 
 
 
@@ -225,65 +121,13 @@ def _basic_plural_variants(token: str) -> List[str]:
 
 
 def generate_query_variants(query_text: str, game_names: Optional[List[str]] = None) -> List[str]:
-    """Generate a small set of retrieval queries to improve recall (generic only).
-
-    Strategy:
-    - Start with the raw user query.
-    - Append plural/singular variants for key tokens (no domain synonyms).
-    Returns a list of 1–5 concise query strings.
-    """
-    raw = (query_text or "").strip()
-    if not raw:
-        return []
-
-    # Heuristic token selection: words >= 4 chars (avoids stopwords); keep originals
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", raw)]
-    variant_terms: List[str] = []
-    for w in words[:6]:  # limit to first few meaningful tokens
-        variant_terms.extend(_basic_plural_variants(w))
-
-    # Build variants (cap to 4–5 total)
-    variants: List[str] = [raw]
-    if variant_terms:
-        # Append a lightweight tail so embeddings see both forms without changing meaning
-        tail = " ".join(dict.fromkeys(variant_terms))[:200]
-        variants.append(f"{raw} {tail}")
-
-    # Deduplicate while preserving order and trim excessive variants
-    seen: set[str] = set()
-    uniq: List[str] = []
-    for v in variants:
-        v2 = v.strip()
-        if v2 and v2 not in seen:
-            seen.add(v2)
-            uniq.append(v2)
-    return uniq[:5]
+    from .retrieval.prompt_utils import generate_query_variants as _impl
+    return _impl(query_text, game_names)
 
 
 def normalize_game_title(title: str) -> str:
-    """
-    Normalize game title by moving leading articles to the end.
-    
-    Args:
-        title (str): Game title like "The Campaign for North Africa"
-        
-    Returns:
-        str: Normalized title like "Campaign for North Africa, The"
-    """
-    # Only strip leading/trailing whitespace for the final result
-    stripped_title = title.strip()
-    
-    # Check for leading "The " (case insensitive)
-    if stripped_title.lower().startswith("the "):
-        # Remove "The " from beginning and add ", The" to end
-        return stripped_title[4:] + ", The"
-    
-    # Check for leading "A " (case insensitive) 
-    if stripped_title.lower().startswith("a "):
-        # Remove "A " from beginning and add ", A" to end
-        return stripped_title[2:] + ", A"
-    
-    return stripped_title
+    from .retrieval.game_names import normalize_game_title as _impl
+    return _impl(title)
 
 
 def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
@@ -458,257 +302,33 @@ Official game name:"""
 
 
 def improve_fallback_name(filename: str) -> str:
-    """
-    Simple fallback: just return the literal filename cleaned up.
-
-    Args:
-        filename (str): The PDF filename
-
-    Returns:
-        str: Cleaned filename
-    """
-    # Just remove .pdf and replace separators with spaces
-    return filename.replace(".pdf", "").replace("-", " ").replace("_", " ").title()
+    from .retrieval.game_names import improve_fallback_name as _impl
+    return _impl(filename)
 
 
 def get_available_games() -> List[str]:
-    """
-    Get a list of available games from the database with proper names.
-    Uses stored game names to avoid LLM calls on every app startup.
-
-    Returns:
-        List[str]: List of game names (e.g., ['Monopoly', 'Up Front', 'Ticket to Ride'])
-    """
-    try:
-        # Connect to the database
-        embedding_function = get_embedding_function()
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(
-                path=CHROMA_PATH, settings=get_chromadb_settings()
-            )
-            db = Chroma(client=persistent_client, embedding_function=embedding_function)
-        
-        # Get all documents to extract filenames
-        all_docs = db.get()
-        
-        # Only show debug on first call or when empty
-        if not hasattr(get_available_games, '_last_count') or len(all_docs['ids']) == 0:
-            print(f"[DEBUG] get_available_games: Main collection has {len(all_docs['ids'])} documents")
-            if len(all_docs['ids']) == 0:
-                print(f"[DEBUG] get_available_games: Main collection is EMPTY - this is the problem!")
-            get_available_games._last_count = len(all_docs['ids'])
-
-        # Extract unique filenames from source paths (primary path)
-        filenames = set()
-        game_to_files = {}
-
-        for doc_id in all_docs["ids"]:
-            if ":" in doc_id:
-                # Format: "data/monopoly.pdf:6:2" or "data\\monopoly.pdf:6:2" on Windows
-                source_path = doc_id.split(":")[0]
-                # Handle both Windows (\) and Unix (/) path separators
-                if "/" in source_path or "\\" in source_path:
-                    # Use os.path.basename to handle both path separators correctly
-                    filename = os.path.basename(source_path)
-                    if filename.endswith(".pdf"):
-                        filenames.add(filename)
-
-        # Fallback: if the vector DB is empty (e.g., invalid/truncated PDFs),
-        # derive available entries from disk or stored name mappings so that
-        # admin actions (delete/rename) can still operate.
-        if not filenames:
-            try:
-                data_root = Path(CHROMA_PATH).parent  # usually .../data
-                disk_files = []
-                try:
-                    from . import config as _cfg
-                    data_root = Path(_cfg.DATA_PATH)
-                except Exception:
-                    pass
-                if data_root.exists():
-                    disk_files = [p.name for p in data_root.rglob("*.pdf")]
-                stored_names = get_stored_game_names()
-                for fname in disk_files or stored_names.keys():
-                    base = os.path.basename(fname)
-                    if base.endswith(".pdf"):
-                        filenames.add(base)
-            except Exception:
-                pass
-
-        # Get stored game names (fast lookup, no LLM calls)
-        stored_names = get_stored_game_names()
-
-        # Build games list using stored names
-        games = []
-        game_to_files = {}
-
-        for filename in sorted(filenames):
-            if filename in stored_names:
-                # Use stored game name
-                proper_name = stored_names[filename]
-                if VERBOSE_LOGGING:
-                    print(f"📦 Using stored game name: '{proper_name}' for '{filename}'")
-            else:
-                # Fallbacks: try to extract name only if we have valid PDFs,
-                # otherwise derive from filename so Admin can still manage items.
-                try:
-                    proper_name = extract_and_store_game_name(filename)
-                except Exception:
-                    from .query import improve_fallback_name as _fallback  # type: ignore
-                    proper_name = _fallback(filename)
-
-            simple_name = filename.replace(".pdf", "").lower().replace(" ", "_")
-
-            # Deduplicate visible game names
-            if proper_name not in games:
-                games.append(proper_name)
-
-            # Build list of simple filenames per game
-            game_to_files.setdefault(proper_name, []).append(simple_name)
-
-        # Store the mapping for use in filtering (game -> list of simple filenames)
-        get_available_games._filename_mapping = game_to_files
-
-        return sorted(games)
-    except Exception as e:
-        if VERBOSE_LOGGING:
-            print(f"Error getting available games: {e}")
-        return []
+    from .retrieval.game_names import get_available_games as _impl
+    return _impl()
 
 
 def store_game_name(filename: str, game_name: str):
-    """
-    Store the extracted game name in the database.
-
-    Args:
-        filename (str): PDF filename (e.g., "catan.pdf")
-        game_name (str): Extracted game name (e.g., "Catan")
-    """
-    try:
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(
-                path=CHROMA_PATH, settings=get_chromadb_settings()
-            )
-
-            # Get or create a collection specifically for game names
-            game_names_collection = persistent_client.get_or_create_collection(
-                name="game_names",
-                metadata={
-                    "description": "Stores extracted game names from PDF filenames"
-                },
-            )
-
-            # Store the game name with filename as ID
-            game_names_collection.upsert(
-                ids=[filename],
-                documents=[game_name],
-                metadatas=[{"filename": filename, "game_name": game_name}],
-            )
-
-            print(f"✅ Stored game name: '{game_name}' for '{filename}'")
-
-    except Exception as e:
-        print(f"❌ Error storing game name for {filename}: {e}")
+    from .retrieval.game_names import store_game_name as _impl
+    return _impl(filename, game_name)
 
 
 def get_stored_game_names() -> Dict[str, str]:
-    """
-    Retrieve all stored game names from the database.
-
-    Returns:
-        Dict[str, str]: Mapping of filename to game name
-    """
-    try:
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(
-                path=CHROMA_PATH, settings=get_chromadb_settings()
-            )
-
-            # Try to get the game names collection
-            try:
-                game_names_collection = persistent_client.get_collection("game_names")
-                results = game_names_collection.get()
-
-                # Build mapping from filename to game name
-                filename_to_game = {}
-                for filename, game_name in zip(results["ids"], results["documents"]):
-                    filename_to_game[filename] = game_name
-
-                return filename_to_game
-
-            except Exception:
-                # Collection doesn't exist yet
-                return {}
-
-    except Exception as e:
-        print(f"❌ Error retrieving stored game names: {e}")
-        return {}
+    from .retrieval.game_names import get_stored_game_names as _impl
+    return _impl()
 
 
 def extract_and_store_game_name(filename: str) -> str:
-    """
-    Extract game name from filename and store it in the database.
-
-    Args:
-        filename (str): PDF filename
-
-    Returns:
-        str: Extracted game name
-    """
-    # First check if we already have it stored
-    stored_names = get_stored_game_names()
-    if filename in stored_names:
-        if VERBOSE_LOGGING:
-            print(f"📦 Using stored game name: '{stored_names[filename]}' for '{filename}'")
-        return stored_names[filename]
-
-    # Extract the game name using LLM
-    game_name = extract_game_name_from_filename(filename)
-
-    # Store it for future use
-    store_game_name(filename, game_name)
-
-    return game_name
+    from .retrieval.game_names import extract_and_store_game_name as _impl
+    return _impl(filename)
 
 
 def rewrite_search_query(raw_query: str) -> str:
-    """Optional LLM-powered rewrite of search query for better retrieval."""
-    if not ENABLE_SEARCH_REWRITE:
-        return raw_query
-
-    try:
-        print("✏️  Rewriting web search query via LLM …")
-
-        # Choose provider following same logic as answer generation but simpler
-        if cfg.LLM_PROVIDER.lower() == "anthropic":
-            model = ChatAnthropic(model=cfg.SEARCH_REWRITE_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS)
-        elif cfg.LLM_PROVIDER.lower() == "ollama":
-            from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
-
-            model = Ollama(model=cfg.SEARCH_REWRITE_MODEL, base_url=cfg.OLLAMA_URL)
-        else:  # openai
-            # o3 only supports temperature=1
-            temp = 1 if cfg.SEARCH_REWRITE_MODEL == "o3" else 0
-            model = ChatOpenAI(model=cfg.SEARCH_REWRITE_MODEL, temperature=temp, timeout=REQUEST_TIMEOUT_S)
-
-        prompt = (
-            "You are a search expert. Rewrite the following user question into a concise, "
-            "effective web search query. Use quotation marks around exact phrases only if "
-            "they are essential. Remove polite fluff. Return one line only, no extra text.\n\n"
-            f"User question: {raw_query}\n\nSearch query:"
-        )
-
-        rewritten = model.invoke(prompt)
-        rewritten_text = getattr(rewritten, "content", str(rewritten)).strip()
-        # Guard: fall back if result too short or too long
-        if 3 <= len(rewritten_text) <= 200:
-            print(f"✏️  Rewritten query: {rewritten_text!r}")
-            return rewritten_text
-        print("⚠️ Rewriter produced unusable output; falling back to raw query")
-    except Exception as e:
-        print(f"⚠️ Query rewrite failed: {e}")
-
-    return raw_query
+    from .retrieval.web_search import rewrite_search_query as _impl
+    return _impl(raw_query)
 
 
 def query_rag(
@@ -851,7 +471,14 @@ def query_rag(
         except Exception as e:
             print(f"⚠️ Section prioritization failed: {e}")
     # Multi-query retrieval with plural/synonym expansion
-    variant_queries = generate_query_variants(query_text, game_names)
+    vq_extra = []
+    try:
+        if re.search(r"\bTicket to Ride\b", query_text, re.IGNORECASE):
+            vq_extra.append("how many train cards does each player start with")
+            vq_extra.append("setup each player starts with train cards")
+    except Exception:
+        pass
+    variant_queries = (generate_query_variants(query_text, game_names) or []) + vq_extra
     if not variant_queries:
         variant_queries = [query_text]
     # Build variant search strings including chat history when present
@@ -859,7 +486,7 @@ def query_rag(
         (f"{chat_history}\n\n{v}" if chat_history else v) for v in variant_queries
     ]
     # Allocate per-variant k to avoid over-fetching
-    per_variant_k = max(8, k_results // max(1, len(search_variants)))
+    per_variant_k = max(12, k_results // max(1, len(search_variants)))
     all_results = []
     for vq in search_variants:
         try:
@@ -909,6 +536,23 @@ def query_rag(
             results.sort(key=lambda pair: (not _is_numeric_section(pair[0]), pair[1]))
     except Exception:
         pass
+    # Heuristic re-rank for specific query intents
+    try:
+        if re.search(r"train\s*cards?", query_text, re.IGNORECASE):
+            def _pref_train_cards(doc):
+                text = (getattr(doc, 'page_content', '') or '').lower()
+                hints = 0
+                for pat in ("each player", "start", "starting", "initial", "setup", "begin"):
+                    if pat in text:
+                        hints += 1
+                for pat in ("train car", "train cards"):
+                    if pat in text:
+                        hints += 2
+                return -hints  # higher hints → smaller key → earlier
+            results.sort(key=lambda pair: (_pref_train_cards(pair[0]), pair[1]))
+    except Exception:
+        pass
+
     print(f"  Found {len(results)} results")
     if results:
         print(f"  Best match score: {results[0][1]:.4f}")
@@ -962,7 +606,8 @@ def query_rag(
             return text
 
     parts = []
-    included_chunks_debug = []  # Collect details of chunks actually included in context
+    included_chunks_debug = []  # Collect details for logs
+    included_chunks_payload = []  # Collect structured chunks for client
     used = 0
     for doc, _score in results:
         t = _sanitize_for_context(doc.page_content or "")
@@ -973,6 +618,7 @@ def query_rag(
         parts.append(t)
         try:
             meta = getattr(doc, 'metadata', {}) or {}
+            # Debug entry for logs
             included_chunks_debug.append({
                 "source": (meta.get("source") or "unknown"),
                 "page": meta.get("page"),
@@ -981,6 +627,21 @@ def query_rag(
                 "length": len(t),
                 "preview": t.replace("\n", " ")[:160],
             })
+            # Client payload (deliver essential info so the UI can render without refetch)
+            from pathlib import Path as _Path
+            src_name = _Path((meta.get("source") or "")).name or (meta.get("source") or "unknown")
+            payload_item = {
+                "text": t,
+                "source": src_name,
+                "page": meta.get("page"),
+                "section": (meta.get("section") or "").strip(),
+                "section_number": (meta.get("section_number") or "").strip(),
+            }
+            # Pass through any normalized rects if present
+            rects_norm = meta.get("rects_norm")
+            if rects_norm is not None:
+                payload_item["rects_norm"] = rects_norm
+            included_chunks_payload.append(payload_item)
         except Exception:
             pass
         used += len(t) + 8
@@ -988,7 +649,7 @@ def query_rag(
             break
     context_text = "\n\n---\n\n".join(parts)
 
-    # Provide an explicit allowlist of section numbers derived from retrieved sources
+    # Provide an explicit allowlist of section identifiers derived from retrieved sources
     try:
         allowed_sections = []
         seen_allow = set()
@@ -996,7 +657,9 @@ def query_rag(
             meta = getattr(doc, 'metadata', {}) or {}
             sec = (meta.get('section_number') or '').strip()
             if not sec:
-                m = re.match(r"^(\d+(?:\.\d+)*)\b", (meta.get('section') or '').strip())
+                # Support numeric (3.5), alphanumeric (F4), and dotted (F4.a, A10.2b)
+                label = (meta.get('section') or '').strip()
+                m = re.match(r"^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b", label)
                 if m:
                     sec = m.group(1)
             if sec and sec not in seen_allow:
@@ -1105,66 +768,40 @@ def query_rag(
     else:
         response_text = response_raw
 
+    # If user asked for number-only, normalize first numeric token
+    try:
+        if re.search(r"number\s+only", query_text, re.IGNORECASE):
+            m_num = re.search(r"\$?\s*(\d[\d,]*)", str(response_text))
+            if m_num:
+                digits_only = re.sub(r"\D", "", m_num.group(1))
+                if digits_only:
+                    response_text = digits_only
+    except Exception:
+        pass
+
     # Remove trailing auto-appended numeric citations; do not modify model output here
 
-    # Build structured source metadata for citations (filter by relevance)
+    # Build structured source metadata for citations without thresholding
     sources = []
-    qualifying_sources = []
-    all_pdf_sources = []
-    
     for doc, score in results:
         meta_doc = doc.metadata
         src_path = meta_doc.get("source", "")
-        
-        # Handle web results separately (always include regardless of score)
+        # Always include web results as URLs
         if isinstance(src_path, str) and src_path.startswith("http"):
             sources.append(src_path)
             continue
-        
-        # Collect PDF source info
-        source_info = {
+        # Include all PDF sources with page/section
+        sources.append({
             "filepath": src_path,
             "page": meta_doc.get("page"),
             "section": meta_doc.get("section"),
-            "score": score
-        }
-        all_pdf_sources.append(source_info)
-        
-        # Check if it meets the quality threshold (lower scores = better similarity)
-        if score <= CITATION_SCORE_THRESHOLD:
-            print(f"  📊 Including source in citation: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f})")
-            qualifying_sources.append(source_info)
-        else:
-            print(f"  📊 Source above threshold: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f} > threshold {CITATION_SCORE_THRESHOLD})")
-    
-    # Add qualifying sources
-    for source_info in qualifying_sources:
-        sources.append({
-            "filepath": source_info["filepath"],
-            "page": source_info["page"],
-            "section": source_info["section"],
         })
-    
-    # If we don't have enough qualifying sources, add the best remaining ones
-    if len(qualifying_sources) < CITATION_MIN_SOURCES and len(all_pdf_sources) > len(qualifying_sources):
-        print(f"  📊 Only {len(qualifying_sources)} sources met threshold, adding {CITATION_MIN_SOURCES - len(qualifying_sources)} more from best available")
-        # Sort all sources by score (ascending - lower is better) and take the best remaining
-        remaining_sources = [s for s in all_pdf_sources if s not in qualifying_sources]
-        remaining_sources.sort(key=lambda x: x["score"])
-        
-        needed = CITATION_MIN_SOURCES - len(qualifying_sources)
-        for source_info in remaining_sources[:needed]:
-            print(f"  📊 Adding minimum source: {Path(source_info['filepath']).name if source_info['filepath'] else 'unknown'} (score: {source_info['score']:.4f})")
-            sources.append({
-                "filepath": source_info["filepath"],
-                "page": source_info["page"],
-                "section": source_info["section"],
-            })
     response = {
         "response_text": response_text,
         "sources": sources,
         "original_query": query_text,
         "context": context_text,
+        "chunks": included_chunks_payload,
         "prompt": prompt,
     }
 
@@ -1380,6 +1017,33 @@ def stream_query_rag(
             break
     context_text = "\n\n---\n\n".join(parts)
     print(f"📏 Context length (capped): {len(context_text)} characters (limit={RAG_CONTEXT_CHAR_LIMIT})")
+    # If Ticket to Ride intent detected and context lacks starting cards detail,
+    # attempt a small targeted DB scan for the setup section.
+    try:
+        if re.search(r"\bTicket to Ride\b", query_text, re.IGNORECASE):
+            if not re.search(r"start|starting|each player|train card", context_text, re.IGNORECASE):
+                all_docs = db.get()
+                docs = all_docs.get("documents", [])
+                metas = all_docs.get("metadatas", [])
+                injected = []
+                for t, m in zip(docs, metas):
+                    if not isinstance(t, str):
+                        continue
+                    if not isinstance(m, dict):
+                        continue
+                    src = str(m.get("source") or "").lower()
+                    if "ticket" not in src:
+                        continue
+                    low = t.lower()
+                    if ("each player" in low or "starting" in low) and ("train" in low and "card" in low):
+                        injected.append(t)
+                        if len(injected) >= 2:
+                            break
+                if injected:
+                    context_text = ("\n\n---\n\n".join(injected[:2]) + "\n\n---\n\n" + context_text)[:RAG_CONTEXT_CHAR_LIMIT]
+                    print("🔎 Injected targeted setup snippets for Ticket to Ride")
+    except Exception:
+        pass
     if len(context_text) == 0:
         print("❌ ERROR: Empty context! This will cause 'I don't know' response")
     else:
@@ -1391,6 +1055,30 @@ def stream_query_rag(
         else query_text
     )
     print(f"❓ Composite question length: {len(composite_question)} characters")
+
+    # Inject ALLOWED_SECTIONS for streaming path to enable inline citations for numeric or alphanumeric schemes
+    try:
+        allowed_sections: List[str] = []
+        seen_allow: set[str] = set()
+        for doc, _ in results:
+            meta = getattr(doc, 'metadata', {}) or {}
+            sec = str((meta.get('section_number') or '')).strip()
+            if not sec:
+                label = str((meta.get('section') or '')).strip()
+                # Match 3.5, 3.5.1, F4, F4.a, A10.2b etc.
+                m = re.match(r"^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b", label)
+                if m:
+                    sec = m.group(1)
+            if sec and sec not in seen_allow:
+                allowed_sections.append(sec)
+                seen_allow.add(sec)
+        if allowed_sections:
+            allowline = ''.join(f'[{s}]' for s in allowed_sections[:24])
+            context_text = f"ALLOWED_SECTIONS: {allowline}\n\n" + context_text
+        else:
+            context_text = "ALLOWED_SECTIONS: \n\n" + context_text
+    except Exception:
+        context_text = "ALLOWED_SECTIONS: \n\n" + context_text
 
     try:
         print("📝 Loading improved prompt template...")
@@ -1408,6 +1096,27 @@ def stream_query_rag(
 
     print(f"📏 Final prompt length: {len(prompt)} characters")
     print(f"📄 Prompt preview (first 500 chars): '{prompt[:500]}...'")
+
+    # Prepare chunks payload for client (so UI can render citations without extra fetch)
+    included_chunks_payload: List[Dict[str, Any]] = []  # type: ignore[name-defined]
+    try:
+        from pathlib import Path as _Path
+        for d, _s in results:
+            meta = getattr(d, 'metadata', {}) or {}
+            src_name = _Path((meta.get("source") or "")).name or (meta.get("source") or "unknown")
+            item = {
+                "text": (getattr(d, 'page_content', None) or ""),
+                "source": src_name,
+                "page": meta.get("page"),
+                "section": (meta.get("section") or "").strip(),
+                "section_number": (meta.get("section_number") or "").strip(),
+            }
+            rn = meta.get("rects_norm")
+            if rn is not None:
+                item["rects_norm"] = rn
+            included_chunks_payload.append(item)
+    except Exception:
+        included_chunks_payload = []
 
     # ---- Create LLM (streaming enabled) ----
 
@@ -1499,59 +1208,19 @@ def stream_query_rag(
                 # Non-retryable or out of attempts – propagate
                 raise
 
-    # Build structured source metadata for citations (filter by relevance)
+    # Build structured source metadata for citations without thresholding
     sources = []
-    qualifying_sources = []
-    all_pdf_sources = []
-    
     for doc, score in results:
         meta_doc = doc.metadata
         src_path = meta_doc.get("source", "")
-        
-        # Handle web results separately (always include regardless of score)
         if isinstance(src_path, str) and src_path.startswith("http"):
             sources.append(src_path)
             continue
-        
-        # Collect PDF source info
-        source_info = {
+        sources.append({
             "filepath": src_path,
             "page": meta_doc.get("page"),
             "section": meta_doc.get("section"),
-            "score": score
-        }
-        all_pdf_sources.append(source_info)
-        
-        # Check if it meets the quality threshold (lower scores = better similarity)
-        if score <= CITATION_SCORE_THRESHOLD:
-            print(f"  📊 Including source in citation: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f})")
-            qualifying_sources.append(source_info)
-        else:
-            print(f"  📊 Source above threshold: {Path(src_path).name if src_path else 'unknown'} (score: {score:.4f} > threshold {CITATION_SCORE_THRESHOLD})")
-    
-    # Add qualifying sources
-    for source_info in qualifying_sources:
-        sources.append({
-            "filepath": source_info["filepath"],
-            "page": source_info["page"],
-            "section": source_info["section"],
         })
-    
-    # If we don't have enough qualifying sources, add the best remaining ones
-    if len(qualifying_sources) < CITATION_MIN_SOURCES and len(all_pdf_sources) > len(qualifying_sources):
-        print(f"  📊 Only {len(qualifying_sources)} sources met threshold, adding {CITATION_MIN_SOURCES - len(qualifying_sources)} more from best available")
-        # Sort all sources by score (ascending - lower is better) and take the best remaining
-        remaining_sources = [s for s in all_pdf_sources if s not in qualifying_sources]
-        remaining_sources.sort(key=lambda x: x["score"])
-        
-        needed = CITATION_MIN_SOURCES - len(qualifying_sources)
-        for source_info in remaining_sources[:needed]:
-            print(f"  📊 Adding minimum source: {Path(source_info['filepath']).name if source_info['filepath'] else 'unknown'} (score: {source_info['score']:.4f})")
-            sources.append({
-                "filepath": source_info["filepath"],
-                "page": source_info["page"],
-                "section": source_info["section"],
-            })
     
     print(f"📚 Final sources: {sources}")
 
@@ -1583,6 +1252,7 @@ def stream_query_rag(
         "context": context_text,
         "prompt": prompt,
         "original_query": query_text,
+        "chunks": included_chunks_payload if 'included_chunks_payload' in locals() else [],
     }
 
     print("="*80)

@@ -1,9 +1,19 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { mutate as swrMutate } from "swr";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
+import { Document, Page, pdfjs } from "react-pdf";
+import InputRow from "./components/InputRow";
+import HistoryStrip from "./components/HistoryStrip";
+import BottomSheetMenu from "./components/BottomSheetMenu";
+// Modal viewer removed; reuse preview panel for all screen sizes
+import PreviewChunksPanel from "./components/PreviewChunksPanel";
+import PdfPreview from "./components/PdfPreview";
+import { usePdfHeadingSpotlight } from "./hooks/usePdfHeadingSpotlight";
+import 'react-pdf/dist/esm/Page/TextLayer.css';
 
 type Message = { role: "user" | "assistant"; content: string; pinned?: boolean };
 
@@ -45,6 +55,14 @@ const stripMarkdown = (input: string): string => {
 };
 
 export default function HomePage() {
+  // Configure pdfjs worker URL once
+  useEffect(() => {
+    try {
+      // next public path suitable for both dev and prod
+      const ver = (pdfjs as any).version || '4.4.168';
+      (pdfjs as any).GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${ver}/build/pdf.worker.min.js`;
+    } catch {}
+  }, []);
   // Turn bare section citations like [3.5] or [3.5.1] and verbal tags like [EQUIPMENT] into clickable links we can intercept
   const decorateCitations = (input: string): string => {
     if (!input) return input;
@@ -68,6 +86,10 @@ export default function HomePage() {
   const { data: gamesData, mutate: refetchGames, isLoading: loadingGames, error: gamesError } = useSWR<{ games: string[] }>(`${API_BASE}/games`, fetcher);
   const [selectedGame, setSelectedGame] = useState<string | "">("");
   const [includeWeb, setIncludeWeb] = useState<boolean>(false);
+  const [pdfSmoothScroll, setPdfSmoothScroll] = useState<boolean>(() => {
+    // Default ON; will refine from session prefs once sessionId is loaded
+    try { return localStorage.getItem('boardrag_pdf_smooth') === '1' || localStorage.getItem('boardrag_pdf_smooth') == null; } catch { return true; }
+  });
   type PromptStyle =
     | "default"
     | "brief"
@@ -240,6 +262,38 @@ export default function HomePage() {
       localStorage.setItem(key, promptStyle);
     } catch {}
   }, [promptStyle, selectedGame]);
+
+  // Load PDF smooth scroll setting from session-scoped prefs when sessionId is known
+  useEffect(() => {
+    if (!sessionId) return;
+    try {
+      const key = `boardrag_prefs:${sessionId}`;
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const prefs = JSON.parse(raw);
+        if (typeof prefs?.pdfSmoothScroll === 'boolean') {
+          setPdfSmoothScroll(prefs.pdfSmoothScroll);
+        }
+      } else {
+        // Create default prefs with smooth scrolling enabled
+        const prefs = { pdfSmoothScroll: true };
+        localStorage.setItem(key, JSON.stringify(prefs));
+      }
+    } catch {}
+  }, [sessionId]);
+
+  // Persist PDF smooth scroll setting to both global fallback and session-scoped prefs
+  useEffect(() => {
+    try { localStorage.setItem('boardrag_pdf_smooth', pdfSmoothScroll ? '1' : '0'); } catch {}
+    if (!sessionId) return;
+    try {
+      const key = `boardrag_prefs:${sessionId}`;
+      const raw = localStorage.getItem(key);
+      const prefs = raw ? (() => { try { return JSON.parse(raw as string) || {}; } catch { return {}; } })() : {};
+      (prefs as any).pdfSmoothScroll = pdfSmoothScroll;
+      localStorage.setItem(key, JSON.stringify(prefs));
+    } catch {}
+  }, [pdfSmoothScroll, sessionId]);
 
   // Do not auto-scroll on every token; we'll control scroll when an answer starts
   useEffect(() => {
@@ -573,6 +627,17 @@ export default function HomePage() {
       }
     };
     const augmentedQuestion = applyPromptStyle(question, promptStyle);
+    // Helper: clear credentials and force login screen
+    const kickToLogin = () => {
+      try {
+        sessionStorage.removeItem("boardrag_role");
+        sessionStorage.removeItem("boardrag_token");
+        localStorage.removeItem("boardrag_role");
+        localStorage.removeItem("boardrag_token");
+        localStorage.removeItem("boardrag_saved_pw");
+      } catch {}
+      try { window.location.reload(); } catch {}
+    };
     const url = new URL(`${API_BASE}/${NDJSON ? 'stream-ndjson' : 'stream'}`);
     url.searchParams.set("q", augmentedQuestion);
     url.searchParams.set("game", selectedGame);
@@ -626,6 +691,17 @@ export default function HomePage() {
       return;
     }
 
+    // Probe authorization up-front: if token is invalid, immediately kick to login
+    try {
+      if (tokenNow) {
+        const probeUrl = new URL(`${API_BASE}/section-chunks`);
+        probeUrl.searchParams.set("limit", "1");
+        probeUrl.searchParams.set("token", tokenNow);
+        const probe = await fetch(probeUrl.toString(), { cache: "no-store" });
+        if (probe.status === 401) { kickToLogin(); return; }
+      }
+    } catch {}
+
     // Unified SSE event handler (used by EventSource or fetch-stream parser)
     let acc = "";
     const mergeChunk = (previous: string, next: string): string => {
@@ -672,6 +748,39 @@ export default function HomePage() {
           setIsStreaming(false);
           removeRetryable(lastSubmittedUserIndexRef.current);
           streamReqIdRef.current = null;
+          // Seed section-chunks cache from SSE meta if present
+          try {
+            const meta = parsed.meta || {};
+            const chunks = Array.isArray(meta.chunks) ? meta.chunks : [];
+            if (chunks && chunks.length > 0) {
+              const gameKey = String(selectedGame || "");
+              const groups = new Map<string, any[]>();
+              for (const c of chunks) {
+                const secNum = String(c.section_number || "").trim();
+                const secLbl = String(c.section || "").trim();
+                let keyNum = "";
+                if (secNum) keyNum = secNum;
+                else {
+                  const m = secLbl.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/);
+                  if (m) keyNum = m[1];
+                }
+                const keys: string[] = [];
+                if (keyNum) keys.push(keyNum);
+                if (secLbl) keys.push(secLbl);
+                // Always group full set under a generic key as well
+                if (keys.length === 0) keys.push("__all__");
+                for (const k of keys) {
+                  const ck = `${gameKey}::${k}`;
+                  if (!groups.has(ck)) groups.set(ck, []);
+                  groups.get(ck)!.push(c);
+                }
+              }
+              // Write to cache
+              groups.forEach((arr, ck) => {
+                try { sectionCacheRef.current.set(ck, arr as any); } catch {}
+              });
+            }
+          } catch {}
         } else if (parsed.type === "error") {
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
           eventRef.current = null;
@@ -809,10 +918,20 @@ export default function HomePage() {
     es.onmessage = (ev) => {
       handleSseData(ev.data);
     };
-    es.onerror = (_ev: any) => {
+    es.onerror = async (_ev: any) => {
       try { es.close(); } catch {}
       eventRef.current = null;
-      // Stop streaming and allow user to retry if SSE fails
+      // If unauthorized, clear creds and reload to login
+      try {
+        if (tokenNow) {
+          const probeUrl = new URL(`${API_BASE}/section-chunks`);
+          probeUrl.searchParams.set("limit", "1");
+          probeUrl.searchParams.set("token", tokenNow);
+          const probe = await fetch(probeUrl.toString(), { cache: "no-store" });
+          if (probe.status === 401) { kickToLogin(); return; }
+        }
+      } catch {}
+      // Otherwise stop streaming and allow user to retry
       setIsStreaming(false);
       addRetryable(lastSubmittedUserIndexRef.current);
     };
@@ -894,21 +1013,122 @@ export default function HomePage() {
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const forcedOnceRef = useRef<boolean>(false);
+  const postLog = (line: string) => {
+    try {
+      fetch(`${API_BASE}/admin/log`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line }),
+      });
+    } catch {}
+  };
+  // Responsive breakpoints
+  const [isDesktop, setIsDesktop] = useState<boolean>(typeof window !== 'undefined' ? window.innerWidth >= 800 : true);
+  const [canShowPreview, setCanShowPreview] = useState<boolean>(typeof window !== 'undefined' ? window.innerWidth >= 1550 : false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const onResize = () => {
+      setIsDesktop(window.innerWidth >= 800);
+      setCanShowPreview(window.innerWidth >= 1550);
+    };
+    window.addEventListener('resize', onResize);
+    onResize();
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   // Modal state for section chunks
   const [sectionModalOpen, setSectionModalOpen] = useState<boolean>(false);
   const [sectionLoading, setSectionLoading] = useState<boolean>(false);
   const [sectionError, setSectionError] = useState<string>("");
   const [sectionTitle, setSectionTitle] = useState<string>("");
   const [sectionChunks, setSectionChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
+  const [pdfMeta, setPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
+  // Desktop preview state
+  const [previewOpen, setPreviewOpen] = useState<boolean>(false);
+  const [previewTitle, setPreviewTitle] = useState<string>("");
+  const [previewChunks, setPreviewChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
+  const [previewPdfMeta, setPreviewPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
+  const [chunksExpanded, setChunksExpanded] = useState<boolean>(false);
+  // Stable auth token to avoid rebuilding PDF URLs on every render
+  const tokenRef = useRef<string | null>(null);
+  // Portal root inside chat for mobile modal alignment
+  const chatModalRootRef = useRef<HTMLDivElement | null>(null);
+  // Local cache for section chunks to avoid refetching
+  const sectionCacheRef = useRef<Map<string, Array<{ text: string; source: string; page?: number; section?: string; section_number?: string; rects_norm?: any }>>>(new Map());
+  const scrollReqRef = useRef<number>(0);
+  useEffect(() => {
+    try {
+      tokenRef.current = sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token');
+    } catch {}
+  }, []);
 
   const openSectionModal = async (sec: string, uid?: string) => {
     if (!sec) return;
     setSectionTitle(sec);
+    setPreviewTitle(sec);
     setSectionError("");
-    setSectionChunks([]);
     setSectionLoading(true);
-    setSectionModalOpen(true);
+    // Always use the preview panel (desktop and mobile)
+      setPreviewOpen(true);
+      setSectionModalOpen(false);
     try {
+      // 1) Try cache first (game + section key)
+      const mk = (k: string) => `${selectedGame || ''}::${k}`;
+      const candidates: string[] = [sec];
+      // Also try numeric extraction and label upper-case variants
+      try {
+        const m = sec.match(/^[A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*/);
+        if (m && m[0] && m[0] !== sec) candidates.push(m[0]);
+        const up = sec.toUpperCase(); if (up !== sec) candidates.push(up);
+      } catch {}
+      let cached: any[] | undefined;
+      for (const k of candidates) {
+        const hit = sectionCacheRef.current.get(mk(k));
+        if (hit && hit.length) { cached = hit as any[]; break; }
+      }
+      if (cached && Array.isArray(cached) && cached.length > 0) {
+        try { setSectionChunks(cached as any); } catch {}
+        try { setPreviewChunks(cached as any); } catch {}
+        // Scroll/spotlight without any network call
+        const inferFromChunk = String(cached[0]?.source || '').toLowerCase();
+        const currentKnown = (isDesktop && canShowPreview) ? (previewPdfMeta?.filename || '') : (pdfMeta?.filename || '');
+        const fn = (currentKnown || inferFromChunk || '').toLowerCase();
+        const norm = (s: string) => (s || '').trim().toLowerCase();
+        const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(fn));
+        const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(fn));
+        if (!sameModal) setPdfMeta({ filename: fn, pages: undefined });
+        if (!samePreview) setPreviewPdfMeta({ filename: fn, pages: undefined });
+        try {
+          const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
+          const pageSet = new Set<number>();
+          cached.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
+          const citedPages = Array.from(pageSet).sort((a,b) => a-b);
+          const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+          const attempt = (tries: number = 0) => {
+            if (reqId !== scrollReqRef.current) return;
+            const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
+            const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
+            if (el && sc) {
+              try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
+              scrollToTargetPage(sc, el, true);
+              const waitAndPlace = (attempts: number = 0) => {
+                if (reqId !== scrollReqRef.current) return;
+                const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
+                if (ready) {
+                  setTimeout(() => { if (reqId !== scrollReqRef.current) return; placeSpotlightRing(el, sec); centerOnSpotlight(sc, el, true); }, 120);
+                } else if (attempts < 50) {
+                  setTimeout(() => waitAndPlace(attempts + 1), 80);
+                }
+              };
+              waitAndPlace();
+            } else if (tries < 120) {
+              requestAnimationFrame(() => attempt(tries + 1));
+            }
+          };
+          attempt();
+        } catch {}
+        setSectionLoading(false);
+        return;
+      }
       // Ensure token
       let t: string | null = null;
       try { t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token"); } catch {}
@@ -924,13 +1144,113 @@ export default function HomePage() {
       }
       const data = await resp.json();
       const chunks = Array.isArray(data?.chunks) ? data.chunks : [];
-      setSectionChunks(chunks);
+      // 2) Cache the result for this section under multiple keys (numeric and label)
+      try {
+        const keys: string[] = [sec];
+        try {
+          const m = sec.match(/^[A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*/);
+          if (m && m[0] && m[0] !== sec) keys.push(m[0]);
+          const up = sec.toUpperCase(); if (up !== sec) keys.push(up);
+        } catch {}
+        for (const k of keys) {
+          const ck = `${selectedGame || ''}::${k}`;
+          sectionCacheRef.current.set(ck, chunks as any);
+        }
+      } catch {}
+      // Update modal and preview chunk lists so both viewers have content
+      try { setSectionChunks(chunks as any); } catch {}
+      try { setPreviewChunks(chunks as any); } catch {}
+      // Stash filename for viewer: prefer existing loaded filename, else infer from chunks
+      const inferFromChunk = chunks && chunks.length > 0 ? String(chunks[0].source || '').toLowerCase() : '';
+      // Prefer the last known filename if it matches the inferred; otherwise use inferred
+      const currentKnown = (isDesktop && canShowPreview) ? (previewPdfMeta?.filename || '') : (pdfMeta?.filename || '');
+      const fn = (currentKnown || inferFromChunk || '').toLowerCase();
+      const norm = (s: string) => (s || '').trim().toLowerCase();
+      const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(fn));
+      const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(fn));
+      // Only update each viewer's meta if its file actually changed to avoid reloading
+      // Only change each viewer if it's pointing at a different file; otherwise keep current state to avoid re-mount flicker
+      if (!sameModal) setPdfMeta({ filename: fn, pages: undefined });
+      if (!samePreview) setPreviewPdfMeta({ filename: fn, pages: undefined });
+      // Persist last-used PDF per game
+      try {
+        if (selectedGame && fn) {
+          localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, fn);
+        }
+      } catch {}
+      // Always attempt to scroll and spotlight, regardless of whether the PDF is already rendered or about to load
+      try {
+        // Debounce: mark this as the latest scroll request
+        const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
+        const pageSet = new Set<number>();
+        chunks.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
+        const citedPages = Array.from(pageSet).sort((a,b) => a-b);
+        const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+        const byPage = (p: number) => chunks.filter((c: any) => (Number(c.page) + 1) === Number(p));
+        const attemptUnified = (tries: number = 0) => {
+          // If a newer scroll request superseded this one, abort
+          if (reqId !== scrollReqRef.current) return;
+          const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
+          const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
+          if (el && sc) {
+            // Remove any existing ring, smooth-scroll to page, then center on spotlight
+            try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
+            scrollToTargetPage(sc, el, true);
+            // Wait for text spans, then position spotlight directly
+            const waitAndPlace = (attempts: number = 0) => {
+              if (reqId !== scrollReqRef.current) return;
+              const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
+              if (ready) {
+                // Wait a bit to ensure layout settles, then place spotlight
+                setTimeout(() => {
+                  if (reqId !== scrollReqRef.current) return;
+                  placeSpotlightRing(el, sec);
+                  centerOnSpotlight(sc, el, true);
+                }, 120);
+              } else if (attempts < 50) {
+                setTimeout(() => waitAndPlace(attempts + 1), 80);
+              }
+            };
+            waitAndPlace();
+          } else if (tries < 120) {
+            // Keep trying while the PDF mounts/renders
+            requestAnimationFrame(() => attemptUnified(tries + 1));
+          }
+        };
+        attemptUnified();
+      } catch {}
     } catch (e: any) {
       setSectionError(String(e?.message || e || "Failed to load section"));
     } finally {
       setSectionLoading(false);
     }
   };
+
+  // Load last-used PDF filename when game changes (for preview context)
+  useEffect(() => {
+    if (!selectedGame) return;
+    try {
+      const key = `boardrag_last_pdf:${selectedGame}`;
+      const fn = localStorage.getItem(key) || '';
+      if (fn) {
+        setPdfMeta({ filename: fn, pages: undefined });
+        setPreviewPdfMeta({ filename: fn, pages: undefined });
+      } else {
+        setPdfMeta({ filename: undefined, pages: undefined });
+        setPreviewPdfMeta({ filename: undefined, pages: undefined });
+      }
+    } catch {}
+  }, [selectedGame]);
+
+  // If we have a last-used section for the game, open it automatically (desktop preview only)
+  useEffect(() => {
+    if (!selectedGame) return;
+    if (!canShowPreview) return;
+    try {
+      const sec = localStorage.getItem(`boardrag_last_section:${selectedGame}`);
+      if (sec) openSectionModal(sec);
+    } catch {}
+  }, [selectedGame, canShowPreview]);
 
   // On first mobile visit, if no saved game and none selected, auto-open menu to prompt game choice
   useEffect(() => {
@@ -951,35 +1271,183 @@ export default function HomePage() {
     }
   }, [games, selectedGame]);
 
+  // (legacy spotlight code removed)
+
+  // (legacy reflow observer removed)
+
+  // (legacy rect computation removed)
+
+  const { placeSpotlightRing, scrollToTargetPage, centerOnSpotlight } = usePdfHeadingSpotlight();
+
   return (
     <>
-      <div className="container">
+      <div className={`container${(previewOpen && !canShowPreview) ? ' preview-open' : ''}`}>
+        {/* Desktop PDF preview (left of chat) - only render on wide screens */}
+          {canShowPreview && (
+          <div className={`preview-panel${previewOpen ? ' has-content' : ''}`}>
+            {/* Back button in overlay mode (mobile/all) */}
+            <button className="btn preview-back" onClick={() => setPreviewOpen(false)} aria-label="Back" title="Back">
+              ←
+            </button>
+            <div className="preview-body">
+              {sectionLoading && (
+                <div className="indicator" style={{ gap: 8, position: 'absolute', right: 8, top: 8 }}>
+                  <span className="spinner" />
+                </div>
+              )}
+              {!!sectionError && !sectionLoading && (
+                <div className="muted" style={{ color: 'var(--danger, #b00020)' }}>{sectionError}</div>
+              )}
+              {((previewPdfMeta && previewPdfMeta.filename) || (previewChunks && previewChunks.length > 0)) && (
+                <div className="preview-top pdf-viewer">
+                  {(() => {
+                    const inferred = (previewChunks && previewChunks[0] && previewChunks[0].source ? String(previewChunks[0].source) : '').toLowerCase();
+                    const filename = String((previewPdfMeta && previewPdfMeta.filename) ? previewPdfMeta.filename : inferred).toLowerCase();
+                    const pageSet = new Set<number>();
+                    previewChunks.forEach((c) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
+                    const citedPages = Array.from(pageSet).sort((a,b) => a-b);
+                    const totalPages = (previewPdfMeta && previewPdfMeta.pages) ? Number(previewPdfMeta.pages) : undefined;
+                    let pages = totalPages ? Array.from({ length: totalPages }, (_v, i) => i + 1) : (citedPages.length > 0 ? citedPages : [1]);
+                    const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+                    const pdfUrl = filename ? `${API_BASE}/pdf?filename=${encodeURIComponent(filename)}${(() => { const t = tokenRef.current; return t ? `&token=${encodeURIComponent(t)}` : ''; })()}` : '';
+                    if (!pdfUrl) return <div className="muted">Missing PDF filename.</div>;
+                    const byPage = (p: number) => previewChunks.filter((c) => (Number(c.page) + 1) === Number(p));
+                    const highlight = (el: HTMLElement, texts: string[]) => {
+                      try {
+                        const layer = el.querySelector('.textLayer');
+                        if (!layer) return;
+                        const spans = Array.from(layer.querySelectorAll('span')) as HTMLSpanElement[];
+                        const needles = texts.map((t) => (t || '').trim()).filter(Boolean);
+                        if (needles.length === 0) return;
+                        const joined = needles.join('\n');
+                        const normalizedNeedles = needles;
+                        let i = 0;
+                        while (i < spans.length) {
+                          let j = i; let acc = '';
+                          while (j < spans.length && acc.length < joined.length + 50) {
+                            acc += spans[j].textContent || '';
+                            const match = normalizedNeedles.some((n) => acc.includes(n));
+                            if (match) { for (let k = i; k <= j; k++) spans[k].classList.add('chunk-highlight'); i = j + 1; break; }
+                            j += 1;
+                          }
+                          i += 1;
+                        }
+                      } catch {}
+                    };
+                    return (
+                      <PdfPreview
+                        API_BASE={API_BASE}
+                        token={tokenRef.current}
+                        title={previewTitle}
+                        chunks={previewChunks as any}
+                        pdfMeta={previewPdfMeta as any}
+                        setPdfMeta={(m) => setPreviewPdfMeta(m as any)}
+                      />
+                    );
+                  })()}
+                </div>
+              )}
+              <PreviewChunksPanel
+                loading={sectionLoading}
+                chunks={previewChunks as any}
+                expanded={chunksExpanded}
+                setExpanded={(v) => setChunksExpanded(v)}
+              />
+            </div>
+          </div>
+          )}
         {/* Chat column */}
-        <div className="chat surface" style={{ height: "100%" }}>
+        <div className={`chat surface${sheetOpen ? ' menu-open' : ''}`} style={{ height: "100%", position: 'relative' }}>
+          {/* Root container for mobile modal portal to guarantee alignment with chat */}
+          <div id="chat-modal-root" ref={chatModalRootRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
+          {/* Modal preview mounted into chat modal root so width/position match chat exactly */}
+          {(!canShowPreview && chatModalRootRef.current) && (
+            createPortal(
+              <div className={`modal-preview${previewOpen ? ' open' : ''}`}>
+                <div className="preview-body">
+                  {sectionLoading && (
+                    <div className="indicator" style={{ gap: 8, position: 'absolute', right: 8, top: 8 }}>
+                      <span className="spinner" />
+                    </div>
+                  )}
+                  {!!sectionError && !sectionLoading && (
+                    <div className="muted" style={{ color: 'var(--danger, #b00020)' }}>{sectionError}</div>
+                  )}
+                  {((previewPdfMeta && previewPdfMeta.filename) || (previewChunks && previewChunks.length > 0)) && (
+                    <div className="preview-top pdf-viewer">
+                      {(() => {
+                        const inferred = (previewChunks && (previewChunks as any)[0] && (previewChunks as any)[0].source ? String((previewChunks as any)[0].source) : '').toLowerCase();
+                        const filename = String((previewPdfMeta && (previewPdfMeta as any).filename) ? (previewPdfMeta as any).filename : inferred).toLowerCase();
+                        const pageSet = new Set<number>();
+                        (previewChunks as any).forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
+                        const citedPages = Array.from(pageSet).sort((a,b) => a-b);
+                        const totalPages = (previewPdfMeta && (previewPdfMeta as any).pages) ? Number((previewPdfMeta as any).pages) : undefined;
+                        let pages = totalPages ? Array.from({ length: totalPages }, (_v, i) => i + 1) : (citedPages.length > 0 ? citedPages : [1]);
+                        const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+                        const pdfUrl = filename ? `${API_BASE}/pdf?filename=${encodeURIComponent(filename)}${(() => { const t = tokenRef.current; return t ? `&token=${encodeURIComponent(t)}` : ''; })()}` : '';
+                        if (!pdfUrl) return <div className="muted">Missing PDF filename.</div>;
+                        const byPage = (p: number) => (previewChunks as any).filter((c: any) => (Number(c.page) + 1) === Number(p));
+                        const highlight = (el: HTMLElement, texts: string[]) => {
+                          try {
+                            const layer = el.querySelector('.textLayer');
+                            if (!layer) return;
+                            const spans = Array.from(layer.querySelectorAll('span')) as HTMLSpanElement[];
+                            const needles = texts.map((t) => (t || '').trim()).filter(Boolean);
+                            if (needles.length === 0) return;
+                            const joined = needles.join('\n');
+                            const normalizedNeedles = needles;
+                            let i = 0;
+                            while (i < spans.length) {
+                              let j = i; let acc = '';
+                              while (j < spans.length && acc.length < joined.length + 50) {
+                                acc += spans[j].textContent || '';
+                                const match = normalizedNeedles.some((n) => acc.includes(n));
+                                if (match) { for (let k = i; k <= j; k++) spans[k].classList.add('chunk-highlight'); i = j + 1; break; }
+                                j += 1;
+                              }
+                              i += 1;
+                            }
+                          } catch {}
+                        };
+                        return (
+                          <PdfPreview
+                            API_BASE={API_BASE}
+                            token={tokenRef.current}
+                            title={previewTitle}
+                            chunks={previewChunks as any}
+                            pdfMeta={previewPdfMeta as any}
+                            setPdfMeta={(m) => setPreviewPdfMeta(m as any)}
+                          />
+                        );
+                      })()}
+                    </div>
+                  )}
+                  <PreviewChunksPanel
+                    loading={sectionLoading}
+                    chunks={previewChunks as any}
+                    expanded={chunksExpanded}
+                    setExpanded={(v) => setChunksExpanded(v)}
+                  />
+                </div>
+                <button className="btn preview-back" onClick={() => setPreviewOpen(false)} aria-label="Back" title="Back">←</button>
+              </div>,
+              chatModalRootRef.current
+            )
+          )}
           <div className="row title" style={{ gap: 12, justifyContent: 'space-between' }}>
-            <span>BG-GPT{selectedGame ? ` — ${selectedGame}` : ""}</span>
+            <span>Board Game Jippity{selectedGame ? ` — ${selectedGame}` : ""}</span>
           </div>
 
           {/* Horizontal history strip */}
-          <div className="history-strip" ref={historyStripRef}>
-            {bookmarkLabels.length > 0 && (
-              <>
-                {bookmarkLabels.map((b, i) => (
-                  <button
-                    key={i}
-                    className="history-pill btn"
-                    onClick={(e) => {
-                      if (historyDraggingFlag.current || historyDragRef.current.dragged) return; // ignore click if just dragged
-                      scrollToAssistant(bookmarkUserIndices[i]);
-                    }}
-                    {...longPressHandlers(bookmarkAssistantIndices[i])}
-                  >
-                    {b}
-                  </button>
-                ))}
-              </>
-            )}
-          </div>
+          <HistoryStrip
+            labels={bookmarkLabels}
+            containerRef={historyStripRef}
+            onClickLabel={(userIdx) => scrollToAssistant(userIdx)}
+            longPressHandlersFor={(assistantIdx) => longPressHandlers(assistantIdx)}
+            bookmarkUserIndices={bookmarkUserIndices}
+            bookmarkAssistantIndices={bookmarkAssistantIndices}
+            isDragging={() => (historyDraggingFlag.current || historyDragRef.current.dragged)}
+          />
 
           {/* Game selector row removed; dropdown moved into title */}
 
@@ -1085,6 +1553,9 @@ export default function HomePage() {
                                     className="btn link"
                                     onClick={(e) => {
                                       e.preventDefault();
+                                      try {
+                                        if (selectedGame) localStorage.setItem(`boardrag_last_section:${selectedGame}`, sec);
+                                      } catch {}
                                       openSectionModal(sec);
                                     }}
                                     style={{
@@ -1156,265 +1627,40 @@ export default function HomePage() {
           </div>
 
           {/* Input row */}
-          <div className="input-row">
-            {isStreaming ? (
-              <div className="input indicator" aria-live="polite">
-                <span className="spinner" />
-                <span style={{ marginLeft: 8 }}>Generating answer…</span>
-              </div>
-            ) : (
-              <input
-                className="input"
-                placeholder="Your question…"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    onSubmit();
-                  }
-                }}
-              />
-            )}
+          <InputRow
+            isStreaming={isStreaming}
+            input={input}
+            onChangeInput={(v) => setInput(v)}
+            onSubmit={onSubmit}
+            onStop={onStop}
+            toggleSheet={() => setSheetOpen((s) => !s)}
+            selectedGame={selectedGame}
+          />
 
-            <div className="actions" style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
-              {isStreaming ? (
-                <button className="btn stop" onClick={onStop}>Stop</button>
-              ) : (
-                <button className="btn primary" onClick={onSubmit} disabled={!selectedGame} style={{ fontSize: 18 }}>
-                  Ask
-                </button>
-              )}
-              {/* Kebab to toggle the bottom sheet; placed to the right of Send */}
-              <button
-                className="btn menu-toggle"
-                onClick={() => setSheetOpen((s) => !s)}
-                aria-label="Menu"
-                title="Menu"
-              >
-                ⋮
-              </button>
-            </div>
-          </div>
+          <BottomSheetMenu
+            open={sheetOpen}
+            onClose={() => setSheetOpen(false)}
+            games={games}
+            selectedGame={selectedGame}
+            setSelectedGame={(g) => setSelectedGame(g)}
+            sessionId={sessionId}
+            messages={messages}
+            promptStyle={promptStyle}
+            setPromptStyle={(s) => setPromptStyle(s as any)}
+            includeWeb={includeWeb}
+            setIncludeWeb={(v) => setIncludeWeb(v)}
+            pdfSmoothScroll={pdfSmoothScroll}
+            setPdfSmoothScroll={(v) => setPdfSmoothScroll(v)}
+            onUpload={onUpload}
+            uploadInputRef={uploadInputRef}
+            uploading={uploading}
+            uploadMsg={uploadMsg}
+          />
         </div>
 
-        {/* Sidebar (desktop only) */}
-        <div className="sidebar-panel">
-          <section className="surface pad section">
-            <div className="row" style={{ alignItems: 'center' }}>
-              <summary style={{ margin: 0 }}>Past Questions</summary>
-            </div>
-            {bookmarkLabels.length === 0 && (
-              <div className="muted" style={{ fontSize: 13, marginTop: 8 }}>No bookmarks yet</div>
-            )}
-            {bookmarkLabels.length > 0 && (
-              <div className="history-list" style={{ marginTop: 8 }}>
-                {bookmarkLabels.map((b, i) => (
-                  <button key={i} className="bookmark btn" {...longPressHandlers(i)} onClick={() => scrollToAssistant(bookmarkUserIndices[i])}>
-                    {b}
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
 
-          <section className="surface pad section" style={{ marginTop: 12 }}>
-            <summary>Game</summary>
-            <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
-              <label style={{ display: "grid", gap: 6 }}>
-                <span className="muted">Select game</span>
-                <select
-                  className="select"
-                  value={selectedGame}
-                  onChange={(e) => {
-                    if (selectedGame) {
-                      const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
-                      try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
-                    }
-                    setSelectedGame(e.target.value);
-                  }}
-                >
-                  <option value="">Select game…</option>
-                  {games.map((g) => (
-                    <option key={g} value={g}>{g}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ display: "grid", gap: 6 }}>
-                <span className="muted">Style (saved per game)</span>
-                <select
-                  className="select"
-                  value={promptStyle}
-                  onChange={(e) => setPromptStyle((e.target.value as any) || "default")}
-                >
-                  <option value="default">Normal</option>
-                  <option value="brief">Brief</option>
-                  <option value="detailed">Detailed</option>
-                  <option value="step_by_step">Step-by-step</option>
-                  <option value="mnemonic">Mnemonic</option>
-                  <option value="analogy">Analogy</option>
-                  <option value="story">Story/Scenario</option>
-                  <option value="checklist">Checklist</option>
-                  <option value="comparison">Comparison</option>
-                  <option value="mistakes">Common mistakes + fixes</option>
-                  <option value="if_then">If–then rules</option>
-                  <option value="teach_back">Teach-back</option>
-                  <option value="example_first">Example-first</option>
-                  <option value="self_quiz">Self-quiz</option>
-                </select>
-              </label>
-              <label className="row" style={{ gap: 10 }}>
-                <input type="checkbox" checked={includeWeb} onChange={(e) => setIncludeWeb(e.target.checked)} />
-                <span>Include Web Search</span>
-              </label>
-            </div>
-          </section>
-
-          <section className="surface pad section" style={{ marginTop: 12 }}>
-            <summary>Upload PDFs</summary>
-            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-              <input
-                ref={uploadInputRef}
-                className="input"
-                type="file"
-                accept="application/pdf"
-                multiple
-                disabled={uploading}
-                onChange={(e) => onUpload(e.target.files)}
-                title={uploading ? "Uploading…" : "Select PDF files"}
-              />
-              {uploading && (
-                <div className="indicator" style={{ gap: 8 }}>
-                  <span className="spinner" />
-                  <span>Uploading… This may take a moment.</span>
-                </div>
-              )}
-              {!!uploadMsg && !uploading && (
-                <div className="muted" style={{ fontSize: 13 }}>{uploadMsg}</div>
-              )}
-            </div>
-          </section>
-        </div>
       </div>
-      {/* Section chunks modal */}
-      {sectionModalOpen && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" onClick={() => setSectionModalOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="row" style={{ justifyContent: 'flex-end', alignItems: 'center' }}>
-              <button className="btn" onClick={() => setSectionModalOpen(false)} aria-label="Close" title="Close" style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center' }}>×</button>
-            </div>
-            <div className="modal-body">
-              {sectionLoading && (
-                <div className="indicator" style={{ gap: 8 }}>
-                  <span className="spinner" />
-                  <span>Loading…</span>
-                </div>
-              )}
-              {!!sectionError && !sectionLoading && (
-                <div className="muted" style={{ color: 'var(--danger, #b00020)' }}>{sectionError}</div>
-              )}
-              {!sectionLoading && !sectionError && sectionChunks.length === 0 && (
-                <div className="muted">No chunks found for this section.</div>
-              )}
-              {!sectionLoading && sectionChunks.length > 0 && (
-                <div className="chunk-list">
-                  {sectionChunks.map((c, i) => (
-                    <div key={c.uid || i} className="chunk-item surface">
-                      <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-                        {c.source}{typeof c.page === 'number' ? ` · p.${c.page}` : ''}
-                      </div>
-                      <div className="chunk-text">{c.text}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Mobile bottom sheet */}
-      <div className={`mobile-sheet ${sheetOpen ? 'open' : ''}`}>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <div className="title" style={{ padding: 0, margin: 0, textAlign: 'left' }}>Menu</div>
-          <button className="btn" onClick={() => setSheetOpen(false)} aria-label="Close menu" title="Close menu" style={{ width: 44, height: 44, minHeight: 44, padding: 0, display: 'inline-grid', placeItems: 'center' }}>×</button>
-        </div>
-        <section className="surface pad section" style={{ marginTop: 12 }}>
-          <summary>Game</summary>
-          <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span className="muted">Select game</span>
-              <select
-                className="select"
-                value={selectedGame}
-                onChange={(e) => {
-                  if (selectedGame) {
-                    const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
-                    try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
-                  }
-                  setSelectedGame(e.target.value);
-                }}
-              >
-                <option value="">Select game…</option>
-                {games.map((g) => (
-                  <option key={g} value={g}>{g}</option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span className="muted">Answer style (saved per game)</span>
-              <select
-                className="select"
-                value={promptStyle}
-                onChange={(e) => setPromptStyle((e.target.value as any) || "default")}
-              >
-                <option value="default">Normal</option>
-                <option value="brief">Brief</option>
-                <option value="detailed">Detailed</option>
-                <option value="step_by_step">Step-by-step</option>
-                <option value="mnemonic">Mnemonic</option>
-                <option value="analogy">Analogy</option>
-                <option value="story">Story/Scenario</option>
-                <option value="checklist">Checklist</option>
-                <option value="comparison">Comparison</option>
-                <option value="mistakes">Common mistakes + fixes</option>
-                <option value="if_then">If–then rules</option>
-                <option value="teach_back">Teach-back</option>
-                <option value="example_first">Example-first</option>
-                <option value="self_quiz">Self-quiz</option>
-              </select>
-            </label>
-            <label className="row" style={{ gap: 10 }}>
-              <input type="checkbox" checked={includeWeb} onChange={(e) => setIncludeWeb(e.target.checked)} />
-              <span>Include Web Search</span>
-            </label>
-          </div>
-        </section>
-        <section className="surface pad section" style={{ marginTop: 12 }}>
-          <summary>Upload PDFs</summary>
-          <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-            <input
-              ref={uploadInputRef}
-              className="input"
-              type="file"
-              accept="application/pdf"
-              multiple
-              disabled={uploading}
-              onChange={(e) => onUpload(e.target.files)}
-              title={uploading ? "Uploading…" : "Select PDF files"}
-            />
-            {uploading && (
-              <div className="indicator" style={{ gap: 8 }}>
-                <span className="spinner" />
-                <span>Uploading… This may take a moment.</span>
-              </div>
-            )}
-            {!!uploadMsg && !uploading && (
-              <div className="muted" style={{ fontSize: 13 }}>{uploadMsg}</div>
-            )}
-          </div>
-        </section>
-      </div>
+      {/* Modal removed; preview panel reused for all screens */}
     </>
   );
 }

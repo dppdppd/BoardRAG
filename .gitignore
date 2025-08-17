@@ -56,6 +56,11 @@ venv.bak/
 # Node / Next.js frontend outputs
 web/node_modules/
 web/.next/
+# Guard against accidental nested installs (e.g., running with --prefix from inside web/)
+web/**/node_modules/
+web/**/.next/
+# Optional: ignore lockfiles if not committing them
+web/package-lock.json
 
 # Linters and tools
 .ruff_cache/

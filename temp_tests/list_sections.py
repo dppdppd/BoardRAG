@@ -26,7 +26,8 @@ from typing import Dict, List, Tuple
 def _numeric_key(label: str) -> Tuple:
     m = re.match(r"^\s*(\d+(?:\.\d+)*)\b", label)
     if not m:
-        return ((10**9,), label.lower())
+        # Ensure a flat tuple (not nested) so mixed keys compare cleanly
+        return (10**9, 0, label.lower())
     parts = tuple(int(p) for p in m.group(1).split("."))
     # Return a uniform tuple that sorts cleanly: (parts..., 0, label)
     return (*parts, 0, label.lower())

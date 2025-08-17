@@ -61,6 +61,36 @@ export default function AuthGate({ children }: Props) {
     })();
   }, []);
 
+  // Globally handle 401s: clear auth and reload to show login screen
+  useEffect(() => {
+    let kicked = false;
+    const originalFetch = window.fetch;
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const response = await originalFetch(input as any, init as any);
+      try {
+        const url = typeof input === "string" ? input : (input as Request).url;
+        if (
+          !kicked &&
+          response.status === 401 &&
+          url && String(url).startsWith(API_BASE) &&
+          String(url).indexOf("/auth/unlock") === -1
+        ) {
+          kicked = true;
+          try {
+            sessionStorage.removeItem("boardrag_role");
+            sessionStorage.removeItem("boardrag_token");
+            localStorage.removeItem("boardrag_role");
+            localStorage.removeItem("boardrag_token");
+            localStorage.removeItem("boardrag_saved_pw");
+          } catch {}
+          try { window.location.reload(); } catch {}
+        }
+      } catch {}
+      return response;
+    };
+    return () => { window.fetch = originalFetch; };
+  }, []);
+
   const unlock = async () => {
     setError("");
     try {
@@ -100,7 +130,7 @@ export default function AuthGate({ children }: Props) {
         padding: 16,
       }}>
         <div className="surface" style={{ width: "min(92vw, 520px)", padding: 16 }}>
-          <div className="title" style={{ padding: 0, marginBottom: 6 }}>BoardRAG</div>
+          <div className="title" style={{ padding: 0, marginBottom: 6 }}>Board Game Jippity</div>
           <div className="subtitle" style={{ marginTop: 0 }}>Enter access code to continue.</div>
           <div className="row" style={{ gap: 8, marginTop: 10 }}>
             <input

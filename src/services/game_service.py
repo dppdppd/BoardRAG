@@ -23,6 +23,127 @@ from ..query import (
 from .library_service import get_pdf_dropdown_choices
 
 
+def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]]:
+    """Delete specific PDF files by filename from DATA_PATH and clean vector store.
+
+    The `entries_to_delete` can be either plain filenames like 'file.pdf' or
+    admin dropdown entries like 'Game Name - file.pdf'.
+
+    Returns (message, games, pdf_choices)
+    """
+    if not entries_to_delete:
+        return ("❌ Please select at least one PDF to delete", get_available_games(), get_pdf_dropdown_choices())
+
+    data_root = Path(config.DATA_PATH)
+    if not data_root.exists():
+        return ("❌ Data directory not found", get_available_games(), get_pdf_dropdown_choices())
+
+    # Extract filenames
+    filenames: List[str] = []
+    for entry in entries_to_delete:
+        if not entry:
+            continue
+        if " - " in entry:
+            _title, fname = entry.rsplit(" - ", 1)
+            fname = fname.strip()
+            if fname and fname not in filenames:
+                filenames.append(fname)
+        else:
+            e = entry.strip()
+            if e and e not in filenames:
+                filenames.append(e)
+
+    deleted_paths: List[str] = []
+    failed_names: List[str] = []
+
+    for fname in filenames:
+        # Constrain to basename under DATA_PATH
+        target = (data_root / Path(fname).name)
+        # Ensure .pdf suffix
+        if target.suffix.lower() != ".pdf":
+            target = target.with_suffix(".pdf")
+        found = False
+        # Try direct file
+        if target.exists():
+            try:
+                target.unlink()
+                deleted_paths.append(str(target))
+                found = True
+            except Exception:
+                pass
+        if found:
+            # Remove empty parent folders (but not DATA_PATH)
+            parent = target.parent
+            try:
+                if parent != data_root and parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+            except Exception:
+                pass
+        else:
+            # Search under subfolders by exact filename
+            matched = False
+            for p in data_root.rglob(Path(fname).name):
+                try:
+                    if p.is_file():
+                        p.unlink()
+                        deleted_paths.append(str(p))
+                        matched = True
+                        parent = p.parent
+                        try:
+                            if parent != data_root and not any(parent.iterdir()):
+                                parent.rmdir()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if not matched:
+                failed_names.append(fname)
+
+    # Clean vector store docs referencing deleted files
+    if deleted_paths:
+        try:
+            with suppress_chromadb_telemetry():
+                persistent_client = chromadb.PersistentClient(
+                    path=config.CHROMA_PATH, settings=get_chromadb_settings()
+                )
+                db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
+            all_docs = db.get()
+            ids_to_delete: List[str] = []
+            for doc_id in all_docs["ids"]:
+                source_path = doc_id.split(":")[0]
+                for deleted_path in deleted_paths:
+                    if deleted_path in source_path or Path(source_path).name == Path(deleted_path).name:
+                        ids_to_delete.append(doc_id)
+                        break
+            if ids_to_delete:
+                db.delete(ids=ids_to_delete)
+            # Also clean mapping for those filenames in game_names
+            try:
+                collection = persistent_client.get_collection("game_names")
+                to_remove = [Path(p).name for p in deleted_paths]
+                if to_remove:
+                    collection.delete(ids=to_remove)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Refresh lists
+    if hasattr(get_available_games, "_filename_mapping"):
+        delattr(get_available_games, "_filename_mapping")
+    games = get_available_games()
+    pdf_choices = get_pdf_dropdown_choices()
+
+    parts: List[str] = []
+    if deleted_paths:
+        label_list = ", ".join(Path(p).name for p in deleted_paths)
+        parts.append(f"✅ Deleted {len(deleted_paths)} PDF(s): {label_list}")
+    if failed_names:
+        parts.append(f"❌ Not found: {', '.join(failed_names)}")
+    final_message = " | ".join(parts) if parts else "❌ No PDFs deleted"
+    return final_message, games, pdf_choices
+
+
 def delete_games(games_to_delete: List[str]) -> Tuple[str, List[str], List[str]]:
     """Delete selected games and their files (fuzzy match), then refresh.
 
@@ -172,8 +293,6 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
             delattr(get_available_games, "_filename_mapping")
         # Refresh
         games = get_available_games()
-        from ..handlers.game import get_pdf_dropdown_choices
-
         pdf_choices = get_pdf_dropdown_choices()
         msg = (
             f"✅ Assigned {len(filenames)} PDF(s) to game '{new_name}': {', '.join(filenames)}"

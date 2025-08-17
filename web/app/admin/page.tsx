@@ -10,7 +10,7 @@ export default function AdminPage() {
   const [role, setRole] = useState<string>("none");
   const [pw, setPw] = useState<string>("");
   const [message, setMessage] = useState<string>("");
-  const [busy, setBusy] = useState<null | "rebuild" | "refresh" | "delete" | "rename">(null);
+  const [busy, setBusy] = useState<null | "rebuild" | "refresh" | "rechunk" | "delete" | "rename">(null);
   const [consoleText, setConsoleText] = useState<string>("");
   const consoleRef = useRef<HTMLPreElement | null>(null);
 
@@ -24,7 +24,7 @@ export default function AdminPage() {
   const { data: blockedData, mutate: refetchBlocked } = useSWR<{ sessions: { sid: string; since?: string | null }[] }>(`${API_BASE}/admin/blocked`, fetcher, { revalidateOnFocus: true });
   const appendConsole = (line: string) => setConsoleText((cur) => (cur ? cur + "\n" + line : line));
 
-  const [deleteSelection, setDeleteSelection] = useState<string[]>([]);
+  const [deletePdfSelection, setDeletePdfSelection] = useState<string[]>([]);
   const [renameSelection, setRenameSelection] = useState<string[]>([]);
   const [newName, setNewName] = useState<string>("");
   const [unblockSelection, setUnblockSelection] = useState<string[]>([]);
@@ -236,16 +236,44 @@ export default function AdminPage() {
     }
   };
 
-  const deleteGamesReq = async () => {
-    appendConsole(`🗑️ Delete requested: ${deleteSelection.join(", ") || "<none>"}`);
-    const resp = await fetch(`${API_BASE}/admin/delete`, {
+  const rechunk = async () => {
+    setBusy("rechunk");
+    setConsoleText("");
+    appendConsole("🔄 Rechunk requested…");
+    logClient("[client] 🔄 Rechunk requested…");
+    try {
+      const es = new EventSource(`${API_BASE}/admin/rechunk-stream`);
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed.type === "log") {
+            setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
+          } else if (parsed.type === "done") {
+            setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
+            es.close();
+            setBusy(null);
+            Promise.all([refetchGames(), refetchChoices(), refetchStorage()]).catch(() => {});
+          }
+        } catch {}
+      };
+      es.onerror = () => { try { es.close(); } catch {}; appendConsole("❌ Rechunk stream error"); setBusy(null); };
+    } catch (e) {
+      setConsoleText("❌ Rechunk failed. See server logs.");
+      setBusy(null);
+    }
+  };
+
+  const deletePdfsReq = async () => {
+    appendConsole(`🗑️ Delete PDF requested: ${deletePdfSelection.join(", ") || "<none>"}`);
+    const resp = await fetch(`${API_BASE}/admin/delete-pdfs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(deleteSelection),
+      body: JSON.stringify(deletePdfSelection),
     });
     const data = await resp.json();
     setMessage(data.message || "");
     if (data?.message) appendConsole(data.message);
+    setDeletePdfSelection([]);
     await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
   };
 
@@ -260,6 +288,37 @@ export default function AdminPage() {
     setMessage(data.message || "");
     if (data?.message) appendConsole(data.message);
     await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
+  };
+
+  const rechunkSelected = async (entries: string[]) => {
+    if (!entries || entries.length === 0) return;
+    setBusy("rechunk");
+    setConsoleText("");
+    const label = entries.length === 1 ? entries[0] : `${entries.length} PDFs`;
+    appendConsole(`🧩 Rechunk selected requested: ${label}`);
+    logClient(`[client] 🧩 Rechunk selected requested…`);
+    try {
+      const url = new URL(`${API_BASE}/admin/rechunk-selected-stream`);
+      url.searchParams.set("entries", JSON.stringify(entries));
+      const es = new EventSource(url.toString());
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          if (parsed.type === "log") {
+            setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
+          } else if (parsed.type === "done") {
+            setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
+            es.close();
+            setBusy(null);
+            Promise.all([refetchGames(), refetchChoices(), refetchStorage()]).catch(() => {});
+          }
+        } catch {}
+      };
+      es.onerror = () => { try { es.close(); } catch {}; appendConsole("❌ Rechunk selected stream error"); setBusy(null); };
+    } catch (e) {
+      setConsoleText("❌ Rechunk selected failed. See server logs.");
+      setBusy(null);
+    }
   };
 
   const games = gamesData?.games || [];
@@ -316,6 +375,9 @@ export default function AdminPage() {
           <button onClick={refresh} disabled={busy!==null} style={{ padding: "6px 10px" }}>
             {busy === "refresh" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Processing…</span>) : "🔄 Process New PDFs"}
           </button>
+          <button onClick={rechunk} disabled={busy!==null} style={{ padding: "6px 10px" }}>
+            {busy === "rechunk" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Rechunking…</span>) : "🧩 Rechunk Library (preserve names)"}
+          </button>
         </div>
       </div>
 
@@ -349,14 +411,20 @@ export default function AdminPage() {
       </div>
 
       <div className="admin-tool alt">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Delete Games</h3>
-        <select multiple size={5} value={deleteSelection} onChange={(e) => setDeleteSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%", fontSize: 13, padding: 4 }}>
-          {games.map((g) => (
-            <option key={g} value={g}>{g}</option>
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Delete PDF(s)</h3>
+        <select
+          multiple
+          size={6}
+          value={deletePdfSelection}
+          onChange={(e) => setDeletePdfSelection(Array.from(e.target.selectedOptions).map((o) => o.value))}
+          style={{ width: "100%", fontSize: 13, padding: 4 }}
+        >
+          {pdfChoices.map((c) => (
+            <option key={c} value={c}>{c}</option>
           ))}
         </select>
         <div style={{ marginTop: 6 }}>
-          <button onClick={deleteGamesReq} disabled={deleteSelection.length === 0} style={{ padding: "6px 10px" }}>Delete</button>
+          <button onClick={deletePdfsReq} disabled={deletePdfSelection.length === 0} style={{ padding: "6px 10px" }}>Delete Selected PDF(s)</button>
         </div>
       </div>
 
@@ -385,10 +453,10 @@ export default function AdminPage() {
       </div>
 
       <div className="admin-tool alt">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Assign PDF(s)</h3>
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Assign / Reprocess PDF(s)</h3>
         <label style={{ display: "grid", gap: 4 }}>
-          <span>PDF entries</span>
-          <select multiple size={6} value={renameSelection} onChange={(e) => setRenameSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%", fontSize: 13, padding: 4 }}>
+          <span>PDF entries (select for assign or re-chunk)</span>
+          <select multiple size={8} value={renameSelection} onChange={(e) => setRenameSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%", fontSize: 13, padding: 4 }}>
             {pdfChoices.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
@@ -400,6 +468,7 @@ export default function AdminPage() {
         </label>
         <div style={{ marginTop: 6 }}>
           <button onClick={renameReq} disabled={renameSelection.length === 0 || !newName.trim()} style={{ padding: "6px 10px" }}>Rename</button>
+          <button onClick={() => rechunkSelected(renameSelection)} disabled={renameSelection.length === 0 || busy!==null} style={{ padding: "6px 10px", marginLeft: 6 }}>🧩 Rechunk Selected</button>
         </div>
       </div>
 

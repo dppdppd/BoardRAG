@@ -3,8 +3,8 @@ import AuthGate from "./AuthGate";
 import { Analytics } from "@vercel/analytics/react";
 
 export const metadata = {
-  title: "BG-GPT",
-  description: "BG-GPT front end",
+  title: "Board Game Jippity",
+  description: "Board Game Jippity",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

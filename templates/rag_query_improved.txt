@@ -13,12 +13,13 @@ INSTRUCTIONS (optimize for accuracy and linkable citations):
 7) Direct answers: For yes/no or numeric questions, lead with the direct answer, then add brief supporting detail.
 8) Definitions: For "what is/means" questions, synthesize from direct definitions, how it works, purpose, and any mechanics that use it.
 9) QUOTE MODE: If the user asks to "quote" a section (e.g., "quote 3.5"), output only the exact text of that section (or the most specific matching subsection) with minimal preface. Preserve wording; avoid paraphrase.
-10) Citations (for linkable UI): After EVERY claim derived from rules, immediately append a numeric section in square brackets using ONLY digits and periods, e.g., "[3.5]" or "[3.5.1]".
-    - Use EXACT numeric form only: no text, no ranges, no commas. Examples: good → [3.5], [3.5.1]; bad → [Rule 3.5], [3.5–3.6], [3.5, 3.6], [3.5 - 3.6].
+10) Citations (for linkable UI): After EVERY claim derived from rules, immediately append the section code in square brackets.
+    - Allowed forms: numeric (e.g., [3.5], [3.5.1]) and alphanumeric (e.g., [F4], [F4.a], [A10.2b]).
+    - Use the EXACT code only (digits/letters/periods), no extra text, no ranges, no commas. Examples: good → [3.5], [F4], [F4.a]; bad → [Rule 3.5], [3.5–3.6], [3.5, 3.6], [3.5 - 3.6].
     - If multiple sections support a claim, chain brackets with no punctuation: "[3.5][3.6]".
     - Place citations ONLY inline, immediately after each specific claim. Do NOT add a references section or a standalone citations line.
-    - When a header reads "3.5 Advancing Fire Phase (AFPh)", cite as "[3.5]" (the numeric prefix). Prefer the most specific subsection available.
-      - STRICT: Only cite items present in "ALLOWED_SECTIONS:" at the top of CONTEXT. Never invent or use any other numeric citations.
+    - When a header reads "3.5 Advancing Fire Phase (AFPh)", cite as "[3.5]" (the numeric prefix). When a header reads "F4 Fuel Strip Key", cite as "[F4]". Prefer the most specific subsection available (e.g., [F4.a]).
+      - STRICT: Only cite items present in "ALLOWED_SECTIONS:" at the top of CONTEXT. Never invent or use any other citations.
 CONTEXT:
 {context}
 
@@ -35,5 +36,5 @@ EXAMPLE (few-shot – citation style):
 
 Title
 
-- Use concise bullets with numeric citations like [X.Y] that correspond to the provided CONTEXT.
+- Use concise bullets with citations like [X.Y] or [F4] that correspond to the provided CONTEXT.
 - Do not invent or copy unrelated numeric citations.

@@ -19,11 +19,11 @@ if not exist "venv\Scripts\activate.bat" (
 )
 
 REM Start FastAPI backend (uvicorn) in a new terminal
-start "BG-GPT API" cmd /k pushd "%ROOT%" ^&^& call venv\Scripts\activate.bat ^&^& python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+start "Board Game Jippity API" cmd /k pushd "%ROOT%" ^&^& call venv\Scripts\activate.bat ^&^& python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 
 REM Start Next.js frontend in a new terminal
 if exist "web" (
-  start "BG-GPT Web" cmd /k pushd "%ROOT%web" ^&^& npm install ^&^& npm run dev
+  start "Board Game Jippity Web" cmd /k pushd "%ROOT%web" ^&^& npm install ^&^& npm run dev
 ) else (
   echo [WARN] web directory not found, skipping frontend.
 )

@@ -1,3 +1,21 @@
+/* New spotlight ring */
+.spotlight-ring {
+  position: absolute;
+  pointer-events: none;
+  z-index: 10000;
+  border-radius: 50%;
+  /* filled 50% opacity, no outline */
+  background: rgba(255, 235, 59, 0.5);
+  border: none;
+  box-shadow: none;
+  opacity: 1;
+  animation: spotlightFade 3s ease-out forwards;
+}
+
+@keyframes spotlightFade {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
 * { box-sizing: border-box; }
 /* Remove all drop shadows across the app */
 * { box-shadow: none !important; }
@@ -41,44 +59,196 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 
 .container {
   display: grid;
-  grid-template-columns: 1fr 340px;
   gap: 12px;
   padding: 8px;
   height: 100vh;
   width: 100vw;
   overflow: hidden;
   background: var(--bg);
+  /* Mobile: single column, centered */
+  grid-template-columns: 1fr;
+  justify-content: center;
 }
 .container > * { min-height: 0; }
 
-/* Mobile sheet and toggle are hidden by default (desktop) */
-.mobile-sheet { display: none; }
-.sheet-toggle { display: none; }
-/* Inline menu toggle inside input row (mobile-only) */
-.menu-toggle { display: none; }
-
-@media (max-width: 900px) {
-  .container { grid-template-columns: 1fr; padding: 0; width: 100vw; height: 100svh; }
-  .mobile-sheet {
-    display: block;
-    position: fixed;
-    inset: auto 0 0 0;
-    background: var(--surface);
-    border-top: 1px solid var(--border);
-    max-height: 62svh;
-    overflow: auto;
-    transform: translateY(100%);
-    transition: transform .25s ease;
-    box-shadow: 0 -8px 24px rgba(0,0,0,.15);
-    border-radius: var(--radius);
-    padding: 12px;
+/* Desktop chat-only: center the chat */
+@media (min-width: 800px) and (max-width: 1549px) {
+  .container { 
+    grid-template-columns: 738px; 
+    justify-content: center;
+    place-content: center;
   }
-  .mobile-sheet.open { transform: translateY(0); }
+  
+  /* (removed) page-wide darken when menu open; handled per-chat now */
+  
+  
+  /* Show menu on desktop too */
+  .menu-toggle {
+    display: inline-grid;
+    width: var(--control-min-height, 44px);
+    min-width: var(--control-min-height, 44px);
+    height: var(--control-min-height, 44px);
+    min-height: var(--control-min-height, 44px);
+    place-items: center;
+    font-size: 18px;
+    line-height: 1;
+  }
+  /* (removed per-chat implementation of sheet replaces global fixed sheet here) */
   .sheet-toggle {
     display: inline-block;
     position: fixed;
     right: 12px;
-    bottom: 72px; /* keep clear of chat send input */
+    bottom: 72px;
+    z-index: 20;
+    background: var(--accent);
+    color: #ffffff;
+    border: none;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    box-shadow: 0 3px 12px rgba(0,0,0,0.15);
+    cursor: pointer;
+  }
+  /* (removed duplicate fixed sheet) */
+}
+
+/* Desktop with preview: preview + chat (792px + 738px + gaps = ~1550px) */
+@media (min-width: 1550px) {
+  .container { grid-template-columns: 792px 738px; }
+  
+  /* Show menu on desktop too */
+  .menu-toggle {
+    display: inline-grid;
+    width: var(--control-min-height, 44px);
+    min-width: var(--control-min-height, 44px);
+    height: var(--control-min-height, 44px);
+    min-height: var(--control-min-height, 44px);
+    place-items: center;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .mobile-sheet {
+    display: block;
+    position: fixed;
+    bottom: 0;
+    background: var(--bg);
+    border-top: 3px solid var(--accent);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    max-height: 62vh;
+    overflow: auto;
+    transform: translateY(100%);
+    transition: transform .25s ease;
+    box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: 16px;
+    width: 738px; 
+    max-width: calc(100vw - 24px);
+    /* Position over chat panel only - center of right column */
+    left: calc(50% + 792px/2 + 12px + 738px/2); /* Center of viewport + PDF width/2 + gap + chat width/2 */
+    transform: translate(-50%, 100%);
+    z-index: 15;
+  }
+  .mobile-sheet.open { transform: translate(-50%, 0); }
+  .sheet-toggle {
+    display: inline-block;
+    position: fixed;
+    right: 12px;
+    bottom: 72px;
+    z-index: 20;
+    background: var(--accent);
+    color: #ffffff;
+    border: none;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    box-shadow: 0 3px 12px rgba(0,0,0,0.15);
+    cursor: pointer;
+  }
+  .mobile-sheet {
+    display: block;
+    position: fixed;
+    bottom: 0;
+    background: var(--bg);
+    border-top: 3px solid var(--accent);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    max-height: 62vh;
+    overflow: auto;
+    transform: translateY(100%);
+    transition: transform .25s ease;
+    box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: 16px;
+    width: 738px; 
+    max-width: calc(100vw - 24px);
+    left: 50%; 
+    transform: translate(-50%, 100%);
+    z-index: 15;
+  }
+  .mobile-sheet.open { transform: translate(-50%, 0); }
+}
+
+
+
+/* Mobile layout - restore normal document flow but center within constraints */
+@media (max-width: 799px) {
+  .container { 
+    padding: 12px; 
+    width: 100vw; 
+    height: 100vh; 
+    display: grid;
+    grid-template-rows: auto 1fr;
+    gap: 0;
+    box-sizing: border-box;
+    place-items: center;
+  }
+  .chat.surface { 
+    width: 738px; 
+    max-width: calc(100vw - 24px);
+    height: 100%;
+    max-height: none;
+    margin: 0;
+    grid-row: 2;
+  }
+  /* History strip gets its own row and stays visible */
+  .history-strip { grid-row: 1; width: 100%; max-width: calc(100vw - 24px); }
+  .mobile-sheet {
+    display: block;
+    position: fixed;
+    bottom: 0;
+    background: var(--bg);
+    border-top: 3px solid var(--accent);
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    max-height: 62svh;
+    overflow: auto;
+    transform: translateY(100%);
+    transition: transform .25s ease;
+    box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: 16px;
+    width: 738px; 
+    max-width: calc(100vw - 24px);
+    left: 50%; 
+    transform: translate(-50%, 100%);
+    z-index: 15;
+  }
+  .mobile-sheet.open { transform: translate(-50%, 0); }
+  
+  /* Darken page content when mobile menu is open */
+  body:has(.mobile-sheet.open)::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 9;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  .sheet-toggle {
+    display: inline-block;
+    position: fixed;
+    right: 12px;
+    bottom: 72px;
     z-index: 20;
     background: var(--accent);
     color: #ffffff;
@@ -88,10 +258,8 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     box-shadow: 0 6px 18px rgba(0,0,0,.2);
     font-weight: 600;
   }
-  /* Show inline menu toggle within input row on mobile; keep it a square */
   .menu-toggle {
     display: inline-grid;
-    /* Match the input control height and ensure a square, larger tap target */
     width: var(--control-min-height, 44px);
     min-width: var(--control-min-height, 44px);
     height: var(--control-min-height, 44px);
@@ -99,13 +267,64 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     place-items: center;
     padding: 0;
     line-height: 1;
-    font-size: 22px; /* bigger kebab glyph for visibility */
+    font-size: 22px;
   }
+}
+
+/* Fit modal preview to chat bounds on non-desktop widths and slide to cover chat */
+@media (min-width: 800px) and (max-width: 1549px) {
+  /* Off-canvas base (hidden) aligned to chat center */
+  .preview-panel {
+    top: 8px;
+    bottom: 8px;
+    left: 50vw; /* anchor at viewport center */
+    right: auto;
+    width: 738px;
+    max-width: calc(100vw - 24px);
+    height: auto;
+    margin-left: calc(-738px / 2); /* center 738px exactly */
+    border-radius: var(--radius);
+    transform: translateX(110%);
+    transition: transform 0.3s ease-out;
+    pointer-events: none;
+  }
+  /* Slide in to perfectly cover the centered chat column */
+  .container.preview-open .preview-panel.preview-panel {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+}
+
+@media (max-width: 799px) {
+  /* Off-canvas base (hidden) within chat padding */
+  .preview-panel {
+    left: 12px;
+    right: 12px;
+    top: 12px;
+    bottom: 12px;
+    width: auto;
+    height: auto;
+    border-radius: var(--radius);
+    transform: translateX(110%);
+    transition: transform 0.3s ease-out;
+    pointer-events: none;
+  }
+  /* Slide in to fill the chat area (respecting padding) */
+  .container.preview-open .preview-panel.preview-panel {
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+}
+
+/* Desktop chat width */
+@media (min-width: 800px) {
+  .chat.surface { width: 738px; }
 }
 
 .surface { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 /* Chat pane with subtle playful game-parts pattern (very light) */
 .chat.surface {
+  position: relative;
   background-color: var(--bg);
   /* 24px icons with 24px gaps on a 48px grid. Two layers are offset to stagger rows */
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='48' viewBox='0 0 240 48'><g fill='none' stroke='%23c7d5e7' stroke-opacity='0.6' stroke-width='1.4'><g transform='translate(12,12)'><circle cx='12' cy='6' r='6'/><path d='M6 22h12c0-6-3-10-6-10s-6 4-6 10z'/></g><g transform='translate(60,12)'><polygon points='12,0 9,4 6,6 9,10 8,16 12,13 16,16 15,10 18,6 15,4'/></g><g transform='translate(108,12)'><rect x='0' y='0' width='24' height='24' rx='4'/></g><g transform='translate(156,12)'><polygon points='12,2 20,8 20,16 12,22 4,16 4,8'/></g><g transform='translate(204,12)'><rect x='4' y='1' width='16' height='22' rx='2' transform='rotate(-12 12 12)'/></g></g><g fill='%23c7d5e7' fill-opacity='0.6'><g transform='translate(108,12)'><circle cx='6' cy='6' r='2'/><circle cx='12' cy='12' r='2'/><circle cx='18' cy='18' r='2'/></g></g></svg>"), url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='48' viewBox='0 0 240 48'><g fill='none' stroke='%23c7d5e7' stroke-opacity='0.6' stroke-width='1.4'><g transform='translate(12,12)'><circle cx='12' cy='6' r='6'/><path d='M6 22h12c0-6-3-10-6-10s-6 4-6 10z'/></g><g transform='translate(60,12)'><polygon points='12,0 9,4 6,6 9,10 8,16 12,13 16,16 15,10 18,6 15,4'/></g><g transform='translate(108,12)'><rect x='0' y='0' width='24' height='24' rx='4'/></g><g transform='translate(156,12)'><polygon points='12,2 20,8 20,16 12,22 4,16 4,8'/></g><g transform='translate(204,12)'><rect x='4' y='1' width='16' height='22' rx='2' transform='rotate(-12 12 12)'/></g></g><g fill='%23c7d5e7' fill-opacity='0.6'><g transform='translate(108,12)'><circle cx='6' cy='6' r='2'/><circle cx='12' cy='12' r='2'/><circle cx='18' cy='18' r='2'/></g></g></svg>");
@@ -114,6 +333,37 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   /* Stagger second layer more: 84px horizontally, half-tile vertically */
   background-position: 0 0, 84px 36px;
   background-repeat: repeat;
+}
+
+/* Bottom sheet menu scoped to chat panel: span chat width and overlay chat only */
+.chat.surface .mobile-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg);
+  border-top: 3px solid var(--accent);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  max-height: 62%;
+  overflow: auto;
+  transform: translateY(100%);
+  transition: transform .25s ease;
+  box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 16px;
+  z-index: 15;
+}
+.chat.surface .mobile-sheet.open { transform: translateY(0); }
+
+/* Darken only the chat panel when its menu is open */
+.chat.surface.menu-open::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 9;
+  pointer-events: none;
 }
 .row { display: flex; gap: 8px; align-items: center; }
 .title { padding: 8px 12px; font-weight: 700; text-align: center; font-size: 18px; color: var(--text); letter-spacing: -0.01em; }
@@ -188,11 +438,213 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 
 /* Modal styles */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: grid; place-items: center; padding: 16px; z-index: 1000; }
-.modal { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); width: min(900px, 96vw); max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
-.modal .modal-body { padding: 12px; overflow: auto; }
+.modal { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); width: 96vw; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+.modal .modal-body { padding: 0; overflow: auto; overflow-x: hidden; }
 .chunk-list { display: grid; gap: 10px; }
 .chunk-item { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; background: var(--surface); }
 .chunk-text { white-space: pre-wrap; line-height: 1.4; }
+/* PDF Viewer */
+.pdf-viewer { display: grid; gap: 12px; }
+.pdf-page { position: relative; }
+.react-pdf__message { display: none !important; }
+
+/* Absolute overlay rectangle for headings (span-independent) */
+.heading-overlay { position: absolute; pointer-events: none; background: rgba(255,235,59,0.35); outline: 3px solid #ff9800; border-radius: 4px; box-shadow: 0 0 0 2px rgba(0,0,0,0.15), 0 0 0 6px rgba(255,152,0,0.28), 0 6px 22px rgba(255,152,0,0.45); z-index: 2; }
+.textLayer .chunk-highlight { background: color-mix(in oklab, var(--accent) 35%, transparent); outline: 2px solid color-mix(in oklab, var(--accent) 65%, transparent); border-radius: 2px; }
+.textLayer .heading-highlight,
+.react-pdf__Page__textContent .heading-highlight {
+  position: relative;
+  /* Hybrid highlighter stripe + fill for visibility across colored backgrounds */
+  background: linear-gradient(to top, rgba(255,235,59,0.85) 0%, rgba(255,235,59,0.85) 62%, rgba(255,235,59,0.35) 62%, rgba(255,235,59,0) 100%);
+  outline: 3px solid #ff9800;           /* vivid orange frame */
+  border-radius: 4px;
+  /* Outer dark halo + orange glow to separate from page colors */
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.15), 0 0 0 6px rgba(255,152,0,0.28), 0 6px 22px rgba(255,152,0,0.45);
+  /* White pseudo stroke for the text itself so it pops on any background */
+  text-shadow: -1px -1px 0 #ffffff, 1px -1px 0 #ffffff, -1px 1px 0 #ffffff, 1px 1px 0 #ffffff, 0 0 8px rgba(255,152,0,0.65);
+  isolation: isolate;
+}
+
+/* Animated underline bar */
+.textLayer .heading-highlight::after,
+.react-pdf__Page__textContent .heading-highlight::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  bottom: -3px;
+  height: 4px;
+  background: #ff9800;
+  border-radius: 3px;
+  box-shadow: 0 0 10px rgba(255,152,0,0.9), inset 0 0 2px #ffffff;
+  animation: underlineFlash 800ms ease-out 1;
+}
+
+/* Left-edge flag/chevron to catch the eye while scanning */
+.textLayer .heading-highlight::before,
+.react-pdf__Page__textContent .heading-highlight::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0; height: 0;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-right: 12px solid #ff9800;
+  filter: drop-shadow(0 0 4px rgba(255,152,0,0.7));
+}
+
+@keyframes underlineFlash {
+  0% { opacity: 0; transform: translateY(2px) scaleX(0.85); }
+  45% { opacity: 1; transform: translateY(0) scaleX(1.02); }
+  100% { opacity: 1; transform: translateY(0) scaleX(1); }
+}
+.rect-overlay { position: absolute; pointer-events: none; border: 2px solid color-mix(in oklab, var(--accent) 80%, transparent); background: color-mix(in oklab, var(--accent) 22%, transparent); border-radius: 2px; }
+.pdf-overlay-circle::before,
+.pdf-overlay-circle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 2px;
+  background: rgba(255,255,255,0.95);
+  box-shadow: 0 0 6px rgba(0,0,0,0.35);
+  transform-origin: center;
+}
+.pdf-overlay-circle::before { transform: translate(-50%, -50%) rotate(45deg); }
+.pdf-overlay-circle::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+
+
+/* Preview panel base (desktop column panel) */
+.preview-panel {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 30;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  transform: translateX(100%);
+  transition: transform 0.3s ease-out;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+}
+@media (min-width: 1550px) {
+  .preview-panel { 
+    display: flex; 
+    flex-direction: column; 
+    height: 100vh; 
+    overflow: hidden; 
+    background: var(--surface); 
+    border: 1px solid var(--border); 
+    border-radius: var(--radius); 
+    width: 792px; 
+    position: relative;
+    transform: none;
+    transition: none;
+    pointer-events: auto;
+  }
+  .preview-body { padding: 8px; flex: 1; position: relative; overflow: hidden; }
+  .preview-top { height: 100%; overflow: auto; }
+  .preview-bottom { 
+    position: absolute; 
+    bottom: 0; 
+    left: 8px; 
+    right: 8px; 
+    background: var(--surface); 
+    border: 1px solid var(--border); 
+    border-radius: var(--radius) var(--radius) 0 0; 
+    padding: 12px; 
+    max-height: 60%; 
+    overflow: auto; 
+    box-shadow: 0 -8px 24px rgba(0,0,0,.15), 0 -2px 8px rgba(0,0,0,.1);
+    transform: translateY(100%);
+    transition: transform 0.3s ease-out;
+  }
+  .preview-bottom.expanded {
+    transform: translateY(0);
+  }
+  .chunks-toggle {
+    position: absolute;
+    bottom: 12px;
+    right: 20px;
+    z-index: 10;
+  }
+  
+  /* Empty state background text */
+  .preview-panel:not(.has-content)::before {
+    content: "PDF PREVIEW";
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    opacity: 0.12;
+    font-size: clamp(18px, 4vw, 32px);
+    pointer-events: none;
+    user-select: none;
+    z-index: 0;
+  }
+}
+
+/* Modal preview overlay: flows as a child of chat, fixed width identical to chat */
+.modal-preview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  margin: 0;
+  z-index: 25;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  pointer-events: none;
+  opacity: 0;
+  transform: none;
+  transition: opacity 0.2s ease-out;
+  display: flex;
+  flex-direction: column;
+}
+.modal-preview.open {
+  pointer-events: auto;
+  opacity: 1;
+  transform: none;
+}
+@media (max-width: 1549px) {
+  .container.preview-open .preview-body { padding: 8px; flex: 1; position: relative; overflow: hidden; }
+  .container.preview-open .preview-top { height: 100%; overflow: auto; }
+}
+
+/* Back button for fullscreen preview (mobile/all when overlay is active) */
+.preview-back { display: none; }
+.container.preview-open .preview-back {
+  display: inline-grid;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  place-items: center;
+  z-index: 31;
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
+  color: var(--text);
+}
+@media (min-width: 1550px) {
+  /* Hide back button on wide desktop split view */
+  .preview-back { display: none !important; }
+}
+
+
 
 /* Tighter markdown headings inside chat bubbles */
 .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
@@ -224,7 +676,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 
 /* Horizontal history strip */
 .history-strip {
-  display: none;
+  display: flex !important;
   gap: 8px;
   padding: 6px 8px;
   overflow-x: auto;
@@ -232,8 +684,11 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
   /* Fill background with subtle right chevrons to imply time direction */
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 2;
   align-items: center;
+  min-height: 44px; /* keep visible even when empty */
 }
 .history-strip::-webkit-scrollbar { height: 6px; }
 .history-strip::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--radius); }
@@ -255,6 +710,11 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   scroll-snap-align: start;
   z-index: 1;
   border-radius: var(--radius);
+}
+
+/* Compact history pills on small screens only */
+@media (max-width: 799px) {
+  .history-pill { padding: 6px 12px; font-size: 12px; }
 }
 .history-pill.flat-left {
   border-top-left-radius: var(--radius);
@@ -281,63 +741,32 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .section label span { font-size: 12px; color: var(--muted); }
 
 /* Primary button full-width on small screens for easy tap */
-@media (max-width: 900px) {
+@media (max-width: 799px) {
   .input-row .btn.primary { width: 100%; }
-  .history-strip { display: flex; scroll-snap-type: x proximity; gap: 0px; padding: 10px 12px; }
-  /* Faint background label across the mobile history strip */
-  .history-strip::before {
-    content: "BOOKMARKS";
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--muted);
-    opacity: 0.12;
-    font-size: clamp(14px, 6vw, 28px);
-    pointer-events: none;
-    user-select: none;
-    z-index: 0;
-  }
-  /* Ensure pills sit above the background text */
-  .history-strip > * { position: relative; z-index: 1; }
+  .history-strip { scroll-snap-type: x proximity; gap: 0px; padding: 6px 8px; }
 }
 
-/* Desktop-only sidebar panel */
-.sidebar-panel { display: block; height: 100vh; overflow: hidden; }
-@media (max-width: 900px) { .sidebar-panel { display: none; } }
-
-/* Desktop sidebar: make controls more compact */
-.sidebar-panel .select,
-.sidebar-panel .input {
-  font-size: 14px;
-  min-height: 34px;
-  padding: 8px 10px;
-}
-.sidebar-panel .btn {
-  font-size: 14px;
-  padding: 8px 12px;
-}
-.sidebar-panel .bookmark { font-size: 13px; }
-.sidebar-panel .bookmark.clear-all {
-  padding: 0; /* let width/height control size */
-  font-size: 11px;
-  letter-spacing: 0;
-  width: 32px;
-  height: 32px;
-  min-height: 32px;
-  display: inline-grid;
+/* Faint background label across the history strip (always visible) */
+.history-strip::before {
+  content: "BOOKMARKS";
+  position: absolute;
+  inset: 0;
+  display: grid;
   place-items: center;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.12;
+  font-size: clamp(14px, 4vw, 28px);
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
 }
+/* Ensure pills sit above the background text */
+.history-strip > * { position: relative; z-index: 1; }
 
-/* Scrollable history list in sidebar to avoid pushing other controls */
-.sidebar-panel .history-list {
-  max-height: 300px;
-  overflow-y: auto;
-  padding-right: 4px; /* room for scrollbar */
-}
+
 
 /* Admin tool panels with alternating backgrounds */
 .admin-tool {
@@ -361,4 +790,3 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .accent-row { display: flex; gap: 10px; flex-wrap: wrap; }
 .accent-dot { width: 28px; height: 28px; border-radius: var(--radius); border: 2px solid #ffffff; cursor: pointer; }
 .accent-dot.active { outline: 3px solid color-mix(in oklab, var(--accent) 35%, transparent); }
-

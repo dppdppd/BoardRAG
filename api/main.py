@@ -12,7 +12,7 @@ import re
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 
 from src.query import stream_query_rag, get_available_games
@@ -21,8 +21,8 @@ from src.config import CHROMA_PATH
 from src.embedding_function import get_embedding_function
 import chromadb
 from langchain_chroma import Chroma
-from src.services.library_service import rebuild_library, refresh_games, save_uploaded_files
-from src.services.game_service import delete_games, rename_pdfs, get_pdf_dropdown_choices
+from src.services.library_service import rebuild_library, refresh_games, save_uploaded_files, rechunk_library, rechunk_selected_pdfs
+from src.services.game_service import delete_games, rename_pdfs, get_pdf_dropdown_choices, delete_pdfs
 from src.services.auth_service import unlock, issue_token, verify_token
 from src.storage_utils import format_storage_info
 
@@ -178,7 +178,7 @@ async def _lifespan(_app: FastAPI):
                     pass
 
 
-app = FastAPI(title="BG-GPT API", lifespan=_lifespan)
+app = FastAPI(title="Board Game Jippity API", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -213,13 +213,22 @@ async def _print_routes_on_startup():
 
 @app.get("/games")
 async def list_games():
+    # If a rebuild/refresh/rechunk is in progress, avoid auto-refresh and just report current state
+    try:
+        from src.services.library_service import is_library_busy  # type: ignore
+        if is_library_busy():
+            return {"games": get_available_games()}
+    except Exception:
+        pass
     games = get_available_games()
     # First-run convenience: if empty, try processing new PDFs automatically
     if not games:
         try:
-            _msg, games2, _pdf = refresh_games()
-            if games2:
-                games = games2
+            from src.services.library_service import is_library_busy  # type: ignore
+            if not is_library_busy():
+                _msg, games2, _pdf = refresh_games()
+                if games2:
+                    games = games2
         except Exception:
             pass
     return {"games": games}
@@ -233,6 +242,26 @@ async def list_pdf_choices():
 @app.get("/storage")
 async def storage_stats():
     return {"markdown": format_storage_info()}
+
+
+@app.get("/pdf")
+async def get_pdf(filename: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _role = _require_auth(authorization, token)
+    # Only allow files under DATA_PATH and with .pdf extension
+    try:
+        from src import config as cfg  # type: ignore
+        base = Path(cfg.DATA_PATH).resolve()
+        target = (base / Path(filename).name).with_suffix(".pdf").resolve()
+        if not str(target).startswith(str(base)):
+            raise HTTPException(status_code=400, detail="invalid path")
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="not found")
+        return FileResponse(path=str(target), media_type="application/pdf", filename=target.name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
 
 
 @app.get("/section-chunks")
@@ -340,21 +369,67 @@ async def section_chunks(section: Optional[str] = None, game: Optional[str] = No
 
         # If fetching by section, compute match and ranking
         if sec:
+            # Numeric matches (existing behavior)
             exact_num = bool(sec_num) and (sec_num == sec)
             child_num = bool(sec_num) and sec_num.startswith(sec + ".")
             # Extract numeric at start of label if present
-            m = re.match(r"^\s*(\d+(?:\.\d+)*)\b", sec_label)
-            label_num = m.group(1) if m else ""
-            exact_label = bool(label_num) and (label_num == sec)
-            child_label = bool(label_num) and label_num.startswith(sec + ".")
-            # Only consider candidates that match by number or numeric label prefix
-            if not (exact_num or child_num or exact_label or child_label):
+            m_num_label = re.match(r"^\s*(\d+(?:\.\d+)*)\b", sec_label)
+            label_num = m_num_label.group(1) if m_num_label else ""
+            exact_label_num = bool(label_num) and (label_num == sec)
+            child_label_num = bool(label_num) and label_num.startswith(sec + ".")
+
+            # Alphanumeric section codes, e.g., F1, F1.b, A10.2b
+            alpha_re = re.compile(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\b")
+            m_alpha_label = alpha_re.match(sec_label)
+            label_alpha = m_alpha_label.group(1) if m_alpha_label else ""
+            m_alpha_text = alpha_re.match(str(text or ""))
+            text_alpha = m_alpha_text.group(1) if m_alpha_text else ""
+            m_alpha_sec = alpha_re.match(sec)
+            sec_alpha = m_alpha_sec.group(1) if m_alpha_sec else ""
+
+            # Canonicalize alpha by removing separators and lowercasing, so F1.c == F1c
+            def _canon_alpha(s: str) -> str:
+                try:
+                    m = alpha_re.match(str(s) or "")
+                    if not m:
+                        return ""
+                    raw = m.group(1)
+                    return re.sub(r"[^A-Za-z0-9]", "", raw).lower()
+                except Exception:
+                    return ""
+            canon_sec_alpha = _canon_alpha(sec)
+            canon_label_alpha = _canon_alpha(label_alpha)
+            canon_text_alpha = _canon_alpha(text_alpha)
+
+            exact_label_alpha = bool(sec_alpha) and bool(label_alpha) and (label_alpha.lower() == sec_alpha.lower())
+            child_label_alpha = bool(sec_alpha) and bool(label_alpha) and label_alpha.lower().startswith((sec_alpha + ".").lower())
+            # Fallback: if DB lacks proper metadata, allow matching by chunk text prefix
+            text_alpha_match = bool(sec_alpha) and bool(text_alpha) and (text_alpha.lower() == sec_alpha.lower() or text_alpha.lower().startswith((sec_alpha + ".").lower()))
+
+            # Parent/child relaxation on canonicalized alpha codes (handles F1 vs F1.c)
+            parent_alpha = bool(canon_sec_alpha and canon_label_alpha) and canon_label_alpha.startswith(canon_sec_alpha)
+            child_alpha = bool(canon_sec_alpha and canon_label_alpha) and canon_sec_alpha.startswith(canon_label_alpha)
+            text_parent_alpha = bool(canon_sec_alpha and canon_text_alpha) and canon_text_alpha.startswith(canon_sec_alpha)
+            text_child_alpha = bool(canon_sec_alpha and canon_text_alpha) and canon_sec_alpha.startswith(canon_text_alpha)
+
+            # Only consider candidates that match by number, alphanumeric, or text prefix
+            if not (exact_num or child_num or exact_label_num or child_label_num or exact_label_alpha or child_label_alpha or text_alpha_match or parent_alpha or child_alpha or text_parent_alpha or text_child_alpha):
                 continue
+
             # Penalize cross-reference labels like "15.1 & 48.3"
             cross_ref = bool(re.search(r"&\s*\d", sec_label))
-            # rank: lower is better
-            base_rank = 0 if exact_num else 1 if child_num else 2 if exact_label else 3
-            penalty = 2 if cross_ref and not exact_num else 0
+            # rank: lower is better; prefer exact by metadata, then children, then label, then text fallback
+            if exact_num or (sec_alpha and sec_num and sec_num.lower() == sec_alpha.lower()) or (canon_sec_alpha and canon_label_alpha and canon_sec_alpha == canon_label_alpha):
+                base_rank = 0
+            elif child_num or (sec_alpha and sec_num and sec_num.lower().startswith((sec_alpha + ".").lower())) or child_alpha or text_child_alpha:
+                base_rank = 1
+            elif exact_label_num or exact_label_alpha:
+                base_rank = 2
+            elif child_label_num or child_label_alpha or parent_alpha or text_parent_alpha:
+                base_rank = 3
+            else:
+                base_rank = 4  # text prefix fallback
+            penalty = 2 if cross_ref and not (exact_num or (sec_alpha and sec_num and sec_num.lower() == sec_alpha.lower())) else 0
             rank = base_rank + penalty
             candidates.append((rank, uid, text, meta))
 
@@ -514,6 +589,12 @@ async def admin_refresh():
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
+@app.post("/admin/rechunk")
+async def admin_rechunk():
+    msg, games, pdf_choices = rechunk_library()
+    return {"message": msg, "games": games, "pdf_choices": pdf_choices}
+
+
 @app.get("/admin/rebuild-stream")
 async def admin_rebuild_stream():
     queue: asyncio.Queue = asyncio.Queue()
@@ -625,6 +706,133 @@ async def admin_refresh_stream():
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
+@app.get("/admin/rechunk-stream")
+async def admin_rechunk_stream():
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def log_cb(message: str) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, ("log", message))
+        except Exception:
+            pass
+
+    async def run_rechunk():
+        msg, _games, _choices = await asyncio.to_thread(rechunk_library, log_cb)
+        await queue.put(("done", msg))
+        await queue.put(("close", ""))
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(run_rechunk())
+        try:
+            while True:
+                try:
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-cache, no-transform",
+    }
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
+
+class RechunkSelectedPayload(BaseModel):
+    entries: List[str]
+
+
+@app.post("/admin/rechunk-selected")
+async def admin_rechunk_selected(payload: RechunkSelectedPayload):
+    msg, games, pdf_choices = rechunk_selected_pdfs(payload.entries)
+    return {"message": msg, "games": games, "pdf_choices": pdf_choices}
+
+
+@app.get("/admin/rechunk-selected-stream")
+async def admin_rechunk_selected_stream(entries: str):
+    """Stream logs while re-chunking only selected PDFs.
+
+    entries: JSON-encoded array of strings, or a comma-separated list.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def log_cb(message: str) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, ("log", message))
+        except Exception:
+            pass
+
+    def _parse_entries(raw: str) -> List[str]:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+        except Exception:
+            pass
+        return [s.strip() for s in (raw or "").split(",") if s.strip()]
+
+    sel = _parse_entries(entries)
+
+    async def run_job():
+        msg, _games, _choices = await asyncio.to_thread(rechunk_selected_pdfs, sel, log_cb)
+        await queue.put(("done", msg))
+        await queue.put(("close", ""))
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(run_job())
+        try:
+            while True:
+                try:
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "Cache-Control": "no-cache, no-transform",
+    }
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
+
 @app.post("/admin/delete")
 async def admin_delete(games: List[str]):
     if not isinstance(games, list):
@@ -641,6 +849,14 @@ class RenamePayload(BaseModel):
 @app.post("/admin/rename")
 async def admin_rename(payload: RenamePayload):
     msg, updated_games, pdf_choices = rename_pdfs(payload.entries, payload.new_name)
+    return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices}
+
+
+@app.post("/admin/delete-pdfs")
+async def admin_delete_pdfs(entries: List[str]):
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Expected a JSON array of PDF entries or filenames")
+    msg, updated_games, pdf_choices = delete_pdfs(entries)
     return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices}
 
 
@@ -998,6 +1214,7 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                                 except Exception:
                                     pass
                             await asyncio.sleep(0)
+            # Include any chunks if available in meta for client-side citation viewing
             yield _sse_event({"type": "done", "req": req_id, "meta": meta}).encode("utf-8")
             if echo_tokens:
                 try:

@@ -10,13 +10,14 @@ import os
 import shutil
 import warnings
 import re
-from typing import List
+from typing import List, Tuple
 
 import chromadb
 from langchain.schema.document import Document
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFDirectoryLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import fitz  # PyMuPDF
 
 # Handle both direct execution and module import
 try:
@@ -144,6 +145,23 @@ def split_documents(documents: List[Document]):
     # Numeric-only line that represents a header must contain a dot (e.g., "3.0", "3.2.1").
     NUMERIC_ONLY_HEADER_RE = re.compile(r"^\s*((?:\d+\.)+\d+)\s*:?\s*$")
 
+    # Alphanumeric section headers like "F4 Fuel Strip Key" or "A10.2b Movement".
+    # Accept an optional trailing period/colon after the code (e.g., "A2. Metarules" or "A2: Metarules").
+    # Capture the leading code and the title.
+    ALPHANUM_TITLE_RE = re.compile(
+        r"^\s*(([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*))\.?\s*:?\s+(.+?)\s*$"
+    )
+    # Some PDFs render running headers or page furniture before the rule code on the same line, e.g.:
+    # "CORE RULES | HIGH FRONTIER 4 ALL |   I3. Free Market Operation".
+    # Match the code and title anywhere in the line when they appear in that order.
+    # Guard by requiring at least two TitleCased words in the title to reduce false positives.
+    ALPHANUM_INLINE_TITLE_RE = re.compile(
+        r"^[^\n]*?\b([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\.?\s+((?:[A-Z][A-Za-z0-9'\-/()]+\s+){1,}[A-Za-z0-9'\-/()]+)\s*$"
+    )
+
+    # Alphanumeric-only header on its own line (e.g., "A2."), with the title on the next non-empty line
+    ALPHANUM_ONLY_HEADER_RE = re.compile(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\.?\s*:?\s*$")
+
     # As a last resort, allow non-numeric headers, but guard against short tokens
     # like "RtPh:" or codes like "X3Z1" by requiring length and at least two words.
     # Generic headers (very strict):
@@ -203,12 +221,29 @@ def split_documents(documents: List[Document]):
                 meta["section"] = header
                 meta["section_full"] = header
                 try:
-                    m_num = re.match(r"^\s*(\d+(?:\.\d+)*)\b", header)
-                    if m_num:
-                        sec_num = m_num.group(1)
-                        meta["section_number"] = _normalize_section_number(sec_num)
+                    # Prefer alphanumeric section codes (e.g., F4, F4.a, A10.2b)
+                    m_alpha = re.match(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\b", header)
+                    if m_alpha:
+                        meta["section_number"] = m_alpha.group(1)
+                    else:
+                        m_num = re.match(r"^\s*(\d+(?:\.\d+)*)\b", header)
+                        if m_num:
+                            sec_num = m_num.group(1)
+                            meta["section_number"] = _normalize_section_number(sec_num)
                 except Exception:
                     pass
+                # Emit a diagnostic line for admin streaming: show page and section label
+                try:
+                    pg = meta.get("page")
+                    src = meta.get("source")
+                    pg_disp = f"p{int(pg)+1}" if isinstance(pg, int) else "p?"
+                    src_base = (src or "").split("/")[-1].split("\\")[-1]
+                    print(f"   • {pg_disp} {header} [{src_base}]")
+                except Exception:
+                    try:
+                        print(f"   • {header}")
+                    except Exception:
+                        pass
                 out.append(Document(page_content=content, metadata=meta))
 
         i = 0
@@ -252,6 +287,34 @@ def split_documents(documents: List[Document]):
                 i += 1
                 continue
 
+            # Case A0: Alphanumeric header with title on the same line (e.g., "F4 Fuel Strip Key", "A2. Metarules")
+            m_alpha_title = ALPHANUM_TITLE_RE.match(line)
+            if m_alpha_title:
+                _flush(buffer, current_header)
+                buffer = []
+                section_code = m_alpha_title.group(1)
+                title_text = m_alpha_title.group(3)
+                clean_title = title_text.split(':', 1)[0].strip()
+                combined_header = f"{section_code} {clean_title}"
+                current_header = combined_header
+                pending_header_text = combined_header
+                i += 1
+                continue
+
+            # Case A0b: Alphanumeric code and title appear later in the line (e.g., running header prefix)
+            m_alpha_inline = ALPHANUM_INLINE_TITLE_RE.match(line)
+            if m_alpha_inline:
+                _flush(buffer, current_header)
+                buffer = []
+                section_code = m_alpha_inline.group(1)
+                title_text = m_alpha_inline.group(2)
+                clean_title = title_text.split(':', 1)[0].strip()
+                combined_header = f"{section_code} {clean_title}"
+                current_header = combined_header
+                pending_header_text = combined_header
+                i += 1
+                continue
+
             # Case B: Numeric-only line e.g., "3.0" with title on the next non-empty line
             m_num = NUMERIC_ONLY_HEADER_RE.match(line)
             if m_num:
@@ -269,6 +332,26 @@ def split_documents(documents: List[Document]):
                     combined_header = f"{section_number} {next_title.split(':',1)[0].strip()}"
                     current_header = combined_header
                     pending_header_text = f"{combined_header}"
+                    i = j + 1
+                    continue
+
+            # Case B0: Alphanumeric-only line e.g., "A2." with title on the next non-empty line
+            m_alpha_only = ALPHANUM_ONLY_HEADER_RE.match(line)
+            if m_alpha_only:
+                j = i + 1
+                next_title = None
+                while j < len(lines):
+                    if lines[j].strip():
+                        next_title = lines[j].strip()
+                        break
+                    j += 1
+                if next_title:
+                    _flush(buffer, current_header)
+                    buffer = []
+                    section_code = m_alpha_only.group(1)
+                    combined_header = f"{section_code} {next_title.split(':',1)[0].strip()}"
+                    current_header = combined_header
+                    pending_header_text = combined_header
                     i = j + 1
                     continue
 
@@ -469,6 +552,163 @@ def calc_chunk_ids(chunks: List[Document]) -> List[Document]:
     return chunks
 
 
+# Rect highlighting computation removed per request — no rect metadata will be stored
+
+
+def reorder_documents_by_columns(documents: List[Document]) -> List[Document]:
+	"""
+	Reorder per-page text using data-driven 2-column detection.
+
+	- Extract blocks via PyMuPDF
+	- Identify full-width blocks (>= 60% of page width) → neutral
+	- Cluster remaining blocks by center-x into two columns (1D k-means)
+	- Split threshold s = (mu_left + mu_right)/2 with small padding
+	- Assign ambiguous blocks within padding to the same column as the previous
+	  block in reading order when possible; otherwise to the nearest centroid
+	- Emit left column blocks (top-down), then right column blocks (top-down)
+	  and finally neutral blocks in reading order
+	"""
+	# Group documents by source path with page index
+	by_pdf: dict[str, List[Tuple[int, Document]]] = {}
+	for idx, doc in enumerate(documents):
+		try:
+			src = str(doc.metadata.get("source") or "")
+			pg = doc.metadata.get("page")
+			if not src or pg is None:
+				continue
+			by_pdf.setdefault(src, []).append((int(pg), doc))
+		except Exception:
+			continue
+
+	for src, items in by_pdf.items():
+		try:
+			pdf = fitz.open(src)
+		except Exception:
+			continue
+		try:
+			for page_index, doc in items:
+				try:
+					page = pdf.load_page(page_index)
+				except Exception:
+					continue
+				try:
+					blocks = page.get_text("blocks")  # list of (x0,y0,x1,y1, text, ...)
+				except Exception:
+					blocks = []
+				if not blocks:
+					# Fallback: keep original text
+					continue
+
+				page_w = float(page.rect.width or 1.0)
+				full_width_thresh = 0.60 * page_w
+
+				# Build precise block list
+				raw_blocks: List[Tuple[int, float, float, float, float, float, float, str]] = []
+				for bi, b in enumerate(blocks):
+					try:
+						x0, y0, x1, y1, text = float(b[0]), float(b[1]), float(b[2]), float(b[3]), str(b[4])
+					except Exception:
+						x0 = float(b[0]); y0 = float(b[1]); x1 = float(b[2]); y1 = float(b[3]); text = str(b[4])
+					if not text.strip():
+						continue
+					w = float(x1 - x0)
+					cx = (x0 + x1) / 2.0
+					raw_blocks.append((bi, x0, y0, x1, y1, cx, w, text))
+
+				normals: List[Tuple[float, float, float, str, float, int]] = []
+				neutral: List[Tuple[float, float, str, int]] = []
+				for bi, x0, y0, x1, y1, cx, w, text in raw_blocks:
+					if w >= full_width_thresh:
+						neutral.append((y0, x0, text, bi))
+					else:
+						normals.append((cx, y0, x0, text, w, bi))
+
+				# Fallback: if not enough normals, keep reading order
+				if len(normals) < 3:
+					all_blocks = [(y0, x0, text) for (_cx, y0, x0, text, _w, _bi) in normals] + [(y0, x0, text) for (y0, x0, text, _bi) in neutral]
+					all_blocks.sort(key=lambda t: (t[0], t[1]))
+					combined = "\n\n".join(s[2].rstrip() for s in all_blocks if s[2])
+					try:
+						doc.page_content = combined
+					except Exception:
+						try:
+							new_meta = dict(doc.metadata)
+							new_doc = Document(page_content=combined, metadata=new_meta)
+							documents[documents.index(doc)] = new_doc
+						except Exception:
+							pass
+					continue
+
+				# 1D k-means (k=2)
+				cxs = [cx for (cx, _y0, _x0, _text, _w, _bi) in normals]
+				mu_left, mu_right = min(cxs), max(cxs)
+				for _ in range(10):
+					left, right = [], []
+					for tup in normals:
+						cx, y0, x0, text, w, bi = tup
+						if abs(cx - mu_left) <= abs(cx - mu_right):
+							left.append(tup)
+						else:
+							right.append(tup)
+					if not left or not right:
+						break
+					new_mu_left = sum(t[0] for t in left) / len(left)
+					new_mu_right = sum(t[0] for t in right) / len(right)
+					if abs(new_mu_left - mu_left) < 0.5 and abs(new_mu_right - mu_right) < 0.5:
+						mu_left, mu_right = new_mu_left, new_mu_right
+						break
+					mu_left, mu_right = new_mu_left, new_mu_right
+				if mu_left > mu_right:
+					mu_left, mu_right = mu_right, mu_left
+
+				split = (mu_left + mu_right) / 2.0
+				pad = max(6.0, 0.02 * page_w)
+
+				reading = sorted(normals, key=lambda t: (t[1], t[2]))
+				left_seq: List[Tuple[float, float, str]] = []
+				right_seq: List[Tuple[float, float, str]] = []
+				prev_col = None
+				prev_x0 = prev_w = 0.0
+				for cx, y0, x0, text, w, bi in reading:
+					if cx < split - pad:
+						col = 0
+					elif cx > split + pad:
+						col = 1
+					else:
+						# Ambiguous: keep same column when overlapping previous
+						if prev_col is not None and (x0 < (prev_x0 + 0.5 * max(prev_w, 1.0))):
+							col = prev_col
+						else:
+							col = 0 if abs(cx - mu_left) <= abs(cx - mu_right) else 1
+					if col == 0:
+						left_seq.append((y0, x0, text))
+					else:
+						right_seq.append((y0, x0, text))
+					prev_col, prev_x0, prev_w = col, x0, w
+
+				left_seq.sort(key=lambda t: (t[0], t[1]))
+				right_seq.sort(key=lambda t: (t[0], t[1]))
+				neutral.sort(key=lambda t: (t[0], t[1]))
+				combined = "\n\n".join([s[2].rstrip() for s in left_seq] + [s[2].rstrip() for s in right_seq] + [s[2].rstrip() for s in neutral])
+
+				# Replace page content
+				try:
+					doc.page_content = combined
+				except Exception:
+					try:
+						new_meta = dict(doc.metadata)
+						new_doc = Document(page_content=combined, metadata=new_meta)
+						documents[documents.index(doc)] = new_doc
+					except Exception:
+						pass
+		finally:
+			try:
+				pdf.close()
+			except Exception:
+				pass
+	return documents
+
+
 def clear_database():
     """
     Clears the Chroma vector database.
@@ -508,6 +748,7 @@ def main() -> None:
     # only process those, which speeds up incremental updates (e.g. when adding
     # a single new game).
     documents = load_documents(args.paths)
+    documents = reorder_documents_by_columns(documents)
     chunks = split_documents(documents)
     add_to_chroma(chunks)
 
