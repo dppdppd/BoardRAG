@@ -12,16 +12,11 @@ import re
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from src.query import stream_query_rag, get_available_games
-from src.query import get_stored_game_names, get_chromadb_settings, suppress_chromadb_telemetry  # for section chunks
-from src.config import CHROMA_PATH
-from src.embedding_function import get_embedding_function
-import chromadb
-from langchain_chroma import Chroma
-from src.services.library_service import rebuild_library, refresh_games, save_uploaded_files, rechunk_library, rechunk_selected_pdfs
+from src.query import get_stored_game_names  # catalog-based
 from src.services.game_service import delete_games, rename_pdfs, get_pdf_dropdown_choices, delete_pdfs
 from src.services.auth_service import unlock, issue_token, verify_token
 from src.storage_utils import format_storage_info
@@ -232,9 +227,15 @@ app.add_middleware(
 )
 
 
-@app.get("/health")
+@app.get("/health", response_class=PlainTextResponse)
+@app.head("/health")
 async def health():
-    return {"status": "ok"}
+    return "ok"
+
+@app.get("/healthz", response_class=PlainTextResponse)
+@app.head("/healthz")
+async def healthz():
+    return "ok"
 
 # At startup, print available routes for debugging 404s during local dev
 @app.on_event("startup")
@@ -368,243 +369,7 @@ async def get_pdf(filename: str, token: Optional[str] = None, authorization: Opt
 
 @app.get("/section-chunks")
 async def section_chunks(section: Optional[str] = None, game: Optional[str] = None, limit: int = 12, id: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
-    # Enforce auth
-    _role = _require_auth(authorization, token)
-    sec = (section or "").strip()
-    if not sec and not id:
-        raise HTTPException(status_code=400, detail="missing section or id")
-    # Connect to DB
-    try:
-        embedding_function = get_embedding_function()
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
-            db = Chroma(client=persistent_client, embedding_function=embedding_function)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"db error: {e}")
-
-    # Resolve PDFs for selected game (if provided)
-    target_files: Optional[Set[str]] = None
-    if game:
-        key = (game or "").strip().lower()
-        try:
-            from src import config as _cfg  # type: ignore
-            if bool(getattr(_cfg, "DB_LESS", True)):
-                # Use catalog mapping
-                from src.catalog import resolve_file_ids_for_game  # type: ignore
-                pairs = resolve_file_ids_for_game(game)
-                import os as _os
-                target_files = { _os.path.basename(fp).lower() for fp, _fid in pairs }
-                if not target_files:
-                    target_files = set()
-            else:
-                # Legacy mapping via stored game names
-                name_map = get_stored_game_names()
-                import os as _os
-                files = { _os.path.basename(fname).lower() for fname, gname in name_map.items() if (gname or "").strip().lower() == key }
-                if not files:
-                    files = { _os.path.basename(fname).lower() for fname in name_map.keys() if _os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == key }
-                target_files = files if files else set()
-        except Exception:
-            target_files = set()
-
-    # Scan all docs and filter by section
-    try:
-        raw = db.get()
-        documents = raw.get("documents", [])
-        metadatas = raw.get("metadatas", [])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"db read error: {e}")
-
-    out = []
-    sec_lower = (sec or "").lower()
-
-    def _clean_chunk_text(s: str) -> str:
-        try:
-            # Remove long unicode ellipsis runs and dot leaders
-            s2 = re.sub(r"[…]{2,}", "", s)
-            s2 = re.sub(r"\.{5,}", "", s2)
-            # Trim dot leaders before trailing page numbers per line
-            cleaned_lines = []
-            for ln in s2.splitlines():
-                ln2 = re.sub(r"\.{2,}\s*\d+\s*$", "", ln)
-                cleaned_lines.append(ln2.rstrip())
-            return "\n".join(cleaned_lines)
-        except Exception:
-            return s
-
-    # Optional: exact fetch by uid
-    import hashlib as _hashlib, base64 as _b64
-
-    def _make_uid(text: str, meta: dict) -> str:
-        try:
-            payload = f"{meta.get('source') or ''}|{meta.get('page') or ''}|{meta.get('section') or ''}|{meta.get('section_number') or ''}|{(text or '')[:160]}".encode("utf-8", errors="ignore")
-            h = _hashlib.sha1(payload).digest()
-            return _b64.urlsafe_b64encode(h).decode("ascii").rstrip("=")
-        except Exception:
-            return ""
-
-    candidates = []
-    for text, meta in zip(documents, metadatas):
-        if not isinstance(meta, dict):
-            continue
-        # Filter by game PDFs if provided
-        if target_files is not None and len(target_files) > 0:
-            pdf_fn = str(meta.get("pdf_filename") or "").lower()
-            if pdf_fn not in target_files:
-                continue
-        sec_num = str(meta.get("section_number") or "").strip()
-        sec_label = str(meta.get("section") or "").strip()
-        uid = _make_uid(str(text or ""), meta)
-        if id and uid == id:
-            # Return this exact chunk immediately
-            try:
-                from pathlib import Path as _Path
-                source_path = str(meta.get("source") or "")
-                return {"section": sec, "game": game, "chunks": [{
-                    "uid": uid,
-                    "text": _clean_chunk_text(str(text or "")),
-                    "source": _Path(source_path).name if source_path else "unknown",
-                    "page": meta.get("page"),
-                    "section": str(meta.get("section") or ""),
-                    "section_number": str(meta.get("section_number") or ""),
-                }]}
-            except Exception:
-                return {"section": sec, "game": game, "chunks": [{
-                    "uid": uid,
-                    "text": _clean_chunk_text(str(text or "")),
-                    "source": str(meta.get("source") or "unknown"),
-                    "page": meta.get("page"),
-                    "section": str(meta.get("section") or ""),
-                    "section_number": str(meta.get("section_number") or ""),
-                }]}
-
-        # If fetching by section, compute match and ranking
-        if sec:
-            # Numeric matches (existing behavior)
-            exact_num = bool(sec_num) and (sec_num == sec)
-            child_num = bool(sec_num) and sec_num.startswith(sec + ".")
-            # Extract numeric at start of label if present
-            m_num_label = re.match(r"^\s*(\d+(?:\.\d+)*)\b", sec_label)
-            label_num = m_num_label.group(1) if m_num_label else ""
-            exact_label_num = bool(label_num) and (label_num == sec)
-            child_label_num = bool(label_num) and label_num.startswith(sec + ".")
-
-            # Alphanumeric section codes, e.g., F1, F1.b, A10.2b
-            alpha_re = re.compile(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\b")
-            m_alpha_label = alpha_re.match(sec_label)
-            label_alpha = m_alpha_label.group(1) if m_alpha_label else ""
-            m_alpha_text = alpha_re.match(str(text or ""))
-            text_alpha = m_alpha_text.group(1) if m_alpha_text else ""
-            m_alpha_sec = alpha_re.match(sec)
-            sec_alpha = m_alpha_sec.group(1) if m_alpha_sec else ""
-
-            # Canonicalize alpha by removing separators and lowercasing, so F1.c == F1c
-            def _canon_alpha(s: str) -> str:
-                try:
-                    m = alpha_re.match(str(s) or "")
-                    if not m:
-                        return ""
-                    raw = m.group(1)
-                    return re.sub(r"[^A-Za-z0-9]", "", raw).lower()
-                except Exception:
-                    return ""
-            canon_sec_alpha = _canon_alpha(sec)
-            canon_label_alpha = _canon_alpha(label_alpha)
-            canon_text_alpha = _canon_alpha(text_alpha)
-
-            exact_label_alpha = bool(sec_alpha) and bool(label_alpha) and (label_alpha.lower() == sec_alpha.lower())
-            child_label_alpha = bool(sec_alpha) and bool(label_alpha) and label_alpha.lower().startswith((sec_alpha + ".").lower())
-            # Fallback: if DB lacks proper metadata, allow matching by chunk text prefix
-            text_alpha_match = bool(sec_alpha) and bool(text_alpha) and (text_alpha.lower() == sec_alpha.lower() or text_alpha.lower().startswith((sec_alpha + ".").lower()))
-
-            # Parent/child relaxation on canonicalized alpha codes (handles F1 vs F1.c)
-            parent_alpha = bool(canon_sec_alpha and canon_label_alpha) and canon_label_alpha.startswith(canon_sec_alpha)
-            child_alpha = bool(canon_sec_alpha and canon_label_alpha) and canon_sec_alpha.startswith(canon_label_alpha)
-            text_parent_alpha = bool(canon_sec_alpha and canon_text_alpha) and canon_text_alpha.startswith(canon_sec_alpha)
-            text_child_alpha = bool(canon_sec_alpha and canon_text_alpha) and canon_sec_alpha.startswith(canon_text_alpha)
-
-            # Only consider candidates that match by number, alphanumeric, or text prefix
-            if not (exact_num or child_num or exact_label_num or child_label_num or exact_label_alpha or child_label_alpha or text_alpha_match or parent_alpha or child_alpha or text_parent_alpha or text_child_alpha):
-                continue
-
-            # Penalize cross-reference labels like "15.1 & 48.3"
-            cross_ref = bool(re.search(r"&\s*\d", sec_label))
-            # rank: lower is better; prefer exact by metadata, then children, then label, then text fallback
-            if exact_num or (sec_alpha and sec_num and sec_num.lower() == sec_alpha.lower()) or (canon_sec_alpha and canon_label_alpha and canon_sec_alpha == canon_label_alpha):
-                base_rank = 0
-            elif child_num or (sec_alpha and sec_num and sec_num.lower().startswith((sec_alpha + ".").lower())) or child_alpha or text_child_alpha:
-                base_rank = 1
-            elif exact_label_num or exact_label_alpha:
-                base_rank = 2
-            elif child_label_num or child_label_alpha or parent_alpha or text_parent_alpha:
-                base_rank = 3
-            else:
-                base_rank = 4  # text prefix fallback
-            penalty = 2 if cross_ref and not (exact_num or (sec_alpha and sec_num and sec_num.lower() == sec_alpha.lower())) else 0
-            rank = base_rank + penalty
-            candidates.append((rank, uid, text, meta))
-
-    if id and not out:
-        # id requested but not found
-        return {"section": sec, "game": game, "chunks": []}
-
-    if sec:
-        # Sort by rank, then prefer shorter rank ties by page number then by text length
-        def _key(item):
-            r, u, t, m = item
-            pg = m.get("page")
-            try:
-                pgk = int(pg) if isinstance(pg, (int, float, str)) and str(pg).isdigit() else 999999
-            except Exception:
-                pgk = 999999
-            return (r, pgk, len(str(t or "")))
-
-        candidates.sort(key=_key)
-        limit_n = max(1, min(50, int(limit) if isinstance(limit, int) else 12))
-        for r, uid, text, meta in candidates[:limit_n]:
-            sec_num = str(meta.get("section_number") or "").strip()
-            sec_label = str(meta.get("section") or "").strip()
-            try:
-                from pathlib import Path as _Path
-                source_path = str(meta.get("source") or "")
-                out.append({
-                    "uid": uid,
-                    "text": _clean_chunk_text(str(text or "")),
-                    "source": _Path(source_path).name if source_path else "unknown",
-                    "page": meta.get("page"),
-                    "section": sec_label,
-                    "section_number": sec_num,
-                })
-            except Exception:
-                out.append({
-                    "uid": uid,
-                    "text": _clean_chunk_text(str(text or "")),
-                    "source": str(meta.get("source") or "unknown"),
-                    "page": meta.get("page"),
-                    "section": sec_label,
-                    "section_number": sec_num,
-                })
-
-    # Final ordering: by PDF source, then page number, then numeric section path
-    if out:
-        def _parse_ints_path(s: str):
-            try:
-                parts = [int(p) for p in str(s or "").split(".") if p.isdigit()]
-                return tuple(parts)
-            except Exception:
-                return tuple()
-        def _final_key(it: dict):
-            src = str(it.get("source") or "").lower()
-            pg = it.get("page")
-            try:
-                pgk = int(pg) if isinstance(pg, (int, float, str)) and str(pg).isdigit() else 999999
-            except Exception:
-                pgk = 999999
-            sec_path = _parse_ints_path(it.get("section_number") or "")
-            return (src, pgk, sec_path)
-        out.sort(key=_final_key)
-
-    return {"section": sec, "game": game, "chunks": out}
+    raise HTTPException(status_code=501, detail="section-chunks is not available in DB-less mode")
 
 
 @app.post("/auth/unlock")
@@ -734,107 +499,26 @@ async def upload(files: List[UploadFile] = File(...)):
 
 @app.post("/admin/rebuild")
 async def admin_rebuild():
-    try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
-    except Exception:
-        pass
-    msg, games, pdf_choices = rebuild_library()
-    return {"message": msg, "games": games, "pdf_choices": pdf_choices}
+    return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
 
 
 @app.post("/admin/refresh")
 async def admin_refresh():
-    try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
-    except Exception:
-        pass
-    msg, games, pdf_choices = refresh_games()
-    return {"message": msg, "games": games, "pdf_choices": pdf_choices}
+    return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
 
 
 @app.post("/admin/rechunk")
 async def admin_rechunk():
-    try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
-    except Exception:
-        pass
-    msg, games, pdf_choices = rechunk_library()
-    return {"message": msg, "games": games, "pdf_choices": pdf_choices}
+    return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
 
 
 @app.get("/admin/rebuild-stream")
 async def admin_rebuild_stream():
-    try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            async def _disabled():
-                yield _sse_event({"type": "log", "line": "⛔ Rebuild disabled in DB-less mode"}).encode("utf-8")
-                yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
-            headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
-            return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
-    except Exception:
-        pass
-    queue: asyncio.Queue = asyncio.Queue()
-
-    loop = asyncio.get_running_loop()
-
-    def log_cb(message: str) -> None:
-        try:
-            loop.call_soon_threadsafe(queue.put_nowait, ("log", message))
-        except Exception:
-            pass
-
-    async def run_rebuild():
-        # Run sync function in a thread and stream logs via callback
-        msg, _games, _choices = await asyncio.to_thread(rebuild_library, log_cb)
-        await queue.put(("done", msg))
-        await queue.put(("close", ""))
-
-    async def event_stream() -> AsyncIterator[bytes]:
-        task = asyncio.create_task(run_rebuild())
-        try:
-            while True:
-                try:
-                    # Send heartbeat pings to keep proxies from buffering/closing
-                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    # Comment line (ignored by EventSource) – keeps connection alive
-                    yield b": ping\n\n"
-                    continue
-                if typ == "log":
-                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
-                elif typ == "done":
-                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
-                elif typ == "close":
-                    break
-        finally:
-            if not task.done():
-                task.cancel()
-        
-        # Allow graceful shutdown without noisy tracebacks
-        # If the client disconnects or server shuts down, the stream may be cancelled
-        # which should not be treated as an error.
-        
-
-    headers = {
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-        "X-Accel-Buffering": "no",  # Disable proxy buffering (nginx)
-    }
-    async def safe_stream():
-        try:
-            async for chunk in event_stream():
-                yield chunk
-        except asyncio.CancelledError:  # pragma: no cover - shutdown/disconnect path
-            return
-
-    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+    async def _disabled():
+        yield _sse_event({"type": "log", "line": "⛔ Rebuild disabled in DB-less mode"}).encode("utf-8")
+        yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
+    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+    return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/admin/refresh-stream")

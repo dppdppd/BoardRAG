@@ -16,67 +16,6 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 
-def disable_chromadb_telemetry():
-    """Properly disable ChromaDB telemetry using official methods."""
-    # Set environment variables that ChromaDB checks for telemetry
-    os.environ["ANONYMIZED_TELEMETRY"] = "False"
-    os.environ["DO_NOT_TRACK"] = "1"
-
-
-# Disable telemetry immediately
-disable_chromadb_telemetry()
-
-
-def get_chromadb_settings():
-    """Get ChromaDB settings with telemetry properly disabled."""
-    try:
-        import chromadb
-
-        # Determine whether database reset is allowed (default True)
-        allow_reset_env = os.getenv("ALLOW_RESET", "True").lower() in {"1", "true", "yes"}
-
-        return chromadb.config.Settings(
-            anonymized_telemetry=False,
-            allow_reset=allow_reset_env,
-        )
-    except ImportError:
-        return None
-
-
-@contextlib.contextmanager
-def suppress_chromadb_telemetry():
-    """Context manager to suppress ChromaDB telemetry error messages."""
-    original_stderr = sys.stderr
-
-    class FilteredStderr:
-        def write(self, text):
-            # Only suppress specific telemetry error messages
-            if any(
-                keyword in text.lower()
-                for keyword in [
-                    "failed to send telemetry event",
-                    "capture() takes 1 positional argument but 3 were given",
-                    "clientstartevent",
-                    "clientcreatecollectionevent",
-                    "collectiongetevent",
-                ]
-            ):
-                return
-            return original_stderr.write(text)
-
-        def flush(self):
-            return original_stderr.flush()
-
-        def __getattr__(self, name):
-            return getattr(original_stderr, name)
-
-    try:
-        sys.stderr = FilteredStderr()
-        yield
-    finally:
-        sys.stderr = original_stderr
-
-
 # Load API keys from .env file
 load_dotenv()
 
@@ -159,9 +98,8 @@ SEARCH_REWRITE_MODEL = os.getenv("SEARCH_REWRITE_MODEL", GENERATOR_MODEL)
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 # ---------------------------------------------------------------------------
-# Vector Database Configuration
+# Vector Database Configuration (removed)
 # ---------------------------------------------------------------------------
-# CHROMA_PATH will be redefined below once we know if we're on HF Spaces.
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
@@ -197,15 +135,9 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", _chunking["chunk_overlap"]))
 # Detect if running inside a Hugging Face Space (SPACE_ID env var is always set)
 ON_HF_SPACE = bool(os.getenv("SPACE_ID"))
 
-# Default to the persistent storage mount point on Spaces for data & DB paths
 _default_data_path = "/data" if ON_HF_SPACE else "data"
-_default_chroma_path = (
-    os.path.join(_default_data_path, "chroma") if ON_HF_SPACE else "chroma"
-)
 
-# Allow overriding via environment variables
 DATA_PATH = os.getenv("DATA_PATH", _default_data_path)
-CHROMA_PATH = os.getenv("CHROMA_PATH", _default_chroma_path)
 
 # ---------------------------------------------------------------------------
 # Ensure chosen DATA_PATH is writable; if not, fall back to repo-local 'data'
@@ -229,7 +161,6 @@ def _is_writable(dir_path: str) -> bool:
 if not _is_writable(DATA_PATH):
     fallback_data = "data"
     DATA_PATH = fallback_data
-    CHROMA_PATH = os.path.join(fallback_data, "chroma")
     os.makedirs(DATA_PATH, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -334,7 +265,7 @@ def print_config():
     print(f"  Embedder: {EMBEDDER_MODEL}")
     print(f"  Chunk Size: {CHUNK_SIZE} chars (~{CHUNK_SIZE//4} tokens)")
     print(f"  Chunk Overlap: {CHUNK_OVERLAP} chars")
-    print(f"  Database: {CHROMA_PATH}")
+    # No local DB in DB-less mode
     print(f"  Data: {DATA_PATH}")
     print(f"  Template: {JINJA_TEMPLATE_PATH}")
 

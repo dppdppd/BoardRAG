@@ -62,20 +62,9 @@ export default function BottomSheetMenu({ open, onClose, games, selectedGame, se
                 value={promptStyle}
                 onChange={(e) => setPromptStyle((e.target.value as any) || "default")}
               >
-                <option value="default">Normal</option>
                 <option value="brief">Brief</option>
+                <option value="default">Normal</option>
                 <option value="detailed">Detailed</option>
-                <option value="step_by_step">Step-by-step</option>
-                <option value="mnemonic">Mnemonic</option>
-                <option value="analogy">Analogy</option>
-                <option value="story">Story/Scenario</option>
-                <option value="checklist">Checklist</option>
-                <option value="comparison">Comparison</option>
-                <option value="mistakes">Common mistakes + fixes</option>
-                <option value="if_then">If–then rules</option>
-                <option value="teach_back">Teach-back</option>
-                <option value="example_first">Example-first</option>
-                <option value="self_quiz">Self-quiz</option>
               </select>
             </label>
             <label className="row" style={{ gap: 10 }}>

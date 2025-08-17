@@ -7,12 +7,10 @@ from typing import List
 import gradio as gr
 
 from langchain.schema.document import Document
-from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from .. import config
-from ..embedding_function import get_embedding_function
 from ..query import get_available_games, get_stored_game_names
 from ..handlers.game import get_pdf_dropdown_choices
 
@@ -28,48 +26,10 @@ def rebuild_library_handler():
         import gc
         gc.collect()  # Force garbage collection to close connections
         
-        # Use ChromaDB reset instead of file deletion to avoid locks
-        from ..query import get_chromadb_settings, suppress_chromadb_telemetry
-        import chromadb
-        chroma_path = config.CHROMA_PATH
-        
-        print("[REBUILD] Clearing database with ChromaDB reset...")
-        try:
-            with suppress_chromadb_telemetry():
-                reset_client = chromadb.PersistentClient(path=chroma_path, settings=get_chromadb_settings())
-                reset_client.reset()
-            print("[REBUILD] Database cleared successfully")
-        except Exception as e:
-            print(f"[REBUILD] Database clear failed: {e}")
-            return f"❌ Error clearing database: {e}", gr.update()
-        
-        # Now use populate_database functions for the rest
-        from ..populate_database import load_documents, split_documents, add_to_chroma
-        
-        print("🔧 [REBUILD] Loading documents...")
-        documents = load_documents()  # Load all documents from DATA_PATH
-        
-        print(f"🔧 [REBUILD] Splitting {len(documents)} documents into chunks...")
-        chunks = split_documents(documents)
-        
-        print(f"🔧 [REBUILD] Adding {len(chunks)} chunks to ChromaDB...")
-        success = add_to_chroma(chunks)
-        
-        if not success:
-            return "❌ Failed to add documents to database", gr.update()
+        return "⛔ Rebuild disabled in DB-less mode", gr.update(), gr.update(), gr.update()
         
         # Extract and store game names
-        from ..query import extract_and_store_game_name
-        import os
-        filenames = {
-            os.path.basename(doc.metadata.get("source", ""))
-            for doc in documents
-        }
-        print(f"🔧 [REBUILD] Extracting game names for {len(filenames)} PDFs...")
-        for i, fname in enumerate(filenames, 1):
-            if fname:
-                print(f"   🎮 Extracting game name {i}/{len(filenames)}: {fname}")
-                extract_and_store_game_name(fname)
+        # No extraction in DB-less mode
         
         # Clear caches and refresh
         if hasattr(get_available_games, '_filename_mapping'):
@@ -111,17 +71,13 @@ def rebuild_selected_game_handler(selected_games):
     """
     import os
     from pathlib import Path
-    import chromadb
+    # chroma not used in DB-less mode
     import traceback
     import gradio as gr
 
     from .. import config
-    from ..embedding_function import get_embedding_function
-    from ..populate_database import load_documents, split_documents as split_docs_func, add_to_chroma
     from ..query import (
         get_available_games,
-        get_chromadb_settings,
-        suppress_chromadb_telemetry,
     )
     from .game import get_pdf_dropdown_choices
 
@@ -196,38 +152,10 @@ def rebuild_selected_game_handler(selected_games):
             return f"❌ No PDFs found for any of the selected games", empty, empty, empty
 
     # ---- 1️⃣ Remove existing chunks for these PDFs ----
-    try:
-        with suppress_chromadb_telemetry():
-            client = chromadb.PersistentClient(path=config.CHROMA_PATH, settings=get_chromadb_settings())
-            db = chromadb.Client(client_settings=get_chromadb_settings()) if hasattr(chromadb, 'Client') else None
-    except Exception:
-        client = None
-    try:
-        from langchain_chroma import Chroma
-        db = Chroma(client=client, embedding_function=get_embedding_function())
-        all_docs = db.get()
-        ids_to_delete = []
-        for doc_id in all_docs["ids"]:
-            source_path = doc_id.split(":")[0]
-            norm_source = source_path.replace("\\", "/")
-            for pdf in all_pdf_paths:
-                if str(pdf).replace("\\", "/") in norm_source:
-                    ids_to_delete.append(doc_id)
-                    break
-        if ids_to_delete:
-            db.delete(ids=ids_to_delete)
-            print(f"[DEBUG] Removed {len(ids_to_delete)} existing chunks before rebuild")
-    except Exception as e:
-        print(f"[WARN] Could not clean existing docs: {e}")
-        traceback.print_exc()
+    # No vector store cleanup in DB-less mode
 
     # ---- 2️⃣ Load & split documents ----
-        docs = load_documents([str(p) for p in all_pdf_paths])
-        if not docs:
-            return f"❌ Failed to load PDFs", None, None, None
-
-    split_docs = split_docs_func(docs)
-    add_to_chroma(split_docs)
+        pass
 
     # ---- 3️⃣ Refresh caches and UI ----
     if hasattr(get_available_games, '_filename_mapping'):

@@ -15,7 +15,7 @@ import PdfPreview from "./components/PdfPreview";
 import { usePdfHeadingSpotlight } from "./hooks/usePdfHeadingSpotlight";
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 
-type Message = { role: "user" | "assistant"; content: string; pinned?: boolean };
+type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; style?: "default" | "brief" | "detailed" };
 
 import { API_BASE } from "../lib/config";
 
@@ -100,21 +100,7 @@ export default function HomePage() {
     // Default ON; will refine from session prefs once sessionId is loaded
     try { return localStorage.getItem('boardrag_pdf_smooth') === '1' || localStorage.getItem('boardrag_pdf_smooth') == null; } catch { return true; }
   });
-  type PromptStyle =
-    | "default"
-    | "brief"
-    | "detailed"
-    | "step_by_step"
-    | "mnemonic"
-    | "analogy"
-    | "story"
-    | "checklist"
-    | "comparison"
-    | "mistakes"
-    | "if_then"
-    | "teach_back"
-    | "example_first"
-    | "self_quiz";
+  type PromptStyle = "default" | "brief" | "detailed";
   const [promptStyle, setPromptStyle] = useState<PromptStyle>("default");
   const [model, setModel] = useState<string>("[Anthropic] Claude Sonnet 4");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -254,9 +240,7 @@ export default function HomePage() {
     try {
       const key = `boardrag_style:${selectedGame}`;
       const savedRaw = localStorage.getItem(key);
-      const allowed: PromptStyle[] = [
-        "default","brief","detailed","step_by_step","mnemonic","analogy","story","checklist","comparison","mistakes","if_then","teach_back","example_first","self_quiz"
-      ];
+      const allowed: PromptStyle[] = ["default", "brief", "detailed"];
       const valid = (savedRaw && (allowed as readonly string[]).includes(savedRaw)) ? (savedRaw as PromptStyle) : "default";
       setPromptStyle(valid);
       if (savedRaw && !allowed.includes(savedRaw as any)) {
@@ -574,7 +558,7 @@ export default function HomePage() {
     let workingMessages = messages;
     if (reuseUserIndex == null) {
       // append new user message
-      workingMessages = [...messages, { role: "user", content: question } as Message];
+      workingMessages = [...messages, { role: "user", content: question, style: promptStyle } as Message];
       setMessages(workingMessages);
       const numUsers = workingMessages.filter((m) => m.role === "user").length;
       lastSubmittedUserIndexRef.current = numUsers - 1;
@@ -613,28 +597,6 @@ export default function HomePage() {
           return `${q} Instruction: Answer extremely concisely in 1-3 short sentences or a compact bulleted list.`;
         case "detailed":
           return `${q} Instruction: Provide a thorough, step-by-step explanation with relevant details and examples.`;
-        case "step_by_step":
-          return `${q} Instruction: Explain as numbered steps from setup to outcome; keep each step short.`;
-        case "mnemonic":
-          return `${q} Instruction: Include a short mnemonic or memory hook that captures the rule.`;
-        case "analogy":
-          return `${q} Instruction: Provide a simple analogy that maps the concept to everyday situations.`;
-        case "story":
-          return `${q} Instruction: Give a brief in-game scenario demonstrating the rule in action.`;
-        case "checklist":
-          return `${q} Instruction: Output a checklist of 3-7 items to apply the rule during play.`;
-        case "comparison":
-          return `${q} Instruction: Compare and contrast with the two most similar rules in 2-3 concise lines.`;
-        case "mistakes":
-          return `${q} Instruction: List the top 3 common mistakes and how to avoid them.`;
-        case "if_then":
-          return `${q} Instruction: Express as concise if-then bullets covering typical edge cases.`;
-        case "teach_back":
-          return `${q} Instruction: End with one sentence the user could say to teach this to a friend.`;
-        case "example_first":
-          return `${q} Instruction: Begin with a concrete example, then state the general rule.`;
-        case "self_quiz":
-          return `${q} Instruction: End with 2 short self-quiz questions to check understanding.`;
         default:
           return q;
       }
@@ -1814,6 +1776,12 @@ export default function HomePage() {
                       </div>
                     ) : (
                       <div {...props}>
+                        {/* subtle indicator of chosen style */}
+                        {m.style && (
+                          <span style={{ position: 'absolute', right: 8, top: 6, fontSize: 11, opacity: 0.6 }} title={`Style: ${m.style === 'default' ? 'normal' : m.style}`} aria-label={`Style: ${m.style === 'default' ? 'normal' : m.style}`}>
+                            {m.style === 'default' ? 'normal' : m.style}
+                          </span>
+                        )}
                         <ReactMarkdown
                           // Allow custom schemes like section: without sanitization interfering
                           {...({ urlTransform: (url: string) => url } as any)}

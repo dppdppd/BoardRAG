@@ -5,14 +5,10 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import chromadb
 from langchain.schema.document import Document
 from langchain_community.document_loaders import PyPDFLoader
 
-from ..config import CHROMA_PATH, get_chromadb_settings, suppress_chromadb_telemetry
-from ..embedding_function import get_embedding_function
 from .. import config as cfg
-from langchain_chroma import Chroma
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 
@@ -110,58 +106,33 @@ def improve_fallback_name(filename: str) -> str:
 
 
 def store_game_name(filename: str, game_name: str) -> None:
-    # In DB-less mode, write into catalog instead of DB
+    # Catalog-only storage in DB-less mode
     try:
-        from .. import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            try:
-                from ..catalog import load_catalog, save_catalog, _now_iso  # type: ignore
-            except Exception:
-                return
-            cat = load_catalog()
-            key = Path(filename).name
-            entry = cat.get(key) or {}
-            entry["game_name"] = game_name
-            entry["updated_at"] = _now_iso()
-            cat[key] = entry
-            save_catalog(cat)
-            print(f"✅ Catalog: stored game name '{game_name}' for '{key}'")
-            return
+        from ..catalog import load_catalog, save_catalog, _now_iso  # type: ignore
+        cat = load_catalog()
+        key = Path(filename).name
+        entry = cat.get(key) or {}
+        entry["game_name"] = game_name
+        entry["updated_at"] = _now_iso()
+        cat[key] = entry
+        save_catalog(cat)
+        print(f"✅ Catalog: stored game name '{game_name}' for '{key}'")
     except Exception:
         pass
-    # Legacy DB-backed
-    try:
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
-            game_names_collection = persistent_client.get_or_create_collection(
-                name="game_names",
-                metadata={"description": "Stores extracted game names from PDF filenames"},
-            )
-            game_names_collection.upsert(
-                ids=[filename],
-                documents=[game_name],
-                metadatas=[{"filename": filename, "game_name": game_name}],
-            )
-            print(f"✅ Stored game name: '{game_name}' for '{filename}'")
-    except Exception as e:
-        print(f"❌ Error storing game name for {filename}: {e}")
 
 
 def get_stored_game_names() -> Dict[str, str]:
+    # Catalog-based mapping only
     try:
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
-            try:
-                game_names_collection = persistent_client.get_collection("game_names")
-                results = game_names_collection.get()
-                filename_to_game: Dict[str, str] = {}
-                for filename, game_name in zip(results["ids"], results["documents"]):
-                    filename_to_game[filename] = game_name
-                return filename_to_game
-            except Exception:
-                return {}
-    except Exception as e:
-        print(f"❌ Error retrieving stored game names: {e}")
+        from ..catalog import load_catalog  # type: ignore
+        cat = load_catalog()
+        out: Dict[str, str] = {}
+        for fname, meta in cat.items():
+            g = (meta or {}).get("game_name")
+            if isinstance(g, str) and g.strip():
+                out[Path(fname).name] = g
+        return out
+    except Exception:
         return {}
 
 
@@ -175,42 +146,10 @@ def extract_and_store_game_name(filename: str) -> str:
 
 
 def get_available_games() -> List[str]:
-    # Prefer catalog when DB-less to avoid legacy DB and noisy telemetry
+    # Catalog-only listing
     try:
-        from .. import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            try:
-                from ..catalog import list_games_from_catalog  # type: ignore
-                return list_games_from_catalog()
-            except Exception:
-                return []
-    except Exception:
-        pass
-    # Legacy DB-backed fallback
-    try:
-        embedding_function = get_embedding_function()
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
-            db = Chroma(client=persistent_client, embedding_function=embedding_function)
-        all_docs = db.get()
-        filenames = set()
-        for doc_id in all_docs.get("ids", []):
-            if ":" in doc_id:
-                source_path = doc_id.split(":")[0]
-                filename = os.path.basename(source_path)
-                if filename.endswith(".pdf"):
-                    filenames.add(filename)
-        stored_names = get_stored_game_names()
-        games: List[str] = []
-        game_to_files: Dict[str, List[str]] = {}
-        for filename in sorted(filenames):
-            proper_name = stored_names.get(filename) or improve_fallback_name(filename)
-            simple_name = filename.replace(".pdf", "").lower().replace(" ", "_")
-            if proper_name not in games:
-                games.append(proper_name)
-            game_to_files.setdefault(proper_name, []).append(simple_name)
-        setattr(get_available_games, "_filename_mapping", game_to_files)  # type: ignore[attr-defined]
-        return sorted(games)
+        from ..catalog import list_games_from_catalog  # type: ignore
+        return list_games_from_catalog()
     except Exception:
         return []
 

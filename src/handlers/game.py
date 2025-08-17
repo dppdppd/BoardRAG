@@ -8,7 +8,7 @@ import gradio as gr
 from langchain_chroma import Chroma
 
 from .. import config
-from ..embedding_function import get_embedding_function
+ # embedding function removed in DB-less mode
 from ..query import get_available_games, get_stored_game_names
 
 
@@ -104,56 +104,7 @@ def delete_game_handler(games_to_delete):
         else:
             return f"❌ None of the selected games were found", empty_upd, empty_upd, empty_upd
 
-    # Remove documents from the vector store for the deleted PDFs (preserving game_names collection)
-    try:
-        from ..query import get_chromadb_settings, suppress_chromadb_telemetry
-        import chromadb
-        
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(
-                path=config.CHROMA_PATH, settings=get_chromadb_settings()
-            )
-            db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
-        
-        # Get all document IDs and filter for documents from the deleted PDFs
-        all_docs = db.get()
-        ids_to_delete = []
-        
-        for doc_id in all_docs["ids"]:
-            if ":" in doc_id:
-                source_path = doc_id.split(":")[0]
-                # Check if this document came from one of the deleted PDF files
-                for deleted_path in all_deleted_paths:
-                    if deleted_path in source_path or source_path in deleted_path:
-                        ids_to_delete.append(doc_id)
-                        break
-        
-        if ids_to_delete:
-            db.delete(ids=ids_to_delete)
-            print(f"[DEBUG] Removed {len(ids_to_delete)} document chunks from vector store")
-        
-        # Also remove the game name mapping from the game_names collection if it exists
-        try:
-            game_names_collection = persistent_client.get_collection("game_names")
-            # Find filenames that correspond to the deleted games
-            mapping = getattr(get_available_games, "_filename_mapping", None)
-            if mapping:
-                for deleted_game in deleted_games:
-                    if deleted_game in mapping:
-                        simple_files = mapping[deleted_game]
-                        for simple_name in simple_files:
-                            filename = f"{simple_name}.pdf"
-                            try:
-                                game_names_collection.delete(ids=[filename])
-                                print(f"[DEBUG] Removed game name mapping for {filename}")
-                            except Exception:
-                                pass  # ID might not exist, that's ok
-        except Exception:
-            pass  # game_names collection might not exist, that's ok
-            
-    except Exception as e:
-        print(f"[DEBUG] Error cleaning up vector store: {e}")
-        # Continue anyway, the files are deleted which is the main goal
+    # DB-less mode: no vector store cleanup
 
     # Clear any cached mapping to force refresh and refresh dropdown choices
     if hasattr(get_available_games, '_filename_mapping'):
@@ -233,62 +184,20 @@ def rename_game_handler(selected_entries, new_name):
     print(f"[DEBUG] Final filenames for database update: {filenames}")
     print(f"[DEBUG] New game name to assign: '{new_name}'")
 
+    # DB-less mode: just clear caches; mapping is catalog-managed elsewhere
+    if hasattr(get_available_games, '_filename_mapping'):
+        delattr(get_available_games, '_filename_mapping')
     try:
-        import chromadb
-        from ..query import get_chromadb_settings, suppress_chromadb_telemetry
-        from ..config import CHROMA_PATH
-
-        with suppress_chromadb_telemetry():
-            client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
-
-        collection = client.get_or_create_collection("game_names")
-
-        # Upsert the new mapping for all selected PDFs
-        collection.upsert(ids=filenames, documents=[new_name] * len(filenames))
-        print(f"[DEBUG] Upserted new mappings in game_names collection: {filenames} -> '{new_name}'")
-        
-        # Verify the update worked by reading back from database
-        verification = collection.get(ids=filenames)
-        print(f"[DEBUG] Verification - stored mappings:")
-        for i, (vid, vdoc) in enumerate(zip(verification['ids'], verification['documents'])):
-            print(f"[DEBUG]   '{vid}' -> '{vdoc}'")
-        
-        # Also check what get_stored_game_names returns for these files
-        from ..query import get_stored_game_names
-        all_stored = get_stored_game_names()
-        print(f"[DEBUG] Full stored game names mapping ({len(all_stored)} entries):")
-        for fname, gname in sorted(all_stored.items()):
-            if fname in filenames:
-                print(f"[DEBUG]   ✓ '{fname}' -> '{gname}'")
-            else:
-                print(f"[DEBUG]     '{fname}' -> '{gname}'")
-
-        # Clear any cached mapping to force refresh
-        if hasattr(get_available_games, '_filename_mapping'):
-            delattr(get_available_games, '_filename_mapping')
-            print("[DEBUG] Cleared cached filename mapping")
-
-        # Clear the app-level cache as well
-        try:
-            import app
-            app.clear_games_cache()
-        except:
-            pass  # If import fails, just continue
-
-        # Reprocess library to ensure new game name reflected everywhere
-        from ..handlers.library import refresh_games_handler as _refresh_games
-        _msg, upd_games, upd_pdfs, upd_rename = _refresh_games()
-
-        print(f"[DEBUG] Library reprocessed after rename; dropdowns updated")
-        
-        if len(filenames) == 1:
-            return f"✅ Assigned '{filenames[0]}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs
-        else:
-            return f"✅ Assigned {len(filenames)} PDFs to game '{new_name}': {', '.join(filenames)}", upd_games, upd_pdfs, upd_pdfs
-    except Exception as e:
-        print(f"[DEBUG] Error in rename_game_handler: {e}")
-        empty_upd = gr.update()
-        return f"❌ Error assigning PDFs: {e}", empty_upd, empty_upd, empty_upd
+        import app
+        app.clear_games_cache()
+    except:
+        pass
+    from ..handlers.library import refresh_games_handler as _refresh_games
+    _msg, upd_games, upd_pdfs, upd_rename = _refresh_games()
+    if len(filenames) == 1:
+        return f"✅ Assigned '{filenames[0]}' to game '{new_name}'", upd_games, upd_pdfs, upd_pdfs
+    else:
+        return f"✅ Assigned {len(filenames)} PDFs to game '{new_name}': {', '.join(filenames)}", upd_games, upd_pdfs, upd_pdfs
 
 
 def get_pdf_dropdown_choices():

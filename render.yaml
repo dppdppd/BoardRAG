@@ -10,7 +10,7 @@ services:
         value: 3.10.0
       - key: LLM_PROVIDER
         value: openai
-      - key: CHROMA_PATH
+      # CHROMA_PATH removed in DB-less mode
         value: ./chroma
       - key: DATA_PATH
         value: ./data

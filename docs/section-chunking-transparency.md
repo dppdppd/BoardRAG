@@ -34,7 +34,7 @@ venv\Scripts\python.exe temp_tests\detect_section_schemes.py
 
 - Rebuild a single PDF into the DB with the new logic and verbose spew:
 ```bat
-venv\Scripts\python.exe -m src.populate_database --reset "data\HF4 Core Rules.pdf"
+venv\Scripts\python.exe -m src.query --query_text "example"
 ```
 
 - Inspect stored chunks by file (run as module to avoid import-path issues):

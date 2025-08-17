@@ -10,15 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple, Optional, Callable
 
-import chromadb
-
 from .. import config
-from ..embedding_function import get_embedding_function
-from ..populate_database import load_documents, split_documents, add_to_chroma, reorder_documents_by_columns
 from ..query import (
     get_available_games,
-    get_chromadb_settings,
-    suppress_chromadb_telemetry,
     extract_and_store_game_name,
 )
 from ..query import get_stored_game_names
@@ -100,7 +94,7 @@ _BUSY_LOCK = ".library_busy"
 
 def _busy_lock_path() -> Path:
     try:
-        return Path(config.CHROMA_PATH) / _BUSY_LOCK
+        return Path(config.DATA_PATH) / _BUSY_LOCK
     except Exception:
         return Path(_BUSY_LOCK)
 
@@ -195,117 +189,13 @@ def rechunk_selected_pdfs(selected_entries: List[str], log: Optional[Callable[[s
                 pass
 
     try:
-        with _library_busy():
-            # Delete existing chunks for these PDFs only
-            try:
-                with suppress_chromadb_telemetry():
-                    persistent_client = chromadb.PersistentClient(
-                        path=config.CHROMA_PATH, settings=get_chromadb_settings()
-                    )
-                    from langchain_chroma import Chroma  # local import to avoid circular
-                    db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
-                all_docs = db.get()
-                ids = list(all_docs.get("ids", []))
-                metas = list(all_docs.get("metadatas", []))
-                to_delete: List[str] = []
-                target_set = {f.lower() for f in filenames}
-                for cid, meta in zip(ids, metas):
-                    src = str((meta or {}).get("source") or "")
-                    import os
-                    base = os.path.basename(src).lower()
-                    if base in target_set:
-                        to_delete.append(cid)
-                if to_delete:
-                    _log(f"🧹 Removing {len(to_delete)} chunks across {len(filenames)} PDF(s)…")
-                    B = 500
-                    for i in range(0, len(to_delete), B):
-                        db.delete(ids=to_delete[i:i+B])
-                    _log("✅ Existing chunks removed for selected PDFs")
-                else:
-                    _log("ℹ️ No existing chunks found for selected PDFs")
-            except Exception as e:
-                _log(f"⚠️ Could not clear existing chunks for selected PDFs: {e}")
-
-            # Load only selected PDFs
-            from typing import List as _List
-            targets: _List[str] = filenames
-            with _capture_prints(_log):
-                documents = load_documents(targets)
-                documents = reorder_documents_by_columns(documents)
-                chunks = split_documents(documents)
-                success = add_to_chroma(chunks)
-
-        if not success:
-            _log("❌ Failed to add documents to database after selected rechunk")
-            return ("\n".join(logs), get_available_games(), get_pdf_dropdown_choices())
-
-        games = get_available_games()
-        pdf_choices = get_pdf_dropdown_choices()
-        summary = f"✅ Re-chunked {len(filenames)} PDF(s)"
-        _log(summary)
-        return ("\n".join(logs), games, pdf_choices)
+        return ("disabled in DB-less mode", get_available_games(), get_pdf_dropdown_choices())
     except Exception as e:
         return (f"❌ Error re-chunking selected PDFs: {e}", get_available_games(), get_pdf_dropdown_choices())
 
 
 def rebuild_library(log: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str], List[str]]:
-    """Rebuild the entire library and return a tuple of:
-    (message, games, pdf_choices)
-    """
-    try:
-        # Close any existing Chroma connections
-        import gc
-
-        gc.collect()
-
-        chroma_path = config.CHROMA_PATH
-
-        # Reset database
-        try:
-            with suppress_chromadb_telemetry():
-                reset_client = chromadb.PersistentClient(
-                    path=chroma_path, settings=get_chromadb_settings()
-                )
-                reset_client.reset()
-        except Exception as e:  # pragma: no cover - best-effort cleanup
-            return (f"❌ Error clearing database: {e}", get_available_games(), get_pdf_dropdown_choices())
-
-        logs: List[str] = []
-
-        def _log(message: str) -> None:
-            logs.append(message)
-            if log:
-                try:
-                    log(message)
-                except Exception:
-                    pass
-
-        # Load, split, add
-        with _library_busy():
-            with _capture_prints(_log):
-                documents = load_documents()
-                documents = reorder_documents_by_columns(documents)
-                chunks = split_documents(documents)
-                success = add_to_chroma(chunks)
-        if not success:
-            _log("❌ Failed to add documents to database")
-            return ("\n".join(logs), get_available_games(), get_pdf_dropdown_choices())
-
-        # Extract and store game names from filenames
-        filenames = {Path(doc.metadata.get("source", "")).name for doc in documents}
-        for fname in filenames:
-            if fname:
-                extract_and_store_game_name(fname)
-
-        games = get_available_games()
-        pdf_choices = get_pdf_dropdown_choices()
-        summary = f"✅ Library rebuilt! {len(documents)} docs, {len(chunks)} chunks, {len(games)} games"
-        _log(summary)
-        return "\n".join(logs), games, pdf_choices
-    except Exception as e:  # pragma: no cover - defensive
-        games = get_available_games()
-        pdf_choices = get_pdf_dropdown_choices()
-        return (f"❌ Error rebuilding library: {e}", games, pdf_choices)
+    return ("disabled in DB-less mode", get_available_games(), get_pdf_dropdown_choices())
 
 
 def refresh_games(log: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str], List[str]]:
@@ -376,12 +266,7 @@ def refresh_games(log: Optional[Callable[[str], None]] = None) -> Tuple[str, Lis
                 except Exception:
                     pass
 
-        if documents:
-            with _library_busy():
-                with _capture_prints(_log):
-                    documents = reorder_documents_by_columns(documents)
-                    split_docs = split_documents(documents)
-                    add_to_chroma(split_docs)
+        # No DB ingestion in DB-less mode
 
         # Extract and store proper names for new PDFs
         for fname in new_pdf_files:
@@ -428,60 +313,5 @@ def save_uploaded_files(file_tuples: List[tuple[str, bytes]]) -> Tuple[str, List
 
 # New: Rechunk entire library while preserving stored name mappings
 def rechunk_library(log: Optional[Callable[[str], None]] = None) -> Tuple[str, List[str], List[str]]:
-    """Re-split and re-embed all PDFs without touching the game_names mapping.
-
-    Returns (message, games, pdf_choices).
-    """
-    try:
-        logs: List[str] = []
-
-        def _log(message: str) -> None:
-            logs.append(message)
-            if log:
-                try:
-                    log(message)
-                except Exception:
-                    pass
-
-        with _library_busy():
-            # 1) Delete only document chunks from the main collection (preserve game_names)
-            try:
-                with suppress_chromadb_telemetry():
-                    persistent_client = chromadb.PersistentClient(
-                        path=config.CHROMA_PATH, settings=get_chromadb_settings()
-                    )
-                    from langchain_chroma import Chroma  # local import to avoid circular issues
-                    db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
-                all_docs = db.get()
-                ids = list(all_docs.get("ids", []))
-                if ids:
-                    # Delete in batches to avoid payload limits
-                    _log(f"🧹 Removing {len(ids)} existing chunks…")
-                    B = 500
-                    for i in range(0, len(ids), B):
-                        db.delete(ids=ids[i:i+B])
-                    _log("✅ Existing chunks removed")
-                else:
-                    _log("ℹ️ No existing chunks found (nothing to clear)")
-            except Exception as e:
-                _log(f"⚠️ Could not clear existing chunks: {e}")
-
-            # 2) Load, reorder for columns, split into chunks, and add back to Chroma
-            with _capture_prints(_log):
-                documents = load_documents()
-                documents = reorder_documents_by_columns(documents)
-                chunks = split_documents(documents)
-                success = add_to_chroma(chunks)
-        if not success:
-            _log("❌ Failed to add documents to database after rechunk")
-            return ("\n".join(logs), get_available_games(), get_pdf_dropdown_choices())
-
-        # 3) Do NOT modify game_names – preserve existing mappings
-        games = get_available_games()
-        pdf_choices = get_pdf_dropdown_choices()
-        summary = f"✅ Library re-chunked! {len(chunks)} chunks across {len(games)} games"
-        _log(summary)
-        return "\n".join(logs), games, pdf_choices
-    except Exception as e:  # pragma: no cover - defensive
-        return (f"❌ Error re-chunking library: {e}", get_available_games(), get_pdf_dropdown_choices())
+    return ("disabled in DB-less mode", get_available_games(), get_pdf_dropdown_choices())
 

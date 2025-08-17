@@ -9,16 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple
 
-import chromadb
-from langchain_chroma import Chroma
-
 from .. import config
-from ..embedding_function import get_embedding_function
 from ..query import (
     get_available_games,
     get_stored_game_names,
-    get_chromadb_settings,
-    suppress_chromadb_telemetry,
 )
 from .library_service import get_pdf_dropdown_choices
 from ..catalog import set_game_name_for_filenames, get_pdf_choices_from_catalog  # type: ignore
@@ -100,7 +94,7 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
             if not matched:
                 failed_names.append(fname)
 
-    # Clean indexes/mappings referencing deleted files
+    # Clean catalog entries referencing deleted files
     if deleted_paths:
         # DB-less: remove from catalog
         try:
@@ -120,32 +114,7 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
                     save_catalog(cat)
         except Exception:
             pass
-        # Legacy DB cleanup (best-effort)
-        try:
-            with suppress_chromadb_telemetry():
-                persistent_client = chromadb.PersistentClient(
-                    path=config.CHROMA_PATH, settings=get_chromadb_settings()
-                )
-                db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
-            all_docs = db.get()
-            ids_to_delete: List[str] = []
-            for doc_id in all_docs.get("ids", []):
-                source_path = doc_id.split(":")[0]
-                for deleted_path in deleted_paths:
-                    if deleted_path in source_path or Path(source_path).name == Path(deleted_path).name:
-                        ids_to_delete.append(doc_id)
-                        break
-            if ids_to_delete:
-                db.delete(ids=ids_to_delete)
-            try:
-                collection = persistent_client.get_collection("game_names")
-                to_remove = [Path(p).name for p in deleted_paths]
-                if to_remove:
-                    collection.delete(ids=to_remove)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        # No vector store cleanup in DB-less mode
 
     # Refresh lists
     if hasattr(get_available_games, "_filename_mapping"):
@@ -231,38 +200,7 @@ def delete_games(games_to_delete: List[str]) -> Tuple[str, List[str], List[str]]
         else:
             failed_games.append(game_to_delete)
 
-    # Clean vector store references
-    try:
-        with suppress_chromadb_telemetry():
-            persistent_client = chromadb.PersistentClient(
-                path=config.CHROMA_PATH, settings=get_chromadb_settings()
-            )
-            db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
-        all_docs = db.get()
-        ids_to_delete: List[str] = []
-        for doc_id in all_docs["ids"]:
-            source_path = doc_id.split(":")[0]
-            for deleted_path in all_deleted_paths:
-                if deleted_path in source_path or source_path in deleted_path:
-                    ids_to_delete.append(doc_id)
-                    break
-        if ids_to_delete:
-            db.delete(ids=ids_to_delete)
-        # Clean mappings in game_names collection
-        try:
-            game_names_collection = persistent_client.get_collection("game_names")
-            mapping = getattr(get_available_games, "_filename_mapping", None) or {}
-            for deleted_game in deleted_games:
-                for simple_name in mapping.get(deleted_game, []):
-                    filename = f"{simple_name}.pdf"
-                    try:
-                        game_names_collection.delete(ids=[filename])
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    except Exception:
-        pass
+    # No vector store references in DB-less mode
 
     # Refresh choices
     if hasattr(get_available_games, "_filename_mapping"):
@@ -320,26 +258,8 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
     except Exception:
         pass
 
-    # Legacy DB-backed path
-    try:
-        with suppress_chromadb_telemetry():
-            client = chromadb.PersistentClient(
-                path=config.CHROMA_PATH, settings=get_chromadb_settings()
-            )
-        collection = client.get_or_create_collection("game_names")
-        collection.upsert(ids=filenames, documents=[new_name] * len(filenames))
-        if hasattr(get_available_games, "_filename_mapping"):
-            delattr(get_available_games, "_filename_mapping")
-        games = get_available_games()
-        pdf_choices = get_pdf_dropdown_choices()
-        msg = (
-            f"✅ Assigned {len(filenames)} PDF(s) to game '{new_name}': {', '.join(filenames)}"
-            if len(filenames) > 1
-            else f"✅ Assigned '{filenames[0]}' to game '{new_name}'"
-        )
-        return msg, games, pdf_choices
-    except Exception as e:
-        return (f"❌ Error assigning PDFs: {e}", get_available_games(), get_pdf_dropdown_choices())
+    # Legacy DB path removed
+    return ("disabled in DB-less mode", get_available_games(), get_pdf_dropdown_choices())
 
 
 def get_pdf_dropdown_choices() -> List[str]:

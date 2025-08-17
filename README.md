@@ -59,40 +59,21 @@ This will install the pre-commit hooks that will run the tests and the linters b
 
 This RAG application is composed of two stages: database population and the RAG model itself. The project also comes with unit tests. Before running any of these processes make sure the environment variable `OPENAI_API_KEY` is available.
 
-### Vector Database
+### DB-less Flow
 
-The first step is to populate the database with the chunks of the board game rulesets and their embeddings. Once you have your desired rulesets in the `data` folder, please run the following command:
-
-```bash
-python populate_database.py
-```
-
-This script will extract the text from the PDFs, chunk it, and populate the database with the chunks and their embeddings, calculated by the embedding model of your choice (environment variable `EMBEDDER_MODEL`, e.g. `text-embedding-3-small`). If the chunks are not present in the database, they will be added.
-
-If you want to reset the database before updating it, please run the following command:
-
-```bash
-python populate_database.py --reset
-```
-To visualize the chunks generated, you can create an Argilla instance at Hugging Face Spaces and run the following command to populate a dataset with the chunks:
-
-```bash
-python visualize_db_argilla.py
-```
-
-Make sure that your Hugging Face Spaces API key and URL is stored in the .env file.
+The app no longer uses a local vector database. Place rulebook PDFs in the `data/` folder. On API startup, the catalog is scanned and missing PDFs are uploaded to the provider Files API. Queries run directly against the original PDFs with citations.
 
 ### Retriever & Generator
 
 The RAG model is composed by a retriever and a generator. The retriever is responsible for finding the most relevant chunks in the database, while the generator is responsible for generating the answer to the user's question.
 
-Once the database is populated, you can run the RAG model by running the following command:
+Run the RAG model:
 
 ```bash
 python query.py --query_text "How can I build a hotel in Monopoly?"
 ```
 
-You can also include the flags `--include_sources` and `include_contexts` to include the sources and chunks used to build the answer, respectively. The LLM used for generation is configured via the environment variable `GENERATOR_MODEL` (e.g. `gpt-3.5-turbo`).
+You can also include the flags `--include_sources` and `include_contexts` to include the sources and chunks used to build the answer, respectively. The LLM used for generation is configured via the environment variable `GENERATOR_MODEL`.
 
 ### Gradio Interface
 

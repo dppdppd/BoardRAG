@@ -301,7 +301,7 @@ def get_config_info():
 **Chunk Overlap:** {config.CHUNK_OVERLAP}  
 **Web Search:** {"Enabled" if config.ENABLE_WEB_SEARCH else "Disabled"}  
 **Data Path:** {config.DATA_PATH}  
-**ChromaDB Path:** {config.CHROMA_PATH}  
+**DB-less mode:** {getattr(config, 'DB_LESS', True)}  
 
 ## 🔐 Access Control
 
