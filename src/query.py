@@ -23,7 +23,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Tuple
 
 import chromadb
 import os
@@ -49,6 +49,12 @@ from .config import (
 from .embedding_function import get_embedding_function
 from templates.load_jinja_template import load_jinja2_prompt
 from . import config as cfg
+from .llm_outline_helpers import (
+    upload_pdf_to_anthropic_files,
+    anthropic_pdf_messages_with_file,
+    find_json_objects,
+)
+from .pdf_utils import find_header_anchor
 
 # Optional import for web search; only loaded when enabled to avoid extra dependency at runtime
 if ENABLE_WEB_SEARCH:
@@ -307,11 +313,40 @@ def improve_fallback_name(filename: str) -> str:
 
 
 def get_available_games() -> List[str]:
+    # Prefer catalog when DB-less
+    try:
+        from . import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            try:
+                from .catalog import list_games_from_catalog  # type: ignore
+                return list_games_from_catalog()
+            except Exception:
+                pass
+    except Exception:
+        pass
     from .retrieval.game_names import get_available_games as _impl
     return _impl()
 
 
 def store_game_name(filename: str, game_name: str):
+    # In DB-less mode, store in catalog; otherwise delegate to legacy DB
+    try:
+        from . import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            try:
+                from .catalog import load_catalog, save_catalog  # type: ignore
+                from pathlib import Path as _P
+                cat = load_catalog()
+                key = _P(filename).name
+                entry = cat.get(key) or {}
+                entry["game_name"] = game_name
+                cat[key] = entry
+                save_catalog(cat)
+                return None
+            except Exception:
+                pass
+    except Exception:
+        pass
     from .retrieval.game_names import store_game_name as _impl
     return _impl(filename, game_name)
 
@@ -322,6 +357,26 @@ def get_stored_game_names() -> Dict[str, str]:
 
 
 def extract_and_store_game_name(filename: str) -> str:
+    # When DB-less, try to update catalog directly for name extraction
+    try:
+        from . import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            from .retrieval.game_names import extract_game_name_from_filename  # type: ignore
+            name = extract_game_name_from_filename(filename)
+            try:
+                from .catalog import load_catalog, save_catalog  # type: ignore
+                from pathlib import Path as _P
+                cat = load_catalog()
+                key = _P(filename).name
+                entry = cat.get(key) or {}
+                entry["game_name"] = name
+                cat[key] = entry
+                save_catalog(cat)
+            except Exception:
+                pass
+            return name
+    except Exception:
+        pass
     from .retrieval.game_names import extract_and_store_game_name as _impl
     return _impl(filename)
 
@@ -350,7 +405,153 @@ def query_rag(
         Dict: The response from the RAG model.
     """
     
-    # Query RAG system
+    # DB-less mode: use Anthropic Sonnet 4 Files API with citations, no vector DB
+    # Prefer cfg.DB_LESS defaulting to True when env is absent
+    try:
+        from . import config as _cfg  # type: ignore
+        _db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+    except Exception:
+        _db_less_enabled = os.getenv("DB_LESS", "1").lower() in {"1", "true", "yes"}
+    if _db_less_enabled:
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return {
+                "response_text": "ANTHROPIC_API_KEY missing for DB-less mode.",
+                "sources": [],
+                "original_query": query_text,
+                "context": "",
+                "chunks": [],
+                "prompt": "",
+            }
+        # Resolve files from catalog (preferred)
+        from pathlib import Path as _P
+        try:
+            from .catalog import resolve_file_ids_for_game  # type: ignore
+            pairs = resolve_file_ids_for_game(selected_game)
+        except Exception:
+            pairs = []
+        # Fallback to scanning data/ if catalog unavailable
+        if not pairs:
+            data_dir = _P(getattr(cfg, "DATA_PATH", "data"))
+            pdfs = sorted([p for p in data_dir.glob("*.pdf")])
+            if selected_game:
+                key = str(selected_game).strip().lower()
+                pdfs = [p for p in pdfs if key in p.name.lower()]
+            # Upload and cache file_ids if needed
+            cache_path = _P(".cache") / "anthropic_files.json"
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                import json as _json
+                cache = _json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+            except Exception:
+                cache = {}
+            for p in pdfs:
+                fp = str(p.resolve())
+                fid = cache.get(fp)
+                if not fid:
+                    try:
+                        fid = upload_pdf_to_anthropic_files(api_key, fp)
+                        cache[fp] = fid
+                    except Exception:
+                        continue
+                pairs.append((fp, fid))
+            try:
+                cache_path.write_text(_json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        if not pairs:
+            return {
+                "response_text": "No PDFs available to query.",
+                "sources": [],
+                "original_query": query_text,
+                "context": "",
+                "chunks": [],
+                "prompt": "",
+            }
+        # Use at most 2 PDFs per request to stay within size limits
+        file_ids = pairs[:2]
+        if not file_ids:
+            return {
+                "response_text": "Failed to upload PDFs to Files API.",
+                "sources": [],
+                "original_query": query_text,
+                "context": "",
+                "chunks": [],
+                "prompt": "",
+            }
+        # Build user instruction: answer plus spans for spotlight
+        instruction = (
+            "Answer the user's question based ONLY on the attached PDF(s).\n"
+            "Include INLINE citations in square brackets immediately after claims, using the exact section code and title from the rule headers, e.g., [6.2 FIREPOWER], [6.4 FIRE STRENGTH].\n"
+            "After the prose, return STRICT JSON as the last block with keys: answer (string), spans (array).\n"
+            "Each span: {page:int, header:string}.\n"
+            "- header must be the exact header line text used in the justification (code + title).\n"
+            "- Page numbers are 1-based.\n"
+            "- If no specific headers were used, return spans: [].\n\n"
+            f"Question: {query_text}"
+        )
+        system_prompt = (
+            "You are an expert assistant for boardgame rulebooks. "
+            "Follow the user's inline citation format and provide concise, accurate answers."
+        )
+        # Send one message per file_id, then merge answers (first non-empty preferred)
+        import os as _os
+        model_name = _os.getenv("OUTLINE_LLM_MODEL", "claude-sonnet-4-20250514")
+        aggregated_answer = None
+        aggregated_spans: List[Dict[str, Union[int, str]]] = []
+        sources = []
+        for fp, fid in file_ids:
+            try:
+                raw = anthropic_pdf_messages_with_file(api_key, model_name, system_prompt, instruction, fid)
+                # Try parse JSON
+                import json as _json
+                js_obj = None
+                # Extract last JSON object
+                import re as _re
+                cands = [_m.group(0) for _m in _re.finditer(r"\{[\s\S]*?\}", raw)]
+                for _js in cands[::-1]:
+                    try:
+                        js_obj = _json.loads(_js)
+                        break
+                    except Exception:
+                        continue
+                if isinstance(js_obj, dict):
+                    ans = str(js_obj.get("answer") or "").strip()
+                    spans = js_obj.get("spans") or []
+                    if ans and aggregated_answer is None:
+                        aggregated_answer = ans
+                    # Attach anchors
+                    for sp in spans:
+                        try:
+                            pg = int(sp.get("page"))
+                            hdr = str(sp.get("header") or "").strip()
+                            pt = find_header_anchor(fp, pg, hdr)
+                            x, y = (pt or (None, None))
+                            aggregated_spans.append({
+                                "file": _P(fp).name,
+                                "page": pg,
+                                "header": hdr,
+                                "x": x,
+                                "y": y,
+                            })
+                        except Exception:
+                            continue
+                    sources.append({"filepath": fp})
+            except Exception:
+                continue
+        if not aggregated_answer:
+            aggregated_answer = "No answer found in the provided PDFs."
+        return {
+            "response_text": aggregated_answer,
+            "sources": sources,
+            "original_query": query_text,
+            "context": "",
+            "chunks": [],
+            "prompt": instruction,
+            "spans": aggregated_spans,
+        }
+
+    # Query RAG system (legacy DB-backed)
 
     # Connect to the database
     print("🔗 Connecting to the database...")
@@ -657,9 +858,13 @@ def query_rag(
             meta = getattr(doc, 'metadata', {}) or {}
             sec = (meta.get('section_number') or '').strip()
             if not sec:
-                # Support numeric (3.5), alphanumeric (F4), and dotted (F4.a, A10.2b)
+                # Support numeric dotted (3.5, 3.5.1), alphanumeric letter-first (F4, F4.a, A10.2b), and digit-first (1B6, 1B6b)
                 label = (meta.get('section') or '').strip()
-                m = re.match(r"^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b", label)
+                m = re.match(r"^\s*(([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?))\b", label)  # letter-first
+                if not m:
+                    m = re.match(r"^\s*((\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?))\b", label)  # digit-first
+                if not m:
+                    m = re.match(r"^\s*((\d+(?:\.[A-Za-z0-9]+)+))\b", label)  # numeric dotted
                 if m:
                     sec = m.group(1)
             if sec and sec not in seen_allow:
@@ -835,7 +1040,143 @@ def stream_query_rag(
     print(f"💬 Chat history length: {len(chat_history) if chat_history else 0}")
     print(f"🌐 Web search enabled: {enable_web}")
 
-    # ---- Build prompt and retrieve context (reuse logic from query_rag) ----
+    # ---- DB-less branch: use Anthropic Files API on original PDFs ----
+    # When DB_LESS is enabled, do NOT fall back to DB. Stream a clear error instead.
+    db_less_enabled = True
+    try:
+        from . import config as _cfg  # type: ignore
+        db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+    except Exception:
+        import os as _os
+        db_less_enabled = _os.getenv("DB_LESS", "1").lower() in {"1", "true", "yes"}
+    if db_less_enabled:
+        import os as _os
+        api_key = _os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            def _err_gen():
+                yield "ANTHROPIC_API_KEY missing for DB-less mode."
+            meta = {"sources": [], "context": "", "prompt": "", "original_query": query_text, "spans": []}
+            return _err_gen(), meta
+
+        def _normalize_game_input(game_input):
+            if isinstance(game_input, list):
+                return (game_input[0] if game_input else "").strip()
+            if isinstance(game_input, str):
+                return game_input.strip()
+            return str(game_input or "").strip()
+
+        norm_game = _normalize_game_input(selected_game)
+
+        from pathlib import Path as _P
+        try:
+            from .catalog import resolve_file_ids_for_game  # type: ignore
+            pairs = resolve_file_ids_for_game(norm_game or None)
+        except Exception:
+            pairs = []
+
+        if not pairs:
+            def _no_pdf_gen():
+                yield f"No PDFs available for game '{norm_game or 'All'}' in catalog."
+            meta = {"sources": [], "context": "", "prompt": "", "original_query": query_text, "spans": []}
+            return _no_pdf_gen(), meta
+
+        file_ids = pairs[:2]
+
+        # Build allowed filenames list to force exact matching in citations
+        try:
+            allowed_filenames = ", ".join([_P(fp).name for fp, _ in file_ids])
+        except Exception:
+            allowed_filenames = ""
+        instruction = (
+            "Answer the user's question based ONLY on the attached PDF(s).\n"
+            "Do NOT include any preamble or meta commentary. Start directly with the answer.\n"
+            "For EVERY factual claim, make a separate short paragraph and include one inline citation at the end of the paragraph exactly in this form: [<section>: {\"file\":\"<filename.pdf>\", \"page\": <1-based>, \"section\": \"<name of the section>\"}].\n"
+            "- <section> is the rule code or range (e.g., 6.2, 6.4.1, 6.41-6.43).\n"
+            "- The JSON must include: file (pdf filename), page (1-based), and section (the section number or designation).\n"
+            + (f"- Allowed PDF filenames for the file field (use EXACTLY one of these, verbatim): {allowed_filenames}\n" if allowed_filenames else "") +
+            "Do NOT include any code blocks; provide prose only with inline citations.\n\n"
+            f"Question: {query_text}"
+        )
+        system_prompt = (
+            "You are an expert assistant for boardgame rulebooks. "
+            "Provide concise answers with inline citations; do not return JSON blocks."
+        )
+        import os as _os
+        model_name = _os.getenv("OUTLINE_LLM_MODEL", "claude-sonnet-4-20250514")
+
+        aggregated_answer: Optional[str] = None
+        aggregated_spans: List[Dict[str, Union[int, str]]] = []  # type: ignore[name-defined]
+        sources: List[Dict[str, str]] = []
+        last_raw_text: str = ""
+        # Spew what we are about to send (system + instruction + files)
+        try:
+            print("\n===== DB-LESS REQUEST (BEGIN) =====")
+            print("-- System Prompt --\n" + system_prompt)
+            print("\n-- User Instruction --\n" + instruction)
+            try:
+                from pathlib import Path as __P
+                attached_names = ", ".join([__P(fp).name for fp, _ in file_ids])
+            except Exception:
+                attached_names = "(unknown files)"
+            print(f"\n-- Attached PDFs --\n{attached_names}")
+            print("===== DB-LESS REQUEST (END) =====\n")
+        except Exception:
+            pass
+
+        # Stream each file's response; emit raw tokens only (no server-side parsing of citations)
+        from .llm_outline_helpers import anthropic_pdf_messages_with_file_stream  # type: ignore
+
+        def _token_gen():
+            for fp, fid in file_ids:
+                sources.append({"filepath": fp})
+                buffer = ""
+                had_text = False
+                try:
+                    for delta in anthropic_pdf_messages_with_file_stream(api_key, model_name, system_prompt, instruction, fid):
+                        txt = str(delta or "")
+                        if not txt:
+                            continue
+                        # Accumulate raw for debug spew; do not parse citations on server
+                        buffer += txt
+                        # Spew the literal model output chunk as-is
+                        had_text = True
+                        yield txt
+                except Exception as e:
+                    # If we hit rate limits or usage caps, surface a clear chat message
+                    try:
+                        status = getattr(getattr(e, 'response', None), 'status_code', None)
+                        body = ''
+                        try:
+                            body = (getattr(e, 'response', None).text or '') if getattr(e, 'response', None) is not None else ''
+                        except Exception:
+                            body = ''
+                        lower = (str(body) or '').lower()
+                        if status == 429 or 'rate limit' in lower or 'usage' in lower or 'quota' in lower:
+                            yield "API USAGE LIMIT HIT"
+                            # stop processing this file
+                            continue
+                    except Exception:
+                        pass
+                # After streaming finishes for this file, spew the raw accumulated answer for debug
+                try:
+                    print("\n===== RAW MODEL RESPONSE (BEGIN) =====")
+                    try:
+                        from pathlib import Path as __P
+                        print(f"-- File --\n{__P(fp).name}")
+                    except Exception:
+                        pass
+                    print("-- Raw Text --\n" + buffer)
+                    print("===== RAW MODEL RESPONSE (END) =====\n")
+                except Exception:
+                    pass
+
+        meta = {"sources": sources, "context": "", "prompt": instruction, "original_query": query_text, "spans": []}
+        print("="*80)
+        print("🔍 STREAM_QUERY_RAG DEBUG END")
+        print("="*80 + "\n")
+        return _token_gen(), meta
+
+    # ---- Build prompt and retrieve context (reuse legacy DB-backed logic) ----
 
     print("🔗 Connecting to the database...")
     embedding_function = get_embedding_function()

@@ -34,6 +34,10 @@ import os
 from typing import Optional
 
 
+# Global flag to avoid double-warming when both lifespan and startup hooks are present
+_catalog_warmed_once = False
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     # Custom lifespan to:
@@ -154,6 +158,44 @@ async def _lifespan(_app: FastAPI):
             except Exception:
                 pass
 
+        # Perform catalog warmup early in lifespan (startup) if DB-less is enabled
+        try:
+            # Resolve DB-less flag
+            try:
+                from src import config as _cfg  # type: ignore
+                db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+            except Exception:
+                db_less_enabled = str(os.getenv("DB_LESS", "1")).lower() in ("1", "true", "yes")
+            global _catalog_warmed_once
+            if db_less_enabled and not _catalog_warmed_once:
+                try:
+                    print("[lifespan] DB_LESS mode enabled – warming catalog…")
+                except Exception:
+                    pass
+                try:
+                    from src.catalog import ensure_catalog_up_to_date  # type: ignore
+                    # Bridge logs from worker thread into admin stream and stdout
+                    loop = asyncio.get_running_loop()
+                    def _log_cb(msg: str) -> None:
+                        try:
+                            loop.call_soon_threadsafe(asyncio.create_task, _admin_log_publish(str(msg)))
+                        except Exception:
+                            try:
+                                print(str(msg))
+                            except Exception:
+                                pass
+                    await _admin_log_publish("📚 Catalog: scanning data/ for new PDFs …")
+                    await asyncio.to_thread(ensure_catalog_up_to_date, _log_cb)
+                    await _admin_log_publish("📚 Catalog: ready")
+                    _catalog_warmed_once = True
+                except Exception as e:
+                    try:
+                        await _admin_log_publish(f"⚠️ Catalog warmup failed during lifespan: {e}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         yield
     except (asyncio.CancelledError, KeyboardInterrupt):  # pragma: no cover - shutdown path
         pass
@@ -209,11 +251,60 @@ async def _print_routes_on_startup():
                 pass
     except Exception:
         pass
+    # Catalog warmup: scan data/ and upload new PDFs to Anthropic Files API (fallback if lifespan missed)
+    try:
+        # Only useful in DB-less mode; default enabled
+        # Prefer cfg.DB_LESS if available; fallback to env defaulting to enabled
+        try:
+            from src import config as _cfg  # type: ignore
+            db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+        except Exception:
+            db_less_enabled = str(os.getenv("DB_LESS", "1")).lower() in ("1", "true", "yes")
+        if db_less_enabled:
+            from src.catalog import ensure_catalog_up_to_date  # type: ignore
+            # Avoid double-run if lifespan already warmed
+            global _catalog_warmed_once
+            if not _catalog_warmed_once:
+                try:
+                    print("[startup] DB_LESS mode enabled – warming catalog…")
+                except Exception:
+                    pass
+                # Bridge async log publisher into thread-safe sync callback
+                loop = asyncio.get_running_loop()
+                def _log_cb(msg: str) -> None:
+                    try:
+                        loop.call_soon_threadsafe(asyncio.create_task, _admin_log_publish(str(msg)))
+                    except Exception:
+                        try:
+                            print(str(msg))
+                        except Exception:
+                            pass
+                await _admin_log_publish("📚 Catalog: scanning data/ for new PDFs …")
+                await asyncio.to_thread(ensure_catalog_up_to_date, _log_cb)
+                await _admin_log_publish("📚 Catalog: ready")
+                _catalog_warmed_once = True
+    except Exception as e:
+        try:
+            await _admin_log_publish(f"⚠️ Catalog warmup failed: {e}")
+        except Exception:
+            pass
 
 
 @app.get("/games")
 async def list_games():
-    # If a rebuild/refresh/rechunk is in progress, avoid auto-refresh and just report current state
+    # DB-less: return catalog names only; do not touch DB or trigger refresh
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            try:
+                from src.catalog import list_games_from_catalog  # type: ignore
+                return {"games": list_games_from_catalog()}
+            except Exception:
+                return {"games": []}
+    except Exception:
+        return {"games": []}
+
+    # Legacy DB-backed behavior
     try:
         from src.services.library_service import is_library_busy  # type: ignore
         if is_library_busy():
@@ -221,7 +312,6 @@ async def list_games():
     except Exception:
         pass
     games = get_available_games()
-    # First-run convenience: if empty, try processing new PDFs automatically
     if not games:
         try:
             from src.services.library_service import is_library_busy  # type: ignore
@@ -236,6 +326,18 @@ async def list_games():
 
 @app.get("/pdf-choices")
 async def list_pdf_choices():
+    # In DB-less mode, source choices from catalog explicitly
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            try:
+                from src.catalog import get_pdf_choices_from_catalog  # type: ignore
+                choices = get_pdf_choices_from_catalog()
+                return {"choices": choices}
+            except Exception:
+                pass
+    except Exception:
+        pass
     return {"choices": get_pdf_dropdown_choices()}
 
 
@@ -283,16 +385,25 @@ async def section_chunks(section: Optional[str] = None, game: Optional[str] = No
     # Resolve PDFs for selected game (if provided)
     target_files: Optional[Set[str]] = None
     if game:
+        key = (game or "").strip().lower()
         try:
-            name_map = get_stored_game_names()
-            key = (game or "").strip().lower()
-            import os as _os
-            # Match by mapped game name first
-            files = { _os.path.basename(fname).lower() for fname, gname in name_map.items() if (gname or "").strip().lower() == key }
-            if not files:
-                # Fallback: match by filename-style key (e.g., "catan_base")
-                files = { _os.path.basename(fname).lower() for fname in name_map.keys() if _os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == key }
-            target_files = files if files else set()
+            from src import config as _cfg  # type: ignore
+            if bool(getattr(_cfg, "DB_LESS", True)):
+                # Use catalog mapping
+                from src.catalog import resolve_file_ids_for_game  # type: ignore
+                pairs = resolve_file_ids_for_game(game)
+                import os as _os
+                target_files = { _os.path.basename(fp).lower() for fp, _fid in pairs }
+                if not target_files:
+                    target_files = set()
+            else:
+                # Legacy mapping via stored game names
+                name_map = get_stored_game_names()
+                import os as _os
+                files = { _os.path.basename(fname).lower() for fname, gname in name_map.items() if (gname or "").strip().lower() == key }
+                if not files:
+                    files = { _os.path.basename(fname).lower() for fname in name_map.keys() if _os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == key }
+                target_files = files if files else set()
         except Exception:
             target_files = set()
 
@@ -552,18 +663,62 @@ async def upload(files: List[UploadFile] = File(...)):
         except Exception:
             pass
 
-    # Offload refresh to thread to avoid blocking event loop while logs are emitted
+    # Try optimizing large PDFs before refresh (non-blocking per file, best-effort)
+    try:
+        from src import config as _cfg  # type: ignore
+        if getattr(_cfg, "ENABLE_PDF_OPTIMIZATION", False):
+            from src.pdf_utils import optimize_with_raster_fallback_if_large  # type: ignore
+            for name in saved:
+                try:
+                    path = Path(cfg.DATA_PATH) / name
+                    replaced, orig, opt, msg = await asyncio.to_thread(
+                        optimize_with_raster_fallback_if_large,
+                        path,
+                        min_size_mb=getattr(_cfg, "PDF_OPTIMIZE_MIN_SIZE_MB", 25.0),
+                        linearize=getattr(_cfg, "PDF_LINEARIZE", True),
+                        garbage_level=getattr(_cfg, "PDF_GARBAGE_LEVEL", 3),
+                        enable_raster_fallback=getattr(_cfg, "PDF_ENABLE_RASTER_FALLBACK", False),
+                        raster_dpi=getattr(_cfg, "PDF_RASTER_DPI", 150),
+                        jpeg_quality=getattr(_cfg, "PDF_JPEG_QUALITY", 70),
+                    )
+                    await _admin_log_publish(f"🛠 Optimizing {name}: {msg}")
+                except Exception:
+                    await _admin_log_publish(f"⚠️ Optimization skipped for {name}")
+    except Exception:
+        pass
+
+    # DB-less: update catalog instead of DB refresh
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            await _admin_log_publish("📚 Updating catalog for uploaded PDFs…")
+            try:
+                from src.catalog import ensure_catalog_up_to_date, list_games_from_catalog  # type: ignore
+                from src.catalog import get_pdf_choices_from_catalog  # type: ignore
+            except Exception as e:
+                await _admin_log_publish(f"❌ Catalog module error: {e}")
+                return {"message": "Catalog update failed", "games": [], "pdf_choices": []}
+            await asyncio.to_thread(ensure_catalog_up_to_date, log_cb)
+            games = list_games_from_catalog()
+            try:
+                choices = get_pdf_choices_from_catalog()
+            except Exception:
+                choices = []
+            summary = f"✅ Uploaded {len(saved)} PDF(s) successfully" if saved else "Upload complete."
+            return {"message": summary, "games": games, "pdf_choices": choices}
+    except Exception:
+        pass
+
+    # Legacy DB-backed refresh path
     from src.services.library_service import refresh_games as svc_refresh_games  # local import
 
     await _admin_log_publish("⚙️ Processing uploaded PDFs…")
     refresh_msg, games, pdf_choices = await asyncio.to_thread(svc_refresh_games, log_cb)
 
-    # Ensure final summary is broadcast as well
     for line in (refresh_msg or "").splitlines():
         if line.strip():
             await _admin_log_publish(line.strip())
 
-    # Return concise summary to client upload panel
     try:
         import re
         m = re.search(r"Added\s+(\d+)\s+new PDF\(s\)", refresh_msg or "")
@@ -579,24 +734,52 @@ async def upload(files: List[UploadFile] = File(...)):
 
 @app.post("/admin/rebuild")
 async def admin_rebuild():
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+    except Exception:
+        pass
     msg, games, pdf_choices = rebuild_library()
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
 @app.post("/admin/refresh")
 async def admin_refresh():
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+    except Exception:
+        pass
     msg, games, pdf_choices = refresh_games()
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
 @app.post("/admin/rechunk")
 async def admin_rechunk():
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+    except Exception:
+        pass
     msg, games, pdf_choices = rechunk_library()
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
 @app.get("/admin/rebuild-stream")
 async def admin_rebuild_stream():
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            async def _disabled():
+                yield _sse_event({"type": "log", "line": "⛔ Rebuild disabled in DB-less mode"}).encode("utf-8")
+                yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
+            headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
+    except Exception:
+        pass
     queue: asyncio.Queue = asyncio.Queue()
 
     loop = asyncio.get_running_loop()
@@ -656,6 +839,16 @@ async def admin_rebuild_stream():
 
 @app.get("/admin/refresh-stream")
 async def admin_refresh_stream():
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            async def _disabled():
+                yield _sse_event({"type": "log", "line": "⛔ Refresh disabled in DB-less mode"}).encode("utf-8")
+                yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
+            headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
+    except Exception:
+        pass
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -708,6 +901,16 @@ async def admin_refresh_stream():
 
 @app.get("/admin/rechunk-stream")
 async def admin_rechunk_stream():
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            async def _disabled():
+                yield _sse_event({"type": "log", "line": "⛔ Rechunk disabled in DB-less mode"}).encode("utf-8")
+                yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
+            headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
+    except Exception:
+        pass
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
 
@@ -763,12 +966,28 @@ class RechunkSelectedPayload(BaseModel):
 
 @app.post("/admin/rechunk-selected")
 async def admin_rechunk_selected(payload: RechunkSelectedPayload):
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+    except Exception:
+        pass
     msg, games, pdf_choices = rechunk_selected_pdfs(payload.entries)
     return {"message": msg, "games": games, "pdf_choices": pdf_choices}
 
 
 @app.get("/admin/rechunk-selected-stream")
 async def admin_rechunk_selected_stream(entries: str):
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            async def _disabled():
+                yield _sse_event({"type": "log", "line": "⛔ Rechunk selected disabled in DB-less mode"}).encode("utf-8")
+                yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
+            headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
+    except Exception:
+        pass
     """Stream logs while re-chunking only selected PDFs.
 
     entries: JSON-encoded array of strings, or a comma-separated list.
@@ -857,8 +1076,91 @@ async def admin_delete_pdfs(entries: List[str]):
     if not isinstance(entries, list):
         raise HTTPException(status_code=400, detail="Expected a JSON array of PDF entries or filenames")
     msg, updated_games, pdf_choices = delete_pdfs(entries)
-    return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices}
+    # Also return updated catalog listing for the Admin panel
+    try:
+        from src.catalog import load_catalog  # type: ignore
+        cat = load_catalog()
+        entries_out = [{
+            "filename": fname,
+            "file_id": meta.get("file_id"),
+            "game_name": meta.get("game_name"),
+            "size_bytes": meta.get("size_bytes"),
+            "updated_at": meta.get("updated_at"),
+        } for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower())]
+    except Exception:
+        entries_out = []
+    return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices, "catalog": entries_out}
 
+
+# ----------------------------------------------------------------------------
+# Catalog (DB-less): list and refresh
+# ----------------------------------------------------------------------------
+
+@app.get("/admin/catalog")
+async def admin_catalog():
+    try:
+        from src.catalog import load_catalog, list_games_from_catalog  # type: ignore
+        cat = load_catalog()
+        entries = []
+        for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower()):
+            entries.append({
+                "filename": fname,
+                "file_id": meta.get("file_id"),
+                "game_name": meta.get("game_name"),
+                "size_bytes": meta.get("size_bytes"),
+                "updated_at": meta.get("updated_at"),
+            })
+        return {"entries": entries, "games": list_games_from_catalog(), "error": None}
+    except Exception as e:
+        return {"entries": [], "games": [], "error": str(e)}
+
+
+@app.post("/admin/catalog/refresh")
+async def admin_catalog_refresh():
+    try:
+        from src.catalog import ensure_catalog_up_to_date, load_catalog, list_games_from_catalog  # type: ignore
+        await _admin_log_publish("📚 Catalog refresh requested …")
+        await asyncio.to_thread(ensure_catalog_up_to_date, _admin_log_publish)
+        await _admin_log_publish("📚 Catalog refresh complete")
+        cat = load_catalog()
+        entries = []
+        for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower()):
+            entries.append({
+                "filename": fname,
+                "file_id": meta.get("file_id"),
+                "game_name": meta.get("game_name"),
+                "size_bytes": meta.get("size_bytes"),
+                "updated_at": meta.get("updated_at"),
+            })
+        return {"message": "ok", "entries": entries, "games": list_games_from_catalog()}
+    except Exception as e:
+        try:
+            await _admin_log_publish(f"❌ Catalog refresh failed: {e}")
+        except Exception:
+            pass
+        return {"message": f"error: {e}", "entries": [], "games": []}
+
+
+@app.get("/admin/catalog/validate")
+async def admin_catalog_validate():
+    try:
+        from src.catalog import validate_catalog  # type: ignore
+        await _admin_log_publish("🔍 Catalog validation requested …")
+        loop = asyncio.get_running_loop()
+        def _log_cb(message: str) -> None:
+            try:
+                loop.call_soon_threadsafe(asyncio.create_task, _admin_log_publish(message))
+            except Exception:
+                pass
+        report = await asyncio.to_thread(validate_catalog, _log_cb)
+        await _admin_log_publish("📊 Catalog validation complete")
+        return {"message": "ok", "report": report}
+    except Exception as e:
+        try:
+            await _admin_log_publish(f"❌ Catalog validation failed: {e}")
+        except Exception:
+            pass
+        return {"message": f"error: {e}", "report": {}}
 
 # ----------------------------------------------------------------------------
 # Global model configuration (applies to all users)
@@ -1188,32 +1490,27 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
             req_id = str(uuid.uuid4())
             seq = 0
             for chunk in token_gen:
-                # Slice into smaller chunks and yield control to event loop to encourage flushes
                 text = str(chunk)
-                slice_size = 64
-                if len(text) <= slice_size:
-                    yield _sse_event({"type": "token", "req": req_id, "i": seq, "data": text}).encode("utf-8")
-                    seq += 1
+                # Avoid echoing entire JSON blocks into the stream token-by-token
+                import re as _re
+                if _re.fullmatch(r"\s*\{[\s\S]*\}\s*", text):
+                    # Skip streaming this block; include it in admin_acc for log visibility
                     admin_acc += text
+                    continue
+                slice_size = 64
+                for i in range(0, len(text), slice_size):
+                    part = text[i:i+slice_size]
+                    if not part:
+                        continue
+                    yield _sse_event({"type": "token", "req": req_id, "i": seq, "data": part}).encode("utf-8")
+                    seq += 1
+                    admin_acc += part
                     if echo_tokens:
                         try:
-                            print(text, end="", flush=True)
+                            print(part, end="", flush=True)
                         except Exception:
                             pass
                     await asyncio.sleep(0)
-                else:
-                    for i in range(0, len(text), slice_size):
-                        part = text[i:i+slice_size]
-                        if part:
-                            yield _sse_event({"type": "token", "req": req_id, "i": seq, "data": part}).encode("utf-8")
-                            seq += 1
-                            admin_acc += part
-                            if echo_tokens:
-                                try:
-                                    print(part, end="", flush=True)
-                                except Exception:
-                                    pass
-                            await asyncio.sleep(0)
             # Include any chunks if available in meta for client-side citation viewing
             yield _sse_event({"type": "done", "req": req_id, "meta": meta}).encode("utf-8")
             if echo_tokens:

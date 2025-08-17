@@ -67,8 +67,18 @@ export default function HomePage() {
   const decorateCitations = (input: string): string => {
     if (!input) return input;
     let out = input;
+    // Convert inline metadata citations like [6.1: {json}] -> [6.1](section:6.1 "base64(json)")
+    // Support codes like 3.5, 3.5.1, F4, F4.a, A10.2b, 1B6b, and allow optional ranges like 6.41-6.43
+    out = out.replace(/\[((?:[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+(?:\.[A-Za-z0-9]+)*)(?:-\d+(?:\.[A-Za-z0-9]+)*)?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code, json) => {
+      const encCode = encodeURIComponent(String(code));
+      // Put the literal JSON into the title so tooltip shows the human-readable metadata
+      const safe = String(json).replace(/'/g, "&#39;");
+      return `[${code}](section:${encCode} '${safe}')`;
+    });
     // Replace [3.5] with markdown link [3.5](section:3.5) only when not already a link
     out = out.replace(/\[(\d+(?:\.\d+)+)\](?!\()/g, "[$1](section:$1)");
+    // Replace alpha/alpha-numeric codes like [F4], [F4.a], [A10.2b], [1B6b] when not already a link
+    out = out.replace(/\[((?:[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?))\](?!\()/g, "[$1](section:$1)");
     // Replace verbal-only tags like [EQUIPMENT], [ATTACKING], [The 56 RISK@ Cards]
     // Only when not already a link and contains at least one letter
     out = out.replace(/\[((?=[^\]]*[A-Za-z])[^\]\n]{2,80})\](?!\()/g, (_m, p1) => {
@@ -110,6 +120,9 @@ export default function HomePage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const [debugShowCitationMeta, setDebugShowCitationMeta] = useState<boolean>(() => {
+    try { return localStorage.getItem('boardrag_debug_citation_meta') === '1'; } catch { return false; }
+  });
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const historyStripRef = useRef<HTMLDivElement>(null);
@@ -651,6 +664,11 @@ export default function HomePage() {
     // Send stable browser session id for server-side blocking
     url.searchParams.set("sid", sessionId || "");
     url.searchParams.set("_", String(Date.now()));
+    // Debug flag: request server to not strip citation metadata from inline brackets
+    try {
+      const dbg = localStorage.getItem('boardrag_debug_citation_meta') === '1';
+      url.searchParams.set("debug_cite_meta", dbg ? "1" : "0");
+    } catch {}
     // Ensure we have a token; if missing, try to re-unlock with saved password once
     const ensureToken = async (): Promise<string | null> => {
       try {
@@ -1048,6 +1066,7 @@ export default function HomePage() {
   const [previewChunks, setPreviewChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
   const [previewPdfMeta, setPreviewPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
   const [chunksExpanded, setChunksExpanded] = useState<boolean>(false);
+  const [previewTargetPage, setPreviewTargetPage] = useState<number | null>(null);
   // Stable auth token to avoid rebuilding PDF URLs on every render
   const tokenRef = useRef<string | null>(null);
   // Portal root inside chat for mobile modal alignment
@@ -1061,7 +1080,7 @@ export default function HomePage() {
     } catch {}
   }, []);
 
-  const openSectionModal = async (sec: string, uid?: string) => {
+  const openSectionModal = async (sec: string, uid?: string, meta?: any) => {
     if (!sec) return;
     setSectionTitle(sec);
     setPreviewTitle(sec);
@@ -1071,6 +1090,91 @@ export default function HomePage() {
       setPreviewOpen(true);
       setSectionModalOpen(false);
     try {
+      // If metadata from citation is provided (file, page, header), preselect file and page
+      try {
+        if (meta && typeof meta === 'object') {
+          const mfile = String((meta.file || meta.filename || '') as string).toLowerCase();
+          const mpage = Number(meta.page);
+          if (mfile) {
+            const norm = (s: string) => (s || '').trim().toLowerCase();
+            const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
+            const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
+            if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
+            if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
+            try { if (selectedGame) localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, mfile); } catch {}
+          }
+          if (isFinite(mpage) && mpage > 0) {
+            try { setPreviewTargetPage(mpage); } catch {}
+          }
+        }
+      } catch {}
+      const preferredPage = (() => { try { const n = Number((meta && (meta as any).page)); return isFinite(n) && n > 0 ? n : null; } catch { return null; } })();
+      // If we have complete metadata, avoid any server call: synthesize minimal chunks and proceed
+      if (meta && (meta as any).file && preferredPage) {
+        const mfile = String((meta as any).file || '').toLowerCase();
+        const headerText = String((meta as any).header || sec || '').trim();
+        const syntheticChunks = [
+          { text: headerText, source: mfile, page: Number(preferredPage) - 1, section: sec, section_number: sec }
+        ];
+        // Cache under multiple keys
+        try {
+          const keys: string[] = [sec];
+          try {
+            const m = sec.match(/^[A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*/);
+            if (m && m[0] && m[0] !== sec) keys.push(m[0]);
+            const up = sec.toUpperCase(); if (up !== sec) keys.push(up);
+          } catch {}
+          for (const k of keys) {
+            const ck = `${selectedGame || ''}::${k}`;
+            sectionCacheRef.current.set(ck, syntheticChunks as any);
+          }
+        } catch {}
+        try { setSectionChunks(syntheticChunks as any); } catch {}
+        try { setPreviewChunks(syntheticChunks as any); } catch {}
+        // Update viewer metas
+        const norm = (s: string) => (s || '').trim().toLowerCase();
+        const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
+        const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
+        if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
+        if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
+        try { setPreviewTargetPage(preferredPage as number); } catch {}
+        // Scroll and spotlight
+        try {
+          const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
+          const targetPage = preferredPage as number;
+          const attempt = (tries: number = 0) => {
+            if (reqId !== scrollReqRef.current) return;
+            const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
+            const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
+            if (el && sc) {
+              try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
+              // Center near expected header location once text layer is ready
+              const waitAndPlace = (attempts: number = 0) => {
+                if (reqId !== scrollReqRef.current) return;
+                const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
+                if (ready) {
+                  setTimeout(() => {
+                    if (reqId !== scrollReqRef.current) return;
+                    // Prefer precise substring if provided
+                    const sub = (() => { try { return (meta && (meta as any).snippet) ? String((meta as any).snippet) : ((meta && (meta as any).header) ? String((meta as any).header) : ''); } catch { return ''; } })();
+                    if (sub) placeSpotlightAtSubstring(el, sub);
+                    else placeSpotlightRing(el, sec);
+                    try { centerOnSpotlight(sc, el, !!pdfSmoothScroll); } catch {}
+                  }, 60);
+                } else if (attempts < 50) {
+                  setTimeout(() => waitAndPlace(attempts + 1), 80);
+                }
+              };
+              waitAndPlace();
+            } else if (tries < 120) {
+              requestAnimationFrame(() => attempt(tries + 1));
+            }
+          };
+          attempt();
+        } catch {}
+        setSectionLoading(false);
+        return;
+      }
       // 1) Try cache first (game + section key)
       const mk = (k: string) => `${selectedGame || ''}::${k}`;
       const candidates: string[] = [sec];
@@ -1102,19 +1206,47 @@ export default function HomePage() {
           const pageSet = new Set<number>();
           cached.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
           const citedPages = Array.from(pageSet).sort((a,b) => a-b);
-          const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+          const targetPage = (preferredPage && preferredPage > 0) ? preferredPage : (citedPages.length > 0 ? citedPages[0] : 1);
+          try { setPreviewTargetPage(targetPage); } catch {}
           const attempt = (tries: number = 0) => {
             if (reqId !== scrollReqRef.current) return;
             const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
             const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
             if (el && sc) {
               try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
-              scrollToTargetPage(sc, el, true);
+              // Single smooth scroll immediately towards first rect if available; else page top
+              try {
+                const chunksForPage = (cached as any[]).filter((c) => (Number(c.page) + 1) === Number(targetPage));
+                const rects: Array<[number, number, number, number]> = [];
+                chunksForPage.forEach((c: any) => {
+                  let rn: any = c.rects_norm;
+                  try { if (typeof rn === 'string') rn = JSON.parse(rn); } catch {}
+                  if (Array.isArray(rn)) rn.forEach((r: any) => rects.push(r as any));
+                });
+                if (rects.length > 0) {
+                  const [x0, y0, x1, y1] = rects[0];
+                  const pageHeight = el.clientHeight;
+                  const cy = ((y0 + y1) / 2) * pageHeight;
+                  const desired = el.offsetTop + cy - (sc.clientHeight / 2);
+                  const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
+                  const topTarget = Math.max(0, Math.min(desired, maxTop));
+                  sc.scrollTo({ top: topTarget, behavior: 'smooth' });
+                } else {
+                  sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
+                }
+              } catch {
+                sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
+              }
               const waitAndPlace = (attempts: number = 0) => {
                 if (reqId !== scrollReqRef.current) return;
                 const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
                 if (ready) {
-                  setTimeout(() => { if (reqId !== scrollReqRef.current) return; placeSpotlightRing(el, sec); centerOnSpotlight(sc, el, true); }, 120);
+                  setTimeout(() => {
+                    if (reqId !== scrollReqRef.current) return;
+                    placeSpotlightRing(el, sec);
+                    // After placing the ring, center the scroll on it so we don't land at page top
+                    try { centerOnSpotlight(sc, el, !!pdfSmoothScroll); } catch {}
+                  }, 60);
                 } else if (attempts < 50) {
                   setTimeout(() => waitAndPlace(attempts + 1), 80);
                 }
@@ -1185,7 +1317,8 @@ export default function HomePage() {
         const pageSet = new Set<number>();
         chunks.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
         const citedPages = Array.from(pageSet).sort((a,b) => a-b);
-        const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+        const targetPage = (preferredPage && preferredPage > 0) ? preferredPage : (citedPages.length > 0 ? citedPages[0] : 1);
+        try { setPreviewTargetPage(targetPage); } catch {}
         const byPage = (p: number) => chunks.filter((c: any) => (Number(c.page) + 1) === Number(p));
         const attemptUnified = (tries: number = 0) => {
           // If a newer scroll request superseded this one, abort
@@ -1193,20 +1326,42 @@ export default function HomePage() {
           const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
           const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
           if (el && sc) {
-            // Remove any existing ring, smooth-scroll to page, then center on spotlight
             try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
-            scrollToTargetPage(sc, el, true);
-            // Wait for text spans, then position spotlight directly
+            // Immediate smooth scroll using first rect if available to avoid delay
+            try {
+              const chunksForPage = chunks.filter((c: any) => (Number(c.page) + 1) === Number(targetPage));
+              const rects: Array<[number, number, number, number]> = [];
+              chunksForPage.forEach((c: any) => {
+                let rn: any = (c as any).rects_norm;
+                try { if (typeof rn === 'string') rn = JSON.parse(rn); } catch {}
+                if (Array.isArray(rn)) rn.forEach((r: any) => rects.push(r as any));
+              });
+              if (rects.length > 0) {
+                const [x0, y0, x1, y1] = rects[0];
+                const pageHeight = el.clientHeight;
+                const cy = ((y0 + y1) / 2) * pageHeight;
+                const desired = el.offsetTop + cy - (sc.clientHeight / 2);
+                const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
+                const topTarget = Math.max(0, Math.min(desired, maxTop));
+                sc.scrollTo({ top: topTarget, behavior: 'smooth' });
+              } else {
+            sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
+              }
+            } catch {
+              sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
+            }
             const waitAndPlace = (attempts: number = 0) => {
               if (reqId !== scrollReqRef.current) return;
               const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
               if (ready) {
-                // Wait a bit to ensure layout settles, then place spotlight
                 setTimeout(() => {
                   if (reqId !== scrollReqRef.current) return;
-                  placeSpotlightRing(el, sec);
-                  centerOnSpotlight(sc, el, true);
-                }, 120);
+                  const sub = (() => { try { return (meta && (meta as any).snippet) ? String((meta as any).snippet) : ((meta && (meta as any).header) ? String((meta as any).header) : ''); } catch { return ''; } })();
+                  if (sub) placeSpotlightAtSubstring(el, sub);
+                  else placeSpotlightRing(el, sec);
+                  // After placing the ring, center the scroll on it so we don't land at page top
+                  try { centerOnSpotlight(sc, el, !!pdfSmoothScroll); } catch {}
+                }, 60);
               } else if (attempts < 50) {
                 setTimeout(() => waitAndPlace(attempts + 1), 80);
               }
@@ -1277,13 +1432,125 @@ export default function HomePage() {
 
   // (legacy rect computation removed)
 
-  const { placeSpotlightRing, scrollToTargetPage, centerOnSpotlight } = usePdfHeadingSpotlight();
+  const { placeSpotlightRing, placeSpotlightAtSubstring, scrollToTargetPage, centerOnSpotlight } = usePdfHeadingSpotlight();
+
+  const parseCitationMeta = (title?: string | null): any | undefined => {
+    if (!title) return undefined;
+    const decodeHtml = (s: string) => s
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, '&');
+    try {
+      // Prefer direct JSON (we now store literal JSON in the title)
+      return JSON.parse(decodeHtml(title));
+    } catch {}
+    try {
+      // Fallback: some older messages may still use base64
+      // Note: atob may throw on non-base64 strings
+      return JSON.parse(atob(title));
+    } catch {}
+    try {
+      return JSON.parse(decodeURIComponent(title));
+    } catch {}
+    return undefined;
+  };
+
+  // Simplified citation opener: first click snaps to page; if already on that page, centers on the section name
+  const openCitation = (sec: string, meta: any | undefined) => {
+    try {
+      setPreviewOpen(true);
+      const mfile = (() => { try { return String(meta?.file || meta?.filename || '').toLowerCase(); } catch { return ''; } })();
+      const mpage = (() => { try { const n = Number(meta?.page); return isFinite(n) && n > 0 ? n : 1; } catch { return 1; } })();
+      const sectionText = (() => { try { return String(meta?.snippet || meta?.header || sec || '').trim(); } catch { return String(sec || ''); } })();
+      // Set target PDF and page
+      if (mfile) {
+        const norm = (s: string) => (s || '').trim().toLowerCase();
+        const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
+        const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
+        if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
+        if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
+        try { if (selectedGame) localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, mfile); } catch {}
+      }
+      try { setPreviewTargetPage(mpage); } catch {}
+      const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
+      const isPageInView = (sc: HTMLElement, el: HTMLElement): boolean => {
+        const top = el.offsetTop;
+        const bottom = top + el.clientHeight;
+        const cur = sc.scrollTop;
+        const visTop = cur - 8;
+        const visBottom = cur + sc.clientHeight + 8;
+        return bottom > visTop && top < visBottom;
+      };
+      const centerOnSubstring = (sc: HTMLElement, pageEl: HTMLElement, substring: string): void => {
+        try {
+          const norm = (s: string) => s.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+          const needle = norm(substring || '');
+          const layer = (pageEl.querySelector('.react-pdf__Page__textContent') || pageEl.querySelector('.textLayer')) as HTMLElement | null;
+          if (!layer || !needle) return;
+          const spans = Array.from(layer.querySelectorAll('span')) as HTMLSpanElement[];
+          let targetSpan: HTMLSpanElement | null = null;
+          for (let i = 0; i < spans.length; i++) {
+            let acc = '';
+            for (let j = i; j < spans.length && acc.length < needle.length + 200; j++) {
+              acc += norm(spans[j].textContent || '');
+              if (acc.includes(needle)) { targetSpan = spans[i]; break; }
+            }
+            if (targetSpan) break;
+          }
+          if (!targetSpan) return;
+          const pageRect = pageEl.getBoundingClientRect();
+          const r = targetSpan.getBoundingClientRect();
+          const cy = (r.top + r.bottom) / 2 - pageRect.top; // y within the page
+          const desired = pageEl.offsetTop + cy - (sc.clientHeight / 2);
+          const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
+          const topTarget = Math.max(0, Math.min(desired, maxTop));
+          const cur = sc.scrollTop;
+          const epsilon = 2;
+          if (Math.abs(topTarget - cur) <= epsilon) {
+            // Provide a small visual acknowledgment: bump up slightly then back down
+            const bump = Math.max(0, Math.min(maxTop, Math.max(0, cur - 24)));
+            sc.scrollTo({ top: bump, behavior: 'auto' });
+            setTimeout(() => {
+              sc.scrollTo({ top: topTarget, behavior: (pdfSmoothScroll ? 'smooth' : 'auto') as ScrollBehavior });
+            }, 80);
+          } else {
+            sc.scrollTo({ top: topTarget, behavior: (pdfSmoothScroll ? 'smooth' : 'auto') as ScrollBehavior });
+          }
+        } catch {}
+      };
+      const act = (tries: number = 0) => {
+        if (reqId !== scrollReqRef.current) return;
+        if (tries > 160) return;
+        const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
+        const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${mpage}'], .preview-panel .pdf-page[data-page-number='${mpage}']`) as HTMLElement | null;
+        if (!sc || !el) { requestAnimationFrame(() => act(tries + 1)); return; }
+        // If not on the target page yet → single snap/scroll to page top
+        if (!isPageInView(sc, el)) {
+          sc.scrollTo({ top: Math.max(0, el.offsetTop - 8), behavior: (pdfSmoothScroll ? 'smooth' : 'auto') as ScrollBehavior });
+          return;
+        }
+        // Already on the page → center on section name once text layer is ready
+        let attempts = 0;
+        const waitText = () => {
+          if (reqId !== scrollReqRef.current) return;
+          const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
+          if (ready) {
+            centerOnSubstring(sc, el, sectionText);
+          } else if (attempts++ < 60) {
+            setTimeout(waitText, 60);
+          }
+        };
+        waitText();
+      };
+      act();
+    } catch {}
+  };
 
   return (
     <>
       <div className={`container${(previewOpen && !canShowPreview) ? ' preview-open' : ''}`}>
         {/* Desktop PDF preview (left of chat) - only render on wide screens */}
-          {canShowPreview && (
+        {canShowPreview && (
           <div className={`preview-panel${previewOpen ? ' has-content' : ''}`}>
             {/* Back button in overlay mode (mobile/all) */}
             <button className="btn preview-back" onClick={() => setPreviewOpen(false)} aria-label="Back" title="Back">
@@ -1342,6 +1609,8 @@ export default function HomePage() {
                         chunks={previewChunks as any}
                         pdfMeta={previewPdfMeta as any}
                         setPdfMeta={(m) => setPreviewPdfMeta(m as any)}
+                        targetPage={previewTargetPage || undefined}
+                        adjacentPageWindow={1}
                       />
                     );
                   })()}
@@ -1353,8 +1622,8 @@ export default function HomePage() {
                 expanded={chunksExpanded}
                 setExpanded={(v) => setChunksExpanded(v)}
               />
-            </div>
-          </div>
+                  </div>
+                        </div>
           )}
         {/* Chat column */}
         <div className={`chat surface${sheetOpen ? ' menu-open' : ''}`} style={{ height: "100%", position: 'relative' }}>
@@ -1368,7 +1637,7 @@ export default function HomePage() {
                   {sectionLoading && (
                     <div className="indicator" style={{ gap: 8, position: 'absolute', right: 8, top: 8 }}>
                       <span className="spinner" />
-                    </div>
+                      </div>
                   )}
                   {!!sectionError && !sectionLoading && (
                     <div className="muted" style={{ color: 'var(--danger, #b00020)' }}>{sectionError}</div>
@@ -1417,23 +1686,25 @@ export default function HomePage() {
                             chunks={previewChunks as any}
                             pdfMeta={previewPdfMeta as any}
                             setPdfMeta={(m) => setPreviewPdfMeta(m as any)}
+                            targetPage={previewTargetPage || undefined}
+                            adjacentPageWindow={1}
                           />
                         );
                       })()}
-                    </div>
-                  )}
+                </div>
+              )}
                   <PreviewChunksPanel
                     loading={sectionLoading}
                     chunks={previewChunks as any}
                     expanded={chunksExpanded}
                     setExpanded={(v) => setChunksExpanded(v)}
                   />
-                </div>
+            </div>
                 <button className="btn preview-back" onClick={() => setPreviewOpen(false)} aria-label="Back" title="Back">←</button>
               </div>,
               chatModalRootRef.current
             )
-          )}
+        )}
           <div className="row title" style={{ gap: 12, justifyContent: 'space-between' }}>
             <span>Board Game Jippity{selectedGame ? ` — ${selectedGame}` : ""}</span>
           </div>
@@ -1477,19 +1748,21 @@ export default function HomePage() {
                       <div className="assistant-row" style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto', columnGap: 6, alignItems: 'end' }}>
                         <div {...props} style={{ ...(props.style || {}), maxWidth: '100%' }}>
                           <ReactMarkdown
-                            // Allow custom schemes like section: without sanitization interfering
                             {...({ urlTransform: (url: string) => url } as any)}
                             components={{
-                              a({ href, children, ...props }: { href?: string; children?: any }) {
-                              if (href && typeof href === 'string' && href.startsWith('section:')) {
+                              a({ href, title, children, ...props }: { href?: string; title?: string; children?: any }) {
+                                if (href && typeof href === 'string' && href.startsWith('section:')) {
                                   const sec = decodeURIComponent(href.slice('section:'.length));
                                   return (
                                     <button
                                       className="btn link"
                                       onClick={(e) => {
                                         e.preventDefault();
-                                        openSectionModal(sec);
+                                        const meta = parseCitationMeta(title);
+                                        // Always handle citations client-side (no server calls)
+                                        openCitation(sec, meta);
                                       }}
+                                      title={title}
                                       style={{
                                         padding: 0,
                                         background: 'none',
@@ -1545,7 +1818,7 @@ export default function HomePage() {
                           // Allow custom schemes like section: without sanitization interfering
                           {...({ urlTransform: (url: string) => url } as any)}
                           components={{
-                            a({ href, children, ...props }: { href?: string; children?: any }) {
+                            a({ href, title, children, ...props }: { href?: string; title?: string; children?: any }) {
                               if (href && typeof href === 'string' && href.startsWith('section:')) {
                                 const sec = decodeURIComponent(href.slice('section:'.length));
                                 return (
@@ -1556,7 +1829,14 @@ export default function HomePage() {
                                       try {
                                         if (selectedGame) localStorage.setItem(`boardrag_last_section:${selectedGame}`, sec);
                                       } catch {}
-                                      openSectionModal(sec);
+                                      const meta = parseCitationMeta(title);
+                                      try {
+                                        const mfile = String(meta?.file || '').toLowerCase();
+                                        if (mfile && !mfile.endsWith('.pdf')) { meta.file = undefined; }
+                                        if (mfile === '1.pdf' || mfile === '0.pdf') { meta.file = undefined; }
+                                      } catch {}
+                                      // Always handle citations client-side
+                                      openCitation(sec, meta);
                                     }}
                                     style={{
                                       padding: 0,

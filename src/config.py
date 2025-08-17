@@ -232,6 +232,23 @@ if not _is_writable(DATA_PATH):
     CHROMA_PATH = os.path.join(fallback_data, "chroma")
     os.makedirs(DATA_PATH, exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# Optional - PDF Optimization
+# ---------------------------------------------------------------------------
+# Enable optimizing large PDFs during ingestion to reduce size and speed up
+# loading. Tunable via environment variables.
+ENABLE_PDF_OPTIMIZATION = os.getenv("ENABLE_PDF_OPTIMIZATION", "True").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+PDF_OPTIMIZE_MIN_SIZE_MB = float(os.getenv("PDF_OPTIMIZE_MIN_SIZE_MB", "25"))
+PDF_LINEARIZE = os.getenv("PDF_LINEARIZE", "True").lower() in {"1", "true", "yes"}
+PDF_GARBAGE_LEVEL = int(os.getenv("PDF_GARBAGE_LEVEL", "3"))
+PDF_ENABLE_RASTER_FALLBACK = os.getenv("PDF_ENABLE_RASTER_FALLBACK", "False").lower() in {"1", "true", "yes"}
+PDF_RASTER_DPI = int(os.getenv("PDF_RASTER_DPI", "150"))
+PDF_JPEG_QUALITY = int(os.getenv("PDF_JPEG_QUALITY", "70"))
+
 # Templates (these are small text files so they can stay in repo)
 JINJA_TEMPLATE_PATH = os.getenv("JINJA_TEMPLATE_PATH", "rag_query_improved.txt")
 EVAL_TEMPLATE_PATH = os.getenv("EVAL_TEMPLATE_PATH", "eval_prompt_tests.txt")
@@ -265,6 +282,13 @@ if not AUTH_SECRET:
 
 # Token time-to-live in seconds
 AUTH_TOKEN_TTL_SECS = int(os.getenv("AUTH_TOKEN_TTL_SECS", "43200"))  # 12 hours
+
+# ---------------------------------------------------------------------------
+# DB-less Mode
+# ---------------------------------------------------------------------------
+# Defaults to enabled when the environment variable is absent.
+DB_LESS = os.getenv("DB_LESS", "1").lower() in {"1", "true", "yes"}
+print(f"[config] DB_LESS = {DB_LESS}")
 
 
 def validate_config():

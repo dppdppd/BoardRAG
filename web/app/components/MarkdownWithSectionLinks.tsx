@@ -13,7 +13,7 @@ export default function MarkdownWithSectionLinks({ content, onSectionClick }: Pr
     <ReactMarkdown
       {...({ urlTransform: (url: string) => url } as any)}
       components={{
-        a({ href, children, ...props }: { href?: string; children?: any }) {
+        a({ href, title, children, ...props }: { href?: string; title?: string; children?: any }) {
           if (href && typeof href === 'string' && href.startsWith('section:')) {
             const sec = decodeURIComponent(href.slice('section:'.length));
             return (
@@ -31,6 +31,14 @@ export default function MarkdownWithSectionLinks({ content, onSectionClick }: Pr
                   textDecoration: 'underline',
                   cursor: 'pointer',
                 }}
+                title={(() => {
+                  try {
+                    if (!title) return undefined;
+                    // title contains base64 JSON metadata per server; decode for tooltip
+                    const dec = atob(title);
+                    return dec;
+                  } catch { return undefined; }
+                })()}
               >
                 {"["}{children}{"]"}
               </button>

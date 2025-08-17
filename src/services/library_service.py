@@ -22,6 +22,7 @@ from ..query import (
     extract_and_store_game_name,
 )
 from ..query import get_stored_game_names
+from ..pdf_utils import optimize_with_raster_fallback_if_large
 
 
 class _LogWriter:
@@ -136,8 +137,17 @@ class _library_busy:
 def get_pdf_dropdown_choices() -> List[str]:
     """Return list like 'Game Name - filename.pdf' for all PDFs (no Gradio).
 
-    Scans DATA_PATH recursively and uses stored name mapping when available.
+    In DB-less mode, source choices from the catalog mapping.
+    Otherwise scan DATA_PATH and fall back to stored name mapping.
     """
+    try:
+        if getattr(config, "DB_LESS", True):
+            from ..catalog import get_pdf_choices_from_catalog  # type: ignore
+            choices = get_pdf_choices_from_catalog()
+            if choices:
+                return sorted(choices)
+    except Exception:
+        pass
     data_root = Path(config.DATA_PATH)
     pdf_files = list(data_root.rglob("*.pdf")) if data_root.exists() else []
     name_map = get_stored_game_names()
@@ -148,11 +158,9 @@ def get_pdf_dropdown_choices() -> List[str]:
             game_name = name_map.get(fname, fname)
             choices.append(f"{game_name} - {fname}")
         return sorted(choices)
-    # Fallback: when running on serverless/container where PDFs may not be on disk,
-    # use stored game-name mappings to populate the list so Admin can manage entries.
     if name_map:
         for fname, game_name in name_map.items():
-            safe_fname = Path(fname).name  # ensure it's just the filename
+            safe_fname = Path(fname).name
             title = game_name or safe_fname
             choices.append(f"{title} - {safe_fname}")
         return sorted(choices)
@@ -331,6 +339,26 @@ def refresh_games(log: Optional[Callable[[str], None]] = None) -> Tuple[str, Lis
 
         for fname in new_pdf_files:
             pdf_path = data_path / fname
+            # Optionally optimize before loading
+            if config.ENABLE_PDF_OPTIMIZATION:
+                try:
+                    replaced, orig, opt, msg = optimize_with_raster_fallback_if_large(
+                        pdf_path,
+                        min_size_mb=config.PDF_OPTIMIZE_MIN_SIZE_MB,
+                        linearize=config.PDF_LINEARIZE,
+                        garbage_level=config.PDF_GARBAGE_LEVEL,
+                        enable_raster_fallback=config.PDF_ENABLE_RASTER_FALLBACK,
+                        raster_dpi=config.PDF_RASTER_DPI,
+                        jpeg_quality=config.PDF_JPEG_QUALITY,
+                        log=log,
+                    )
+                    if log:
+                        change = f"→ {opt/1024/1024:.2f} MB" if opt else ""
+                        log(f"🛠 Optimizing {fname}: {msg} {change}")
+                except Exception:
+                    # Non-fatal; continue with original file
+                    if log:
+                        log(f"⚠️ Optimization skipped for {fname}")
             loader = PyPDFLoader(str(pdf_path))
             docs = loader.load()
             for doc in docs:

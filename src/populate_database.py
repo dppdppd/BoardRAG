@@ -11,6 +11,7 @@ import shutil
 import warnings
 import re
 from typing import List, Tuple
+import concurrent.futures
 
 import chromadb
 from langchain.schema.document import Document
@@ -33,6 +34,13 @@ try:
         validate_config,
     )
     from .embedding_function import get_embedding_function
+    from .pdf_utils import optimize_with_raster_fallback_if_large
+    # Best-effort .env loader for API keys when using LLM splitter
+    try:
+        from dotenv import load_dotenv, find_dotenv  # type: ignore
+        load_dotenv(find_dotenv(), override=False)
+    except Exception:
+        pass
 except ImportError:
     # When run directly (python src/populate_database.py)
     import sys
@@ -50,6 +58,12 @@ except ImportError:
         validate_config,
     )
     from src.embedding_function import get_embedding_function
+    from src.pdf_utils import optimize_with_raster_fallback_if_large
+    try:
+        from dotenv import load_dotenv, find_dotenv  # type: ignore
+        load_dotenv(find_dotenv(), override=False)
+    except Exception:
+        pass
 
 # Ignore deprecation warnings.
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -89,6 +103,26 @@ def load_documents(target_paths: List[str] | None = None):
         for i, pdf_file in enumerate(pdf_files, 1):
             print(f"📖 Loading PDF {i}/{len(pdf_files)}: {pdf_file.name}")
             try:
+                # Optionally optimize large PDFs before loading
+                try:
+                    from . import config as _cfg  # type: ignore
+                except Exception:
+                    import src.config as _cfg  # type: ignore
+                if getattr(_cfg, "ENABLE_PDF_OPTIMIZATION", False):
+                    try:
+                        replaced, orig, opt, msg = optimize_with_raster_fallback_if_large(
+                            pdf_file,
+                            min_size_mb=getattr(_cfg, "PDF_OPTIMIZE_MIN_SIZE_MB", 25.0),
+                            linearize=getattr(_cfg, "PDF_LINEARIZE", True),
+                            garbage_level=getattr(_cfg, "PDF_GARBAGE_LEVEL", 3),
+                            enable_raster_fallback=getattr(_cfg, "PDF_ENABLE_RASTER_FALLBACK", False),
+                            raster_dpi=getattr(_cfg, "PDF_RASTER_DPI", 150),
+                            jpeg_quality=getattr(_cfg, "PDF_JPEG_QUALITY", 70),
+                        )
+                        if replaced or opt < orig:
+                            print(f"   🛠 Optimized {pdf_file.name}: {msg}")
+                    except Exception as _e:
+                        print(f"   ⚠️ Optimization failed for {pdf_file.name}: {_e}")
                 loader = PyPDFLoader(str(pdf_file))
                 docs = loader.load()
                 print(f"   ✅ Loaded {len(docs)} pages from {pdf_file.name}")
@@ -114,8 +148,46 @@ def load_documents(target_paths: List[str] | None = None):
             full_path = os.path.join(DATA_PATH, norm_path)
 
         if os.path.isdir(full_path):
+            # Optional optimization for each PDF in directory
+            try:
+                from . import config as _cfg  # type: ignore
+            except Exception:
+                import src.config as _cfg  # type: ignore
+            if getattr(_cfg, "ENABLE_PDF_OPTIMIZATION", False):
+                from pathlib import Path as _P
+                for _p in _P(full_path).rglob("*.pdf"):
+                    try:
+                        optimize_with_raster_fallback_if_large(
+                            _p,
+                            min_size_mb=getattr(_cfg, "PDF_OPTIMIZE_MIN_SIZE_MB", 25.0),
+                            linearize=getattr(_cfg, "PDF_LINEARIZE", True),
+                            garbage_level=getattr(_cfg, "PDF_GARBAGE_LEVEL", 3),
+                            enable_raster_fallback=getattr(_cfg, "PDF_ENABLE_RASTER_FALLBACK", False),
+                            raster_dpi=getattr(_cfg, "PDF_RASTER_DPI", 150),
+                            jpeg_quality=getattr(_cfg, "PDF_JPEG_QUALITY", 70),
+                        )
+                    except Exception:
+                        pass
             documents.extend(PyPDFDirectoryLoader(full_path).load())
         elif os.path.isfile(full_path):
+            # Optional optimization for single file
+            try:
+                from . import config as _cfg  # type: ignore
+            except Exception:
+                import src.config as _cfg  # type: ignore
+            if getattr(_cfg, "ENABLE_PDF_OPTIMIZATION", False) and full_path.lower().endswith(".pdf"):
+                try:
+                    optimize_with_raster_fallback_if_large(
+                        full_path,
+                        min_size_mb=getattr(_cfg, "PDF_OPTIMIZE_MIN_SIZE_MB", 25.0),
+                        linearize=getattr(_cfg, "PDF_LINEARIZE", True),
+                        garbage_level=getattr(_cfg, "PDF_GARBAGE_LEVEL", 3),
+                        enable_raster_fallback=getattr(_cfg, "PDF_ENABLE_RASTER_FALLBACK", False),
+                        raster_dpi=getattr(_cfg, "PDF_RASTER_DPI", 150),
+                        jpeg_quality=getattr(_cfg, "PDF_JPEG_QUALITY", 70),
+                    )
+                except Exception:
+                    pass
             documents.extend(PyPDFLoader(full_path).load())
         else:
             print(f"⚠️  Path not found – skipping: {full_path}")
@@ -123,289 +195,180 @@ def load_documents(target_paths: List[str] | None = None):
     return documents
 
 
-def split_documents(documents: List[Document]):
+def _resolve_target_pdfs(target_paths: List[str] | None) -> List[str]:
+    """Return a list of absolute PDF paths to process based on target_paths.
+
+    - If target_paths is None/empty: scan entire DATA_PATH for PDFs
+    - If entries are directories: include all PDFs under them
+    - If entries are files: include them if they exist and are PDFs
     """
-    Perform section-aware chunking of PDF pages.
+    from pathlib import Path
+    pdfs: List[str] = []
+    if not target_paths:
+        pdfs = [str(p) for p in Path(DATA_PATH).rglob("*.pdf")]
+        return pdfs
+    for path in target_paths:
+        norm_path = os.path.normpath(path)
+        if os.path.isabs(norm_path) or norm_path.startswith(os.path.normpath(DATA_PATH)):
+            full_path = norm_path
+        else:
+            full_path = os.path.join(DATA_PATH, norm_path)
+        if os.path.isdir(full_path):
+            pdfs.extend(str(p) for p in Path(full_path).rglob("*.pdf"))
+        elif os.path.isfile(full_path) and full_path.lower().endswith(".pdf"):
+            pdfs.append(full_path)
+        else:
+            print(f"⚠️  Path not found or not a PDF – skipping: {full_path}")
+    return pdfs
 
-    1. Each PDF *page* is scanned for rule-style headers (e.g. "1. SETUP").
-    2. Pages are first split on those headers into smaller *section* documents.
-    3. Any resulting section that is still larger than CHUNK_SIZE is further
-       divided by `RecursiveCharacterTextSplitter` while preserving paragraph
-       boundaries ("\n\n", "\n", " ").
 
-    This keeps logical rule sections together and dramatically improves RAG
-    retrieval quality compared with naive fixed-width splitting.
+def split_documents_llm(documents: List[Document]) -> List[Document]:
     """
+    LLM-first splitting: use an LLM to extract section codes/titles per PDF, then
+    segment pages by those codes. Falls back to regex splitter on failure.
 
-    # Prefer numeric headers (e.g., "3.6 Interdiction", "2.3.4 Morale Check").
-    # Separate regexes make precedence explicit and reduce false-positives.
-    # Dotted numeric headers only (e.g., "3.0 Sequence of Play", "3.2.1 Morale Check").
-    # This avoids mistaking page numbers like "7" or years like "2021" as headers.
-    NUMERIC_TITLE_RE = re.compile(r"^\s*(((?:\d+\.)+\d+))\s+(.+?)\s*$")
-    # Numeric-only line that represents a header must contain a dot (e.g., "3.0", "3.2.1").
-    NUMERIC_ONLY_HEADER_RE = re.compile(r"^\s*((?:\d+\.)+\d+)\s*:?\s*$")
+    Implementation outline:
+    1) Group docs by source PDF
+    2) For each PDF, extract candidate header lines and call the same logic as temp_tests/llm_extract_sections.py
+    3) Build a code → first_page map and a sorted sequence to segment pages
+    4) Emit sections as Documents with metadata.section and metadata.section_number
+    """
+    try:
+        from src.llm_outline import extract_pdf_outline  # type: ignore
+    except Exception as e:  # pragma: no cover
+        print(f"⚠️ LLM splitter unavailable ({e}); falling back to regex split.")
+        return split_documents(documents)
 
-    # Alphanumeric section headers like "F4 Fuel Strip Key" or "A10.2b Movement".
-    # Accept an optional trailing period/colon after the code (e.g., "A2. Metarules" or "A2: Metarules").
-    # Capture the leading code and the title.
-    ALPHANUM_TITLE_RE = re.compile(
-        r"^\s*(([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*))\.?\s*:?\s+(.+?)\s*$"
-    )
-    # Some PDFs render running headers or page furniture before the rule code on the same line, e.g.:
-    # "CORE RULES | HIGH FRONTIER 4 ALL |   I3. Free Market Operation".
-    # Match the code and title anywhere in the line when they appear in that order.
-    # Guard by requiring at least two TitleCased words in the title to reduce false positives.
-    ALPHANUM_INLINE_TITLE_RE = re.compile(
-        r"^[^\n]*?\b([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\.?\s+((?:[A-Z][A-Za-z0-9'\-/()]+\s+){1,}[A-Za-z0-9'\-/()]+)\s*$"
-    )
+    # Group by source
+    by_src: dict[str, List[Document]] = {}
+    for d in documents:
+        try:
+            src = str(d.metadata.get("source") or "")
+            if not src:
+                continue
+            by_src.setdefault(src, []).append(d)
+        except Exception:
+            continue
 
-    # Alphanumeric-only header on its own line (e.g., "A2."), with the title on the next non-empty line
-    ALPHANUM_ONLY_HEADER_RE = re.compile(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\.?\s*:?\s*$")
-
-    # As a last resort, allow non-numeric headers, but guard against short tokens
-    # like "RtPh:" or codes like "X3Z1" by requiring length and at least two words.
-    # Generic headers (very strict):
-    #  - Either ALL-CAPS style headings with length
-    #  - Or Title Case headings that END WITH a colon
-    GENERIC_HEADER_RE = re.compile(
-        r"^\s*(?:"
-        r"[A-Z][A-Z0-9 &'\-/()]{3,}"  # ALL CAPS style, at least 4 chars
-        r"|"
-        r"(?:[A-Z][A-Za-z0-9&'\-/()]+(?:\s+[A-Z][A-Za-z0-9&'\-/()]+)+):"  # Two+ TitleCased words ending with ':'
-        r")\s*$"
-    )
-
-    # Detect Table of Contents entries with dot leaders and trailing page numbers
-    TOC_ENTRY_RE = re.compile(r"^\s*(\d+(?:\.\d+)+)\s+.+?\.{2,}\s*\d+\s*$")
-
-    # Track section state across pages to handle continuations
-    last_section_on_previous_page = "intro"
-    
-    def _split_on_headers(page_doc: Document, inherited_section: str) -> tuple[List[Document], str]:
-        """Split a single PDF page into sections based on detected headers.
-        
-        Returns: (chunks, last_section_on_this_page)
-        """
-        lines = page_doc.page_content.splitlines()
-        # TOC heuristic: if a page contains multiple TOC-like entries, treat it as TOC
-        toc_like_count = sum(1 for ln in lines if TOC_ENTRY_RE.match(ln))
-        is_toc_page = toc_like_count >= 3
-        current_header = inherited_section  # Start with inherited section, not always "intro"
-        pending_header_text: str | None = None  # header line to prepend to the next section's content
-        buffer: list[str] = []
-        out: List[Document] = []
-
-        def _normalize_section_number(raw: str) -> str:
-            """Normalize numeric section like '3' → '3.0' for chapter headings.
-            Leaves dotted forms unchanged (e.g., '3.2' stays '3.2').
-            """
-            try:
-                raw = raw.strip()
-                if not raw:
-                    return raw
-                # If it already contains a dot, keep as-is
-                if "." in raw:
-                    return raw
-                # Otherwise map top-level chapter numbers to N.0
-                return f"{raw}.0"
-            except Exception:
-                return raw
-
-        def _flush(buf: list[str], header: str):
-            if not buf:
-                return
-            content = "\n".join(buf).strip()
-            if content:
-                meta = dict(page_doc.metadata)
-                # Store rich section metadata to improve downstream matching
-                meta["section"] = header
-                meta["section_full"] = header
+    out_docs: List[Document] = []
+    for src, pages_docs in by_src.items():
+        print(f"🧠 LLM splitting for {os.path.basename(src)} ({len(pages_docs)} pages)…")
+        try:
+            outline = extract_pdf_outline(src)
+            merged = outline.get("sections") or []
+            alias_map = outline.get("alias_map") or {}
+            fine_objs = outline.get("objects") or []
+            game_name = str(outline.get("game_name") or "").strip()
+            # Build an ordered list of (first_page, code, title, kind)
+            ordered = sorted([(int(s.get("first_page", 0)), str(s.get("code", "")), str(s.get("title", "")), str(s.get("section_kind", ""))) for s in merged if s.get("first_page")], key=lambda t: t[0])
+            if not ordered:
+                print("   ⚠️ LLM returned no sections; keeping unsplit pages for this PDF")
+                # Keep pages as single section chunks to avoid losing data
+                for d in pages_docs:
+                    out_docs.append(d)
+                continue
+            # Create page index → accumulated lines, flushing when we hit the next section
+            # Map page index (0-based) to raw text from the original Document sequence
+            # Note: PyPDFLoader assigns 0-based 'page' in metadata
+            def _emit(chunk_lines: List[str], header_label: str, base_meta: dict, section_kind: str):
+                content = "\n".join(chunk_lines).strip()
+                if not content:
+                    return
+                meta = dict(base_meta)
+                meta["section"] = header_label
+                # Derive section_number from code
+                m = re.match(r"^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*[a-z]?)\b", header_label)
+                if m:
+                    meta["section_number"] = m.group(1)
+                if section_kind:
+                    meta["section_kind"] = section_kind
+                if alias_map:
+                    meta["alias_map"] = alias_map
+                if game_name:
+                    meta["game_name"] = game_name
+                # Attach fine-grained objects belonging to this parent section
                 try:
-                    # Prefer alphanumeric section codes (e.g., F4, F4.a, A10.2b)
-                    m_alpha = re.match(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*)\b", header)
-                    if m_alpha:
-                        meta["section_number"] = m_alpha.group(1)
-                    else:
-                        m_num = re.match(r"^\s*(\d+(?:\.\d+)*)\b", header)
-                        if m_num:
-                            sec_num = m_num.group(1)
-                            meta["section_number"] = _normalize_section_number(sec_num)
+                    parent = str(meta.get("section_number") or "")
+                    objs = [o for o in fine_objs if str(o.get("parent_code") or "") == parent]
+                    if objs:
+                        meta["objects"] = objs
                 except Exception:
                     pass
-                # Emit a diagnostic line for admin streaming: show page and section label
+                out_docs.append(Document(page_content=content, metadata=meta))
+
+            # Build a quick page→doc map
+            idx_map: dict[int, Document] = {}
+            for d in pages_docs:
                 try:
-                    pg = meta.get("page")
-                    src = meta.get("source")
-                    pg_disp = f"p{int(pg)+1}" if isinstance(pg, int) else "p?"
-                    src_base = (src or "").split("/")[-1].split("\\")[-1]
-                    print(f"   • {pg_disp} {header} [{src_base}]")
+                    pg = int(d.metadata.get("page"))
+                    idx_map[pg] = d
                 except Exception:
+                    continue
+            # Iterate pages in order; assign current section based on ordered boundaries
+            ordered_iter = iter(ordered)
+            cur = next(ordered_iter)
+            cur_page0 = max(0, int(cur[0]) - 1)
+            cur_code = cur[1]
+            cur_title = cur[2]
+            cur_kind = ordered[0][3]
+            cur_header = f"{cur_code} {cur_title}".strip()
+            buf: List[str] = []
+            last_meta: dict = {}
+            max_page = max(idx_map.keys()) if idx_map else -1
+            def _advance_to(page1_based: int) -> None:
+                nonlocal cur, cur_page0, cur_code, cur_title, cur_header, buf, last_meta
+                # If the next section starts at this page, flush current and start new
+                while True:
                     try:
-                        print(f"   • {header}")
-                    except Exception:
-                        pass
-                out.append(Document(page_content=content, metadata=meta))
-
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-
-            # Safety: if we have a pending header and the next line is also detected as a header,
-            # emit a minimal chunk containing just the pending header to avoid losing it.
-            if pending_header_text is not None and not buffer:
-                if (
-                    NUMERIC_TITLE_RE.match(line)
-                    or NUMERIC_ONLY_HEADER_RE.match(line)
-                    or GENERIC_HEADER_RE.match(line)
-                ):
-                    buffer.append(pending_header_text)
-                    pending_header_text = None
-                    _flush(buffer, current_header)
-                    buffer = []
-            # Skip header detection on Table of Contents pages
-            if is_toc_page:
-                if pending_header_text is not None and not buffer:
-                    buffer.append(pending_header_text)
-                    pending_header_text = None
-                buffer.append(line)
-                i += 1
-                continue
-
-            # Case A: Numeric header with title on the same line (e.g., "3.3 Movement Phase (MPh)")
-            m_num_title = NUMERIC_TITLE_RE.match(line)
-            if m_num_title:
-                _flush(buffer, current_header)
-                buffer = []
-                section_number_raw = m_num_title.group(1)
-                section_number = _normalize_section_number(section_number_raw)
-                title_text = m_num_title.group(3)
-                # Remove trailing subtitle after a colon in the same line to make a stable label
-                clean_title = title_text.split(':', 1)[0].strip()
-                combined_header = f"{section_number} {clean_title}"
-                current_header = combined_header
-                pending_header_text = combined_header
-                i += 1
-                continue
-
-            # Case A0: Alphanumeric header with title on the same line (e.g., "F4 Fuel Strip Key", "A2. Metarules")
-            m_alpha_title = ALPHANUM_TITLE_RE.match(line)
-            if m_alpha_title:
-                _flush(buffer, current_header)
-                buffer = []
-                section_code = m_alpha_title.group(1)
-                title_text = m_alpha_title.group(3)
-                clean_title = title_text.split(':', 1)[0].strip()
-                combined_header = f"{section_code} {clean_title}"
-                current_header = combined_header
-                pending_header_text = combined_header
-                i += 1
-                continue
-
-            # Case A0b: Alphanumeric code and title appear later in the line (e.g., running header prefix)
-            m_alpha_inline = ALPHANUM_INLINE_TITLE_RE.match(line)
-            if m_alpha_inline:
-                _flush(buffer, current_header)
-                buffer = []
-                section_code = m_alpha_inline.group(1)
-                title_text = m_alpha_inline.group(2)
-                clean_title = title_text.split(':', 1)[0].strip()
-                combined_header = f"{section_code} {clean_title}"
-                current_header = combined_header
-                pending_header_text = combined_header
-                i += 1
-                continue
-
-            # Case B: Numeric-only line e.g., "3.0" with title on the next non-empty line
-            m_num = NUMERIC_ONLY_HEADER_RE.match(line)
-            if m_num:
-                j = i + 1
-                next_title = None
-                while j < len(lines):
-                    if lines[j].strip():
-                        next_title = lines[j].strip()
+                        nxt = next(ordered_iter)
+                    except StopIteration:
+                        return
+                    nxt_page0 = max(0, int(nxt[0]) - 1)
+                    if page1_based - 1 >= nxt_page0:
+                        # Flush previous if any buffer
+                        _emit(buf, cur_header, last_meta, cur_kind)
+                        buf = []
+                        cur = nxt
+                        cur_page0 = nxt_page0
+                        cur_code = nxt[1]
+                        cur_title = nxt[2]
+                        cur_kind = nxt[3]
+                        cur_header = f"{cur_code} {cur_title}".strip()
+                    else:
+                        # Put back by rewinding one step in iterator is hard; instead store state and break
+                        # We'll re-use cur and the iterator remains on nxt for future checks
+                        # To simulate lookahead, we keep current cur; the emission will occur when crossing the boundary
+                        # No action here
+                        # Actually, to handle lookahead correctly, we rely on checking on each page and comparing with nxt_page0
+                        # Since we can't easily push-back, we preserve nxt as global by re-creating iterator
                         break
-                    j += 1
-                if next_title:
-                    _flush(buffer, current_header)
-                    buffer = []
-                    section_number = _normalize_section_number(m_num.group(1))
-                    combined_header = f"{section_number} {next_title.split(':',1)[0].strip()}"
-                    current_header = combined_header
-                    pending_header_text = f"{combined_header}"
-                    i = j + 1
+
+            # Process pages in ascending order
+            for pg in range(0, max_page + 1):
+                d = idx_map.get(pg)
+                if not d:
                     continue
+                last_meta = dict(d.metadata)
+                # On boundary pages, if this page is >= next section start, rotate header
+                # Simple approach: check if any future start equals this page+1; re-compute on each step
+                for start_page1, code, title, kind in ordered:
+                    start0 = max(0, int(start_page1) - 1)
+                    if pg == start0 and (code != cur_code):
+                        _emit(buf, cur_header, last_meta, cur_kind)
+                        buf = []
+                        cur_code = code
+                        cur_title = title
+                        cur_kind = kind
+                        cur_header = f"{cur_code} {cur_title}".strip()
+                buf.append(d.page_content or "")
+            # Flush remainder
+            _emit(buf, cur_header, last_meta, cur_kind)
+        except Exception as e:
+            print(f"   ⚠️ LLM split failed for {os.path.basename(src)}: {e}; keeping unsplit pages.")
+            out_docs.extend(pages_docs)
 
-            # Case B0: Alphanumeric-only line e.g., "A2." with title on the next non-empty line
-            m_alpha_only = ALPHANUM_ONLY_HEADER_RE.match(line)
-            if m_alpha_only:
-                j = i + 1
-                next_title = None
-                while j < len(lines):
-                    if lines[j].strip():
-                        next_title = lines[j].strip()
-                        break
-                    j += 1
-                if next_title:
-                    _flush(buffer, current_header)
-                    buffer = []
-                    section_code = m_alpha_only.group(1)
-                    combined_header = f"{section_code} {next_title.split(':',1)[0].strip()}"
-                    current_header = combined_header
-                    pending_header_text = combined_header
-                    i = j + 1
-                    continue
-
-            # Case C: Fallback generic header (non-numeric). Guard against short codes.
-            if GENERIC_HEADER_RE.match(line):
-                text = line.strip()
-                _flush(buffer, current_header)
-                buffer = []
-                header_text = text
-                # Trim trailing colon in display label
-                if header_text.endswith(":"):
-                    header_text = header_text[:-1].strip()
-                current_header = header_text
-                pending_header_text = header_text
-                i += 1
-                continue
-
-            # Default: accumulate content
-            if pending_header_text is not None and not buffer:
-                buffer.append(pending_header_text)
-                pending_header_text = None
-            buffer.append(line)
-            i += 1
-
-        # If the page ended right after a header, still emit a minimal chunk with just the header
-        if pending_header_text is not None and not buffer:
-            buffer.append(pending_header_text)
-            pending_header_text = None
-
-        _flush(buffer, current_header)
-
-        # If no headers were found, return the original page so that downstream
-        # logic still sees it, but preserve the section state
-        final_chunks = out or [page_doc]
-        if not out and page_doc:
-            # Update the original page's section metadata to inherited section
-            page_doc.metadata["section"] = inherited_section
-        
-        return final_chunks, current_header
-
-    print(f"🔍 Phase 1: Section-aware splitting of {len(documents)} pages...")
-    
-    # 1️⃣ First pass – header splitting with cross-page section tracking
-    section_docs: List[Document] = []
-    for i, page in enumerate(documents):
-        if (i + 1) % 50 == 0 or i == len(documents) - 1:  # Progress every 50 pages
-            print(f"   📄 Processed {i + 1}/{len(documents)} pages...")
-        page_chunks, last_section_on_previous_page = _split_on_headers(page, last_section_on_previous_page)
-        section_docs.extend(page_chunks)
-
-    print(f"✅ Phase 1 complete: {len(documents)} pages → {len(section_docs)} sections")
-    print(f"🔍 Phase 2: Character-level splitting for oversized sections...")
-
-    # 2️⃣ Second pass – character splitting only when needed
+    print(f"✅ LLM splitting complete: {len(documents)} pages → {len(out_docs)} sections")
+    # Optionally further split oversized sections character-level
     char_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
@@ -413,23 +376,17 @@ def split_documents(documents: List[Document]):
         length_function=len,
         is_separator_regex=False,
     )
-
-    final_chunks: List[Document] = []
-    oversized_count = 0
-    for i, sec in enumerate(section_docs):
-        if (i + 1) % 100 == 0:  # Progress every 100 sections
-            print(f"   📝 Processed {i + 1}/{len(section_docs)} sections...")
-        
+    final: List[Document] = []
+    for sec in out_docs:
         if len(sec.page_content) <= CHUNK_SIZE:
-            final_chunks.append(sec)
+            final.append(sec)
         else:
-            oversized_count += 1
-            final_chunks.extend(char_splitter.split_documents([sec]))
+            final.extend(char_splitter.split_documents([sec]))
+    print(f"✅ Phase 2 complete (LLM): {len(out_docs)} sections → {len(final)} final chunks")
+    return final
 
-    print(f"✅ Phase 2 complete: {len(section_docs)} sections → {len(final_chunks)} final chunks")
-    print(f"📊 Split {oversized_count} oversized sections into smaller chunks")
-
-    return final_chunks
+# LLM-only policy: alias legacy splitter name to LLM splitter
+split_documents = split_documents_llm
 
 
 def add_to_chroma(chunks: List[Document]) -> bool:
@@ -453,6 +410,31 @@ def add_to_chroma(chunks: List[Document]) -> bool:
 
     # Calculate Page IDs.
     chunks_with_ids = calc_chunk_ids(chunks)
+
+    # Sanitize metadata (Chroma supports only scalar values). Serialize complex values.
+    import json as _json
+    def _sanitize_metadata(meta: dict) -> dict:
+        safe: dict = {}
+        for k, v in (meta or {}).items():
+            if isinstance(v, (str, int, float, bool)):
+                safe[k] = v
+            elif v is None:
+                continue
+            else:
+                try:
+                    s = _json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                    if len(s) > 8000:
+                        s = s[:8000] + "…"
+                    safe[k] = s
+                except Exception:
+                    sv = str(v)
+                    safe[k] = sv[:8000] + ("…" if len(sv) > 8000 else "")
+        return safe
+    try:
+        for ch in chunks_with_ids:
+            ch.metadata = _sanitize_metadata(getattr(ch, "metadata", {}) or {})
+    except Exception:
+        pass
 
     # Add or Update the documents.
     existing_items = db.get(include=[])  # IDs are always included by default
@@ -729,6 +711,19 @@ def main() -> None:
         action="store_true",
         help="Skip extracting and storing game names for PDFs.",
     )
+    parser.add_argument(
+        "--splitter",
+        choices=["regex", "llm"],
+        default="llm",
+        help="Section splitter: 'regex' or 'llm' (default: llm)",
+    )
+    # Streamed processing is always ON (no batch mode)
+    # LLM feature toggles (default ON)
+    parser.add_argument("--llm-enrich", dest="llm_enrich", action="store_true", help="LLM: add summaries/keywords/anchors/cross-refs to chunk metadata (default ON)")
+    parser.add_argument("--llm-semantic-split", dest="llm_semantic_split", action="store_true", help="LLM: split oversized sections at semantic breakpoints (default ON)")
+    parser.add_argument("--llm-aliases", dest="llm_aliases", action="store_true", help="LLM: build alias map (synonyms→codes) per PDF and store in metadata (default ON)")
+    parser.add_argument("--llm-validate-missing", dest="llm_validate_missing", action="store_true", help="LLM: compare detected sections to TOC and report missing (default ON)")
+    parser.set_defaults(llm_enrich=True, llm_semantic_split=True, llm_aliases=True, llm_validate_missing=True)
 
     # Optional positional paths (files or directories) to process. If omitted,
     # the entire DATA_PATH will be processed (original behaviour).
@@ -744,34 +739,318 @@ def main() -> None:
         print("✨ Clearing Database")
         clear_database()
 
-    # Create (or update) the data store. If the user supplied specific paths we
-    # only process those, which speeds up incremental updates (e.g. when adding
-    # a single new game).
-    documents = load_documents(args.paths)
-    documents = reorder_documents_by_columns(documents)
-    chunks = split_documents(documents)
-    add_to_chroma(chunks)
-
-    # ---------------------------------------------
-    # Optional: Extract & store official game names
-    # ---------------------------------------------
-    if not args.skip_name_extraction:
+    # Helper: build enrichment LLM once if needed
+    enrich_llm = None
+    if args.llm_enrich or args.llm_aliases or args.llm_validate_missing or args.llm_semantic_split:
         try:
-            from src.query import extract_and_store_game_name  # local import to avoid circular deps
-        except ImportError:
-            from query import extract_and_store_game_name  # fallback when running as module
+            from temp_tests.llm_extract_sections import _make_llm  # type: ignore
+            enrich_llm = _make_llm()
+        except Exception as e:
+            print(f"⚠️ LLM init failed for enrichment: {e}")
+            enrich_llm = None
 
-        import os
-        filenames = {
-            os.path.basename(doc.metadata.get("source", ""))
-            for doc in documents
-        }
-        print(f"🔤 Extracting game names for {len(filenames)} PDFs …")
-        for fname in filenames:
-            if fname:
-                extract_and_store_game_name(fname)
-    else:
-        print("⚠️  Skipped game-name extraction as requested")
+    def _invoke_with_timeout(llm, messages, timeout_s: float = 30.0) -> str:
+        def _call():
+            out_msg = llm.invoke(messages)
+            return str(getattr(out_msg, "content", "") or "").strip()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_call)
+            return fut.result(timeout=timeout_s)
+
+    def _apply_enrichment(chs: List[Document], debug_dir: str | None = None) -> List[Document]:
+        if not (enrich_llm and (args.llm_enrich or args.llm_aliases or args.llm_semantic_split)):
+            return chs
+        # Enrichment helpers (scoped)
+        def _write_debug(filename: str, payload: dict) -> None:
+            if not debug_dir:
+                return
+            try:
+                from pathlib import Path as _P
+                import json as _json
+                p = _P(debug_dir) / "enrichment"
+                p.mkdir(parents=True, exist_ok=True)
+                (p / filename).write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        def _try_llm_enrich(chs0: List[Document]) -> List[Document]:
+            if not (enrich_llm and args.llm_enrich):
+                return chs0
+            print("✨ LLM Enrich: summaries/keywords/anchors/cross-refs …")
+            out_local: List[Document] = []
+            total_local = len(chs0)
+            for idx_local, d in enumerate(chs0, 1):
+                try:
+                    text = d.page_content or ""
+                    meta = dict(d.metadata)
+                    from langchain.schema import HumanMessage, SystemMessage  # type: ignore
+                    sys = (
+                        "You extract metadata for a boardgame rules chunk. Return STRICT JSON with keys:\n"
+                        "- summary: <=160 chars\n"
+                        "- keywords: array of <=8 lowercase tokens\n"
+                        "- anchors: array of <=2 short anchor phrases\n"
+                        "- cross_refs: array of section codes referenced in text (e.g., I4, 1B6b)\n"
+                        "- section_kind: one of {setup, operation, movement, hazard, scoring, endgame, glossary, component, reference, politics, economy, glossary-example, example, note, other}.\n"
+                        "Choose the most specific that applies; use 'glossary' for term definitions. OUTPUT JSON ONLY."
+                    )
+                    usr = f"TEXT (truncated):\n{text[:1800]}\n\nReturn only a JSON object with those keys."
+                    if idx_local % 25 == 1 or total_local <= 10:
+                        print(f"   • Enriching chunk {idx_local}/{total_local}")
+                    try:
+                        s = _invoke_with_timeout(enrich_llm, [SystemMessage(content=sys), HumanMessage(content=usr)], timeout_s=30.0)
+                    except concurrent.futures.TimeoutError:
+                        print(f"   ⚠️ Enrich timeout for chunk {idx_local}; skipping")
+                        _write_debug(f"enrich_{idx_local:04d}_timeout.json", {
+                            "meta": meta,
+                            "system": sys,
+                            "user": usr,
+                            "error": "timeout",
+                        })
+                        out_local.append(d)
+                        continue
+                    m = re.search(r"\{[\s\S]*\}$", s)
+                    data = {}
+                    if m:
+                        import json as _json
+                        try:
+                            data = _json.loads(m.group(0))
+                        except Exception:
+                            data = {}
+                    _write_debug(f"enrich_{idx_local:04d}.json", {
+                        "meta": meta,
+                        "system": sys,
+                        "user": usr,
+                        "raw": s,
+                        "parsed": data,
+                    })
+                    if isinstance(data, dict):
+                        for k in ("summary", "keywords", "anchors", "cross_refs"):
+                            if k in data:
+                                meta[k] = data[k]
+                        sk = str(data.get("section_kind") or "").strip().lower()
+                        if sk:
+                            meta["section_kind"] = sk
+                        else:
+                            try:
+                                code = str(meta.get("section_number") or "")
+                                if re.match(r"^[Ll]\d", code):
+                                    meta["section_kind"] = "glossary"
+                            except Exception:
+                                pass
+                    out_local.append(Document(page_content=text, metadata=meta))
+                except Exception as e:
+                    _write_debug(f"enrich_{idx_local:04d}_error.json", {
+                        "meta": dict(d.metadata),
+                        "error": str(e),
+                    })
+                    out_local.append(d)
+            return out_local
+
+        def _try_llm_aliases(chs0: List[Document]) -> List[Document]:
+            if not (enrich_llm and args.llm_aliases):
+                return chs0
+            print("✨ LLM Aliases: per-PDF alias map …")
+            by_pdf: dict[str, dict] = {}
+            for d in chs0:
+                src = str(d.metadata.get("source") or "")
+                if src and src not in by_pdf:
+                    by_pdf[src] = {"codes": set(), "alias": {}}
+                try:
+                    code = str(d.metadata.get("section_number") or "").strip()
+                    if src and code:
+                        by_pdf[src]["codes"].add(code)
+                except Exception:
+                    pass
+            from langchain.schema import HumanMessage, SystemMessage  # type: ignore
+            for src, bag in by_pdf.items():
+                codes = sorted(list(bag["codes"]))
+                if not codes:
+                    continue
+                sys = "You map aliases to canonical section codes. Return strict JSON object: { alias(string): code(string) }. Only use provided codes."
+                usr = f"Codes: {', '.join(codes)}\nFind common alias phrases for these sections (e.g., 'sunspot cycle phase' -> C8)."
+                try:
+                    s = _invoke_with_timeout(enrich_llm, [SystemMessage(content=sys), HumanMessage(content=usr)], timeout_s=45.0)
+                    import json as _json
+                    m = re.search(r"\{[\s\S]*\}$", s)
+                    alias_map = _json.loads(m.group(0)) if m else {}
+                    _write_debug("aliases.json", {
+                        "source": src,
+                        "system": sys,
+                        "user": usr,
+                        "raw": s,
+                        "parsed": alias_map,
+                    })
+                except concurrent.futures.TimeoutError:
+                    print("   ⚠️ Alias mapping timeout; skipping")
+                    _write_debug("aliases_timeout.json", {
+                        "source": src,
+                        "system": sys,
+                        "user": usr,
+                        "error": "timeout",
+                    })
+                    alias_map = {}
+                except Exception as e:
+                    _write_debug("aliases_error.json", {
+                        "source": src,
+                        "system": sys,
+                        "user": usr,
+                        "error": str(e),
+                    })
+                    alias_map = {}
+                for d in chs0:
+                    if str(d.metadata.get("source") or "") == src:
+                        meta = dict(d.metadata)
+                        if alias_map:
+                            meta["alias_map"] = alias_map
+                        d = Document(page_content=d.page_content, metadata=meta)
+            return chs0
+
+        def _try_llm_semantic_split(chs0: List[Document]) -> List[Document]:
+            if not (enrich_llm and args.llm_semantic_split):
+                return chs0
+            print("✨ LLM Semantic Split: oversized sections …")
+            out_local: List[Document] = []
+            total_local = len(chs0)
+            for idx_local, d in enumerate(chs0, 1):
+                if len(d.page_content) <= CHUNK_SIZE * 1.5:
+                    out_local.append(d)
+                    continue
+                try:
+                    text = d.page_content
+                    from langchain.schema import HumanMessage, SystemMessage  # type: ignore
+                    sys = "You find semantic breakpoints that preserve list/step integrity. Return JSON: {breaks: [char_index,...]} where indices split the text."
+                    usr = f"TEXT (truncate to 4k):\n{text[:4000]}\n\nReturn JSON only."
+                    if idx_local % 25 == 1 or total_local <= 10:
+                        print(f"   • Semantic split {idx_local}/{total_local}")
+                    try:
+                        s = _invoke_with_timeout(enrich_llm, [SystemMessage(content=sys), HumanMessage(content=usr)], timeout_s=30.0)
+                    except concurrent.futures.TimeoutError:
+                        print(f"   ⚠️ Semantic split timeout for chunk {idx_local}; keeping unsplit")
+                        _write_debug(f"semantic_{idx_local:04d}_timeout.json", {
+                            "meta": dict(d.metadata),
+                            "system": sys,
+                            "user": usr,
+                            "error": "timeout",
+                        })
+                        out_local.append(d)
+                        continue
+                    import json as _json
+                    data = _json.loads(re.search(r"\{[\s\S]*\}$", s).group(0)) if re.search(r"\{[\s\S]*\}$", s) else {}
+                    _write_debug(f"semantic_{idx_local:04d}.json", {
+                        "meta": dict(d.metadata),
+                        "system": sys,
+                        "user": usr,
+                        "raw": s,
+                        "parsed": data,
+                    })
+                    breaks = [int(x) for x in (data.get("breaks") or []) if isinstance(x, (int, float))]
+                    if not breaks:
+                        out_local.append(d)
+                        continue
+                    last = 0
+                    for b in sorted(set([i for i in breaks if 32 <= i < len(text)-32])):
+                        seg = text[last:b].strip()
+                        if seg:
+                            out_local.append(Document(page_content=seg, metadata=dict(d.metadata)))
+                        last = b
+                    tail = text[last:].strip()
+                    if tail:
+                        out_local.append(Document(page_content=tail, metadata=dict(d.metadata)))
+                except Exception as e:
+                    _write_debug(f"semantic_{idx_local:04d}_error.json", {
+                        "meta": dict(d.metadata),
+                        "error": str(e),
+                    })
+                    out_local.append(d)
+            return out_local
+
+        chs_out = chs
+        if args.llm_semantic_split:
+            chs_out = _try_llm_semantic_split(chs_out)
+        if args.llm_enrich:
+            chs_out = _try_llm_enrich(chs_out)
+        if args.llm_aliases:
+            chs_out = _try_llm_aliases(chs_out)
+        return chs_out
+
+    # Streamed per-PDF processing (always on)
+    pdfs = _resolve_target_pdfs(args.paths)
+    total = len(pdfs)
+    print(f"📁 Found {total} PDF file(s) to process (streamed)")
+    for i, pdf_path in enumerate(pdfs, 1):
+        try:
+            print(f"\n📖 [{i}/{total}] {os.path.basename(pdf_path)}")
+            # Optional optimization
+            try:
+                from . import config as _cfg  # type: ignore
+            except Exception:
+                import src.config as _cfg  # type: ignore
+            if getattr(_cfg, "ENABLE_PDF_OPTIMIZATION", False):
+                try:
+                    replaced, orig, opt, msg = optimize_with_raster_fallback_if_large(
+                        pdf_path,
+                        min_size_mb=getattr(_cfg, "PDF_OPTIMIZE_MIN_SIZE_MB", 25.0),
+                        linearize=getattr(_cfg, "PDF_LINEARIZE", True),
+                        garbage_level=getattr(_cfg, "PDF_GARBAGE_LEVEL", 3),
+                        enable_raster_fallback=getattr(_cfg, "PDF_ENABLE_RASTER_FALLBACK", False),
+                        raster_dpi=getattr(_cfg, "PDF_RASTER_DPI", 150),
+                        jpeg_quality=getattr(_cfg, "PDF_JPEG_QUALITY", 70),
+                    )
+                    if replaced or opt < orig:
+                        print(f"   🛠 Optimized {os.path.basename(pdf_path)}: {msg}")
+                except Exception as _e:
+                    print(f"   ⚠️ Optimization failed for {os.path.basename(pdf_path)}: {_e}")
+
+            # Load one PDF
+            docs = PyPDFLoader(str(pdf_path)).load()
+            print(f"   ✅ Loaded {len(docs)} pages")
+            # Column reorder per PDF
+            docs = reorder_documents_by_columns(docs)
+            # Split
+            if args.splitter == "llm":
+                # Enable debug capture for outline extraction
+                try:
+                    from src.llm_outline import extract_pdf_outline  # type: ignore
+                    from pathlib import Path as _P
+                    dbg_dir = _P("debug") / _P(pdf_path).stem
+                    outline = extract_pdf_outline(pdf_path, debug_dir=str(dbg_dir))
+                    # Reuse downstream normalization by building docs from outline
+                    # Convert pages_docs-style input from outline into split docs by calling the same normalizer
+                    # Simplest: reconstruct via split_documents_llm’s expected input
+                    chunks = split_documents_llm(docs)
+                except Exception:
+                    chunks = split_documents_llm(docs)
+            else:
+                chunks = split_documents(docs)
+            # Enrichment per PDF
+            try:
+                from pathlib import Path as _P
+                dbg_dir = _P("debug") / _P(pdf_path).stem
+                chunks = _apply_enrichment(chunks, debug_dir=str(dbg_dir))
+            except Exception:
+                chunks = _apply_enrichment(chunks)
+            # Add to DB
+            add_to_chroma(chunks)
+            # Store names unless skipped
+            if not args.skip_name_extraction:
+                try:
+                    from src.query import store_game_name  # type: ignore
+                    stored = set()
+                    for ch in chunks:
+                        meta = getattr(ch, 'metadata', {}) or {}
+                        fn = os.path.basename(str(meta.get('source') or ''))
+                        gn = str(meta.get('game_name') or '').strip()
+                        if fn and gn and (fn, gn) not in stored:
+                            store_game_name(fn, gn)
+                            stored.add((fn, gn))
+                    if stored:
+                        print(f"   🔤 Stored LLM-extracted game name: {', '.join(sorted({gn for (_fn, gn) in stored}))}")
+                except Exception as e:
+                    print(f"   ⚠️  Failed to store game names: {e}")
+            else:
+                print("   ⚠️  Skipped storing LLM-extracted game names as requested")
+        except Exception as e:
+            print(f"   ❌ Failed processing {os.path.basename(pdf_path)}: {e}")
+    return
 
 
 if __name__ == "__main__":

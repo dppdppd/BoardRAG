@@ -110,6 +110,26 @@ def improve_fallback_name(filename: str) -> str:
 
 
 def store_game_name(filename: str, game_name: str) -> None:
+    # In DB-less mode, write into catalog instead of DB
+    try:
+        from .. import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            try:
+                from ..catalog import load_catalog, save_catalog, _now_iso  # type: ignore
+            except Exception:
+                return
+            cat = load_catalog()
+            key = Path(filename).name
+            entry = cat.get(key) or {}
+            entry["game_name"] = game_name
+            entry["updated_at"] = _now_iso()
+            cat[key] = entry
+            save_catalog(cat)
+            print(f"✅ Catalog: stored game name '{game_name}' for '{key}'")
+            return
+    except Exception:
+        pass
+    # Legacy DB-backed
     try:
         with suppress_chromadb_telemetry():
             persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
@@ -155,66 +175,43 @@ def extract_and_store_game_name(filename: str) -> str:
 
 
 def get_available_games() -> List[str]:
+    # Prefer catalog when DB-less to avoid legacy DB and noisy telemetry
+    try:
+        from .. import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            try:
+                from ..catalog import list_games_from_catalog  # type: ignore
+                return list_games_from_catalog()
+            except Exception:
+                return []
+    except Exception:
+        pass
+    # Legacy DB-backed fallback
     try:
         embedding_function = get_embedding_function()
         with suppress_chromadb_telemetry():
             persistent_client = chromadb.PersistentClient(path=CHROMA_PATH, settings=get_chromadb_settings())
             db = Chroma(client=persistent_client, embedding_function=embedding_function)
         all_docs = db.get()
-        if not hasattr(get_available_games, '_last_count') or len(all_docs['ids']) == 0:
-            print(f"[DEBUG] get_available_games: Main collection has {len(all_docs['ids'])} documents")
-            if len(all_docs['ids']) == 0:
-                print(f"[DEBUG] get_available_games: Main collection is EMPTY - this is the problem!")
-            get_available_games._last_count = len(all_docs['ids'])  # type: ignore[attr-defined]
-
         filenames = set()
-        for doc_id in all_docs["ids"]:
+        for doc_id in all_docs.get("ids", []):
             if ":" in doc_id:
                 source_path = doc_id.split(":")[0]
-                if "/" in source_path or "\\" in source_path:
-                    filename = os.path.basename(source_path)
-                    if filename.endswith(".pdf"):
-                        filenames.add(filename)
-
-        if not filenames:
-            try:
-                data_root = Path(CHROMA_PATH).parent
-                disk_files: List[str] = []
-                try:
-                    from .. import config as _cfg
-                    data_root = Path(_cfg.DATA_PATH)
-                except Exception:
-                    pass
-                if data_root.exists():
-                    disk_files = [p.name for p in data_root.rglob("*.pdf")]
-                stored_names = get_stored_game_names()
-                for fname in disk_files or stored_names.keys():
-                    base = os.path.basename(fname)
-                    if base.endswith(".pdf"):
-                        filenames.add(base)
-            except Exception:
-                pass
-
+                filename = os.path.basename(source_path)
+                if filename.endswith(".pdf"):
+                    filenames.add(filename)
         stored_names = get_stored_game_names()
         games: List[str] = []
         game_to_files: Dict[str, List[str]] = {}
         for filename in sorted(filenames):
-            if filename in stored_names:
-                proper_name = stored_names[filename]
-            else:
-                try:
-                    proper_name = extract_and_store_game_name(filename)
-                except Exception:
-                    proper_name = improve_fallback_name(filename)
+            proper_name = stored_names.get(filename) or improve_fallback_name(filename)
             simple_name = filename.replace(".pdf", "").lower().replace(" ", "_")
             if proper_name not in games:
                 games.append(proper_name)
             game_to_files.setdefault(proper_name, []).append(simple_name)
-
-        get_available_games._filename_mapping = game_to_files  # type: ignore[attr-defined]
+        setattr(get_available_games, "_filename_mapping", game_to_files)  # type: ignore[attr-defined]
         return sorted(games)
-    except Exception as e:
-        print(f"Error getting available games: {e}")
+    except Exception:
         return []
 
 

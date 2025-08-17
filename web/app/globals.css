@@ -626,18 +626,23 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 /* Back button for fullscreen preview (mobile/all when overlay is active) */
 .preview-back { display: none; }
 .container.preview-open .preview-back {
-  display: inline-grid;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   position: absolute;
   top: 8px;
   left: 8px;
-  width: 40px;
-  height: 40px;
-  min-height: 40px;
-  place-items: center;
+  width: 56px;
+  height: 56px;
+  min-height: 56px;
   z-index: 31;
   background: var(--control-bg);
   border: 1px solid var(--control-border);
   color: var(--text);
+  font-size: 28px;
+  padding: 0;
+  line-height: 1;
+  text-align: center;
 }
 @media (min-width: 1550px) {
   /* Hide back button on wide desktop split view */

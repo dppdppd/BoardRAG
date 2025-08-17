@@ -21,6 +21,7 @@ from ..query import (
     suppress_chromadb_telemetry,
 )
 from .library_service import get_pdf_dropdown_choices
+from ..catalog import set_game_name_for_filenames, get_pdf_choices_from_catalog  # type: ignore
 
 
 def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]]:
@@ -99,8 +100,27 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
             if not matched:
                 failed_names.append(fname)
 
-    # Clean vector store docs referencing deleted files
+    # Clean indexes/mappings referencing deleted files
     if deleted_paths:
+        # DB-less: remove from catalog
+        try:
+            if getattr(config, "DB_LESS", True):
+                from ..catalog import load_catalog, save_catalog  # type: ignore
+                cat = load_catalog()
+                removed = 0
+                for p in deleted_paths:
+                    key = Path(p).name
+                    if key in cat:
+                        try:
+                            cat.pop(key, None)
+                            removed += 1
+                        except Exception:
+                            pass
+                if removed:
+                    save_catalog(cat)
+        except Exception:
+            pass
+        # Legacy DB cleanup (best-effort)
         try:
             with suppress_chromadb_telemetry():
                 persistent_client = chromadb.PersistentClient(
@@ -109,7 +129,7 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
                 db = Chroma(client=persistent_client, embedding_function=get_embedding_function())
             all_docs = db.get()
             ids_to_delete: List[str] = []
-            for doc_id in all_docs["ids"]:
+            for doc_id in all_docs.get("ids", []):
                 source_path = doc_id.split(":")[0]
                 for deleted_path in deleted_paths:
                     if deleted_path in source_path or Path(source_path).name == Path(deleted_path).name:
@@ -117,7 +137,6 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
                         break
             if ids_to_delete:
                 db.delete(ids=ids_to_delete)
-            # Also clean mapping for those filenames in game_names
             try:
                 collection = persistent_client.get_collection("game_names")
                 to_remove = [Path(p).name for p in deleted_paths]
@@ -265,8 +284,9 @@ def delete_games(games_to_delete: List[str]) -> Tuple[str, List[str], List[str]]
 
 
 def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[str], List[str]]:
-    """Assign one or many PDFs to a new game name, then refresh.
+    """Assign one or many PDFs to a new game name.
 
+    In DB-less mode, updates catalog mapping only. In legacy mode, updates DB collection.
     Returns (message, games, pdf_choices)
     """
     from ..query import get_stored_game_names
@@ -282,6 +302,25 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
         else:
             filenames.append(entry.strip())
 
+    # DB-less path: update catalog mapping only
+    try:
+        if getattr(config, "DB_LESS", True):
+            updated = set_game_name_for_filenames(filenames, new_name)
+            games = get_available_games()
+            pdf_choices = get_pdf_choices_from_catalog() or get_pdf_dropdown_choices()
+            if updated:
+                msg = (
+                    f"✅ Assigned {len(filenames)} PDF(s) to game '{new_name}': {', '.join(filenames)}"
+                    if len(filenames) > 1
+                    else f"✅ Assigned '{filenames[0]}' to game '{new_name}'"
+                )
+            else:
+                msg = "ℹ️ No catalog entries updated"
+            return msg, games, pdf_choices
+    except Exception:
+        pass
+
+    # Legacy DB-backed path
     try:
         with suppress_chromadb_telemetry():
             client = chromadb.PersistentClient(
@@ -291,7 +330,6 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
         collection.upsert(ids=filenames, documents=[new_name] * len(filenames))
         if hasattr(get_available_games, "_filename_mapping"):
             delattr(get_available_games, "_filename_mapping")
-        # Refresh
         games = get_available_games()
         pdf_choices = get_pdf_dropdown_choices()
         msg = (
@@ -307,10 +345,12 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
 def get_pdf_dropdown_choices() -> List[str]:
     """Return entries like 'Game Name - filename.pdf' for Admin dropdown.
 
-    Prefer scanning `DATA_PATH` for PDFs. If none are found (e.g., serverless
-    or missing disk files), fall back to the `game_names` collection mapping so
-    the Admin can still rename/delete entries that exist in the DB.
+    In DB-less mode, source from the catalog. Otherwise, scan `DATA_PATH` and fall back to DB mapping.
     """
+    if getattr(config, "DB_LESS", True):
+        choices = get_pdf_choices_from_catalog()
+        if choices:
+            return choices
     data_root = Path(config.DATA_PATH)
     pdf_files = list(data_root.rglob("*.pdf")) if data_root.exists() else []
     name_map = get_stored_game_names()

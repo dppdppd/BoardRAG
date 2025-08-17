@@ -22,9 +22,9 @@ export default function AdminPage() {
   );
   const { data: storageData, mutate: refetchStorage } = useSWR<{ markdown: string }>(`${API_BASE}/storage`, fetcher);
   const { data: blockedData, mutate: refetchBlocked } = useSWR<{ sessions: { sid: string; since?: string | null }[] }>(`${API_BASE}/admin/blocked`, fetcher, { revalidateOnFocus: true });
+  const { data: catalogData, mutate: refetchCatalog } = useSWR<{ entries: { filename: string; file_id?: string; game_name?: string; size_bytes?: number; updated_at?: string }[]; games: string[]; error?: string }>(`${API_BASE}/admin/catalog`, fetcher, { revalidateOnFocus: true });
   const appendConsole = (line: string) => setConsoleText((cur) => (cur ? cur + "\n" + line : line));
 
-  const [deletePdfSelection, setDeletePdfSelection] = useState<string[]>([]);
   const [renameSelection, setRenameSelection] = useState<string[]>([]);
   const [newName, setNewName] = useState<string>("");
   const [unblockSelection, setUnblockSelection] = useState<string[]>([]);
@@ -264,16 +264,16 @@ export default function AdminPage() {
   };
 
   const deletePdfsReq = async () => {
-    appendConsole(`🗑️ Delete PDF requested: ${deletePdfSelection.join(", ") || "<none>"}`);
+    appendConsole(`🗑️ Delete PDF requested: ${renameSelection.join(", ") || "<none>"}`);
     const resp = await fetch(`${API_BASE}/admin/delete-pdfs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(deletePdfSelection),
+      body: JSON.stringify(renameSelection),
     });
     const data = await resp.json();
     setMessage(data.message || "");
     if (data?.message) appendConsole(data.message);
-    setDeletePdfSelection([]);
+    setRenameSelection([]);
     await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
   };
 
@@ -287,7 +287,7 @@ export default function AdminPage() {
     const data = await resp.json();
     setMessage(data.message || "");
     if (data?.message) appendConsole(data.message);
-    await Promise.all([refetchGames(), refetchChoices(), refetchStorage()]);
+    await Promise.all([refetchGames(), refetchChoices(), refetchStorage(), refetchCatalog()]);
   };
 
   const rechunkSelected = async (entries: string[]) => {
@@ -324,6 +324,7 @@ export default function AdminPage() {
   const games = gamesData?.games || [];
   const pdfChoices = pdfChoicesData?.choices || [];
   const blockedSessions = blockedData?.sessions || [];
+  const catalog = catalogData?.entries || [];
 
   const saveModel = async () => {
     setSavingModel(true);
@@ -382,6 +383,101 @@ export default function AdminPage() {
       </div>
 
       <div className="admin-tool alt">
+        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Catalog (DB-less)</h3>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+          <button onClick={async () => {
+            try {
+              appendConsole("📚 Refreshing catalog …");
+              const resp = await fetch(`${API_BASE}/admin/catalog/refresh`, { method: "POST" });
+              let bodyText = "";
+              try { bodyText = await resp.text(); } catch {}
+              let js: any = null;
+              try { js = bodyText ? JSON.parse(bodyText) : null; } catch {}
+              if (!resp.ok) {
+                const detail = (js && (js.message || js.error)) || bodyText || `HTTP ${resp.status}`;
+                throw new Error(detail);
+              }
+              appendConsole("✅ Catalog refreshed");
+              await refetchCatalog();
+            } catch (e: any) {
+              appendConsole(`❌ Catalog refresh failed: ${e?.message || e || "unknown error"}`);
+            }
+          }} style={{ padding: "6px 10px" }}>🔄 Refresh Catalog</button>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {catalog.length === 0 ? "No entries found (place PDFs in /data)" : `${catalog.length} PDF(s)`}
+          </div>
+        </div>
+        <div style={{ maxHeight: 260, overflow: "auto", border: "1px solid #eee", borderRadius: 4 }}>
+          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ textAlign: "left" }}>
+                <th style={{ padding: 6, borderBottom: "1px solid #eee" }} />
+                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Filename</th>
+                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Game</th>
+                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>File ID</th>
+                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Size</th>
+                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {catalog.map((e) => {
+                const selected = renameSelection.includes(e.filename);
+                return (
+                  <tr key={e.filename}>
+                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(ev) => {
+                          const fn = e.filename;
+                          setRenameSelection((cur) => ev.target.checked ? Array.from(new Set([...(cur||[]), fn])) : (cur||[]).filter((v) => v !== fn));
+                        }}
+                      />
+                    </td>
+                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{e.filename}</td>
+                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{e.game_name || "—"}</td>
+                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }} title={e.file_id || ""}>{(e.file_id || "").slice(0, 24) || "—"}</td>
+                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{typeof e.size_bytes === "number" ? `${Math.round(e.size_bytes/1024/1024)} MB` : "—"}</td>
+                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{e.updated_at ? new Date(e.updated_at).toLocaleString() : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
+          <input
+            placeholder="New game name for selected"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            style={{ fontSize: 13, padding: 6, flex: 1 }}
+          />
+          <button
+            onClick={renameReq}
+            disabled={renameSelection.length === 0 || !newName.trim()}
+            style={{ padding: "6px 10px" }}
+          >Assign</button>
+          <button
+            onClick={async () => {
+              appendConsole(`🗑️ Delete PDF requested: ${renameSelection.join(", ") || "<none>"}`);
+              const resp = await fetch(`${API_BASE}/admin/delete-pdfs`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(renameSelection),
+              });
+              const data = await resp.json();
+              setMessage(data.message || "");
+              if (data?.message) appendConsole(data.message);
+              setRenameSelection([]);
+              await Promise.all([refetchGames(), refetchChoices(), refetchStorage(), refetchCatalog()]);
+            }}
+            disabled={renameSelection.length === 0}
+            style={{ padding: "6px 10px" }}
+          >Delete Selected</button>
+        </div>
+      </div>
+
+      <div className="admin-tool alt">
         <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Blocked Sessions</h3>
         <div style={{ display: "grid", gap: 6 }}>
           {blockedSessions.length === 0 ? (
@@ -410,23 +506,7 @@ export default function AdminPage() {
         </div>
       </div>
 
-      <div className="admin-tool alt">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Delete PDF(s)</h3>
-        <select
-          multiple
-          size={6}
-          value={deletePdfSelection}
-          onChange={(e) => setDeletePdfSelection(Array.from(e.target.selectedOptions).map((o) => o.value))}
-          style={{ width: "100%", fontSize: 13, padding: 4 }}
-        >
-          {pdfChoices.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-        <div style={{ marginTop: 6 }}>
-          <button onClick={deletePdfsReq} disabled={deletePdfSelection.length === 0} style={{ padding: "6px 10px" }}>Delete Selected PDF(s)</button>
-        </div>
-      </div>
+      
 
       <div className="admin-tool">
         <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Global Model</h3>
@@ -452,25 +532,7 @@ export default function AdminPage() {
         </div>
       </div>
 
-      <div className="admin-tool alt">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Assign / Reprocess PDF(s)</h3>
-        <label style={{ display: "grid", gap: 4 }}>
-          <span>PDF entries (select for assign or re-chunk)</span>
-          <select multiple size={8} value={renameSelection} onChange={(e) => setRenameSelection(Array.from(e.target.selectedOptions).map((o) => o.value))} style={{ width: "100%", fontSize: 13, padding: 4 }}>
-            {pdfChoices.map((c) => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-        </label>
-        <label style={{ display: "grid", gap: 4, marginTop: 6 }}>
-          <span>New game assignment</span>
-          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Campaign for North Africa, The" style={{ fontSize: 13, padding: 6 }} />
-        </label>
-        <div style={{ marginTop: 6 }}>
-          <button onClick={renameReq} disabled={renameSelection.length === 0 || !newName.trim()} style={{ padding: "6px 10px" }}>Rename</button>
-          <button onClick={() => rechunkSelected(renameSelection)} disabled={renameSelection.length === 0 || busy!==null} style={{ padding: "6px 10px", marginLeft: 6 }}>🧩 Rechunk Selected</button>
-        </div>
-      </div>
+      {/* Removed legacy Assign/Reprocess/Delete control; use Catalog section above */}
 
       <div className="admin-tool" style={{ gridColumn: "1 / -1" }}>
         <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Technical Info</h3>
