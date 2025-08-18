@@ -306,6 +306,14 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                 print("headers:", {k: hdrs.get(k) for k in ["content-type", "transfer-encoding", "cache-control"]})
             except Exception:
                 pass
+            if resp.status_code >= 400:
+                try:
+                    body_text = resp.text
+                    print("=== ANTHROPIC STREAM DEBUG (ERROR BODY) ===")
+                    # Log up to 4000 chars to avoid flooding
+                    print(body_text[:4000])
+                except Exception:
+                    pass
         except Exception:
             pass
         resp.raise_for_status()
