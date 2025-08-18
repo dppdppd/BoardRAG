@@ -499,26 +499,26 @@ async def upload(files: List[UploadFile] = File(...)):
 
 @app.post("/admin/rebuild")
 async def admin_rebuild():
-    return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
 
 
 @app.post("/admin/refresh")
 async def admin_refresh():
-    return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
 
 
 @app.post("/admin/rechunk")
 async def admin_rechunk():
-    return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
+            return {"message": "disabled in DB-less mode", "games": get_available_games(), "pdf_choices": []}
 
 
 @app.get("/admin/rebuild-stream")
 async def admin_rebuild_stream():
-    async def _disabled():
-        yield _sse_event({"type": "log", "line": "⛔ Rebuild disabled in DB-less mode"}).encode("utf-8")
-        yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
-    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
-    return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
+            async def _disabled():
+                yield _sse_event({"type": "log", "line": "⛔ Rebuild disabled in DB-less mode"}).encode("utf-8")
+                yield _sse_event({"type": "done", "message": "disabled"}).encode("utf-8")
+            headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+            return StreamingResponse(_disabled(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/admin/refresh-stream")

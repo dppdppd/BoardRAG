@@ -10,4 +10,10 @@ export function getApiBase(): string {
 
 export const API_BASE = getApiBase();
 
+export function isLocalhost(): boolean {
+  if (typeof window === 'undefined') return false;
+  const h = window.location.hostname || '';
+  return h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0';
+}
+
 

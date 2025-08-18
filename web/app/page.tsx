@@ -12,12 +12,11 @@ import BottomSheetMenu from "./components/BottomSheetMenu";
 // Modal viewer removed; reuse preview panel for all screen sizes
 import PreviewChunksPanel from "./components/PreviewChunksPanel";
 import PdfPreview from "./components/PdfPreview";
-import { usePdfHeadingSpotlight } from "./hooks/usePdfHeadingSpotlight";
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 
 type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; style?: "default" | "brief" | "detailed" };
 
-import { API_BASE } from "../lib/config";
+import { API_BASE, isLocalhost } from "../lib/config";
 
 const fetcher = (url: string) => fetch(url).then((r) => r.json());
 
@@ -55,6 +54,7 @@ const stripMarkdown = (input: string): string => {
 };
 
 export default function HomePage() {
+  const DEBUG_LOCAL = typeof window !== 'undefined' && isLocalhost();
   // Configure pdfjs worker URL once
   useEffect(() => {
     try {
@@ -313,7 +313,7 @@ export default function HomePage() {
         if (m.pinned) {
           const first = m.content.split("\n").find((l) => l.trim().length > 0) || m.content;
           const cleaned = stripMarkdown(first);
-          const trimmed = cleaned.slice(0, 60);
+          const trimmed = cleaned.slice(0, 30);
           labels.push(trimmed);
           userIdxs.push(Math.max(0, userCount - 1));
           assistantAbsIdxs.push(assistantCount);
@@ -552,13 +552,14 @@ export default function HomePage() {
     } as any;
   };
 
-  const startQuery = async (question: string, reuseUserIndex?: number | null) => {
+  const startQuery = async (question: string, reuseUserIndex?: number | null, styleOverride?: PromptStyle) => {
     if (!selectedGame || !question) return;
     setIsStreaming(true);
     let workingMessages = messages;
     if (reuseUserIndex == null) {
       // append new user message
-      workingMessages = [...messages, { role: "user", content: question, style: promptStyle } as Message];
+      const styleForQuery = styleOverride ?? promptStyle;
+      workingMessages = [...messages, { role: "user", content: question, style: styleForQuery } as Message];
       setMessages(workingMessages);
       const numUsers = workingMessages.filter((m) => m.role === "user").length;
       lastSubmittedUserIndexRef.current = numUsers - 1;
@@ -601,7 +602,8 @@ export default function HomePage() {
           return q;
       }
     };
-    const augmentedQuestion = applyPromptStyle(question, promptStyle);
+    const styleForAugment = (typeof styleOverride !== 'undefined' ? styleOverride : promptStyle);
+    const augmentedQuestion = applyPromptStyle(question, styleForAugment);
     // Helper: clear credentials and force login screen
     const kickToLogin = () => {
       try {
@@ -949,6 +951,15 @@ export default function HomePage() {
     startQuery(q, null);
   };
 
+  const onSubmitWithStyle = (style: PromptStyle) => {
+    const q = input.trim();
+    if (!q || !selectedGame) return;
+    try { if (sessionStorage.getItem("boardrag_blocked") === "1") { return; } } catch {}
+    setInput("");
+    setPromptStyle(style);
+    startQuery(q, null, style);
+  };
+
   const onStop = () => {
     // Close EventSource if active
     try { eventRef.current?.close(); } catch {}
@@ -1029,13 +1040,14 @@ export default function HomePage() {
   const [previewPdfMeta, setPreviewPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
   const [chunksExpanded, setChunksExpanded] = useState<boolean>(false);
   const [previewTargetPage, setPreviewTargetPage] = useState<number | null>(null);
+  const [anchorNonce, setAnchorNonce] = useState<number>(0);
   // Stable auth token to avoid rebuilding PDF URLs on every render
   const tokenRef = useRef<string | null>(null);
   // Portal root inside chat for mobile modal alignment
   const chatModalRootRef = useRef<HTMLDivElement | null>(null);
   // Local cache for section chunks to avoid refetching
   const sectionCacheRef = useRef<Map<string, Array<{ text: string; source: string; page?: number; section?: string; section_number?: string; rects_norm?: any }>>>(new Map());
-  const scrollReqRef = useRef<number>(0);
+
   useEffect(() => {
     try {
       tokenRef.current = sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token');
@@ -1066,7 +1078,7 @@ export default function HomePage() {
             try { if (selectedGame) localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, mfile); } catch {}
           }
           if (isFinite(mpage) && mpage > 0) {
-            try { setPreviewTargetPage(mpage); } catch {}
+            try { setPreviewTargetPage(mpage); setAnchorNonce((n) => (n + 1) | 0); } catch {}
           }
         }
       } catch {}
@@ -1099,41 +1111,8 @@ export default function HomePage() {
         const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
         if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
         if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
-        try { setPreviewTargetPage(preferredPage as number); } catch {}
-        // Scroll and spotlight
-        try {
-          const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
-          const targetPage = preferredPage as number;
-          const attempt = (tries: number = 0) => {
-            if (reqId !== scrollReqRef.current) return;
-            const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
-            const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
-            if (el && sc) {
-              try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
-              // Center near expected header location once text layer is ready
-              const waitAndPlace = (attempts: number = 0) => {
-                if (reqId !== scrollReqRef.current) return;
-                const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
-                if (ready) {
-                  setTimeout(() => {
-                    if (reqId !== scrollReqRef.current) return;
-                    // Prefer precise substring if provided
-                    const sub = (() => { try { return (meta && (meta as any).snippet) ? String((meta as any).snippet) : ((meta && (meta as any).header) ? String((meta as any).header) : ''); } catch { return ''; } })();
-                    if (sub) placeSpotlightAtSubstring(el, sub);
-                    else placeSpotlightRing(el, sec);
-                    try { centerOnSpotlight(sc, el, !!pdfSmoothScroll); } catch {}
-                  }, 60);
-                } else if (attempts < 50) {
-                  setTimeout(() => waitAndPlace(attempts + 1), 80);
-                }
-              };
-              waitAndPlace();
-            } else if (tries < 120) {
-              requestAnimationFrame(() => attempt(tries + 1));
-            }
-          };
-          attempt();
-        } catch {}
+        try { setPreviewTargetPage(preferredPage as number); setAnchorNonce((n) => (n + 1) | 0); } catch {}
+        // PdfPreview now owns initial anchoring/scrolling
         setSectionLoading(false);
         return;
       }
@@ -1154,7 +1133,7 @@ export default function HomePage() {
       if (cached && Array.isArray(cached) && cached.length > 0) {
         try { setSectionChunks(cached as any); } catch {}
         try { setPreviewChunks(cached as any); } catch {}
-        // Scroll/spotlight without any network call
+        // PdfPreview now owns initial anchoring/scrolling
         const inferFromChunk = String(cached[0]?.source || '').toLowerCase();
         const currentKnown = (isDesktop && canShowPreview) ? (previewPdfMeta?.filename || '') : (pdfMeta?.filename || '');
         const fn = (currentKnown || inferFromChunk || '').toLowerCase();
@@ -1163,63 +1142,7 @@ export default function HomePage() {
         const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(fn));
         if (!sameModal) setPdfMeta({ filename: fn, pages: undefined });
         if (!samePreview) setPreviewPdfMeta({ filename: fn, pages: undefined });
-        try {
-          const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
-          const pageSet = new Set<number>();
-          cached.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
-          const citedPages = Array.from(pageSet).sort((a,b) => a-b);
-          const targetPage = (preferredPage && preferredPage > 0) ? preferredPage : (citedPages.length > 0 ? citedPages[0] : 1);
-          try { setPreviewTargetPage(targetPage); } catch {}
-          const attempt = (tries: number = 0) => {
-            if (reqId !== scrollReqRef.current) return;
-            const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
-            const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
-            if (el && sc) {
-              try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
-              // Single smooth scroll immediately towards first rect if available; else page top
-              try {
-                const chunksForPage = (cached as any[]).filter((c) => (Number(c.page) + 1) === Number(targetPage));
-                const rects: Array<[number, number, number, number]> = [];
-                chunksForPage.forEach((c: any) => {
-                  let rn: any = c.rects_norm;
-                  try { if (typeof rn === 'string') rn = JSON.parse(rn); } catch {}
-                  if (Array.isArray(rn)) rn.forEach((r: any) => rects.push(r as any));
-                });
-                if (rects.length > 0) {
-                  const [x0, y0, x1, y1] = rects[0];
-                  const pageHeight = el.clientHeight;
-                  const cy = ((y0 + y1) / 2) * pageHeight;
-                  const desired = el.offsetTop + cy - (sc.clientHeight / 2);
-                  const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
-                  const topTarget = Math.max(0, Math.min(desired, maxTop));
-                  sc.scrollTo({ top: topTarget, behavior: 'smooth' });
-                } else {
-                  sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
-                }
-              } catch {
-                sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
-              }
-              const waitAndPlace = (attempts: number = 0) => {
-                if (reqId !== scrollReqRef.current) return;
-                const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
-                if (ready) {
-                  setTimeout(() => {
-                    if (reqId !== scrollReqRef.current) return;
-                    placeSpotlightRing(el, sec);
-                    // After placing the ring, center the scroll on it so we don't land at page top
-                    try { centerOnSpotlight(sc, el, !!pdfSmoothScroll); } catch {}
-                  }, 60);
-                } else if (attempts < 50) {
-                  setTimeout(() => waitAndPlace(attempts + 1), 80);
-                }
-              };
-              waitAndPlace();
-            } else if (tries < 120) {
-              requestAnimationFrame(() => attempt(tries + 1));
-            }
-          };
-          attempt();
-        } catch {}
+        // PdfPreview now owns initial anchoring/scrolling
         setSectionLoading(false);
         return;
       }
@@ -1272,70 +1195,14 @@ export default function HomePage() {
           localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, fn);
         }
       } catch {}
-      // Always attempt to scroll and spotlight, regardless of whether the PDF is already rendered or about to load
-      try {
-        // Debounce: mark this as the latest scroll request
-        const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
-        const pageSet = new Set<number>();
-        chunks.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
-        const citedPages = Array.from(pageSet).sort((a,b) => a-b);
-        const targetPage = (preferredPage && preferredPage > 0) ? preferredPage : (citedPages.length > 0 ? citedPages[0] : 1);
-        try { setPreviewTargetPage(targetPage); } catch {}
-        const byPage = (p: number) => chunks.filter((c: any) => (Number(c.page) + 1) === Number(p));
-        const attemptUnified = (tries: number = 0) => {
-          // If a newer scroll request superseded this one, abort
-          if (reqId !== scrollReqRef.current) return;
-          const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
-          const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${targetPage}'], .preview-panel .pdf-page[data-page-number='${targetPage}']`) as HTMLElement | null;
-          if (el && sc) {
-            try { document.querySelectorAll('.spotlight-ring').forEach((n) => n.remove()); } catch {}
-            // Immediate smooth scroll using first rect if available to avoid delay
-            try {
-              const chunksForPage = chunks.filter((c: any) => (Number(c.page) + 1) === Number(targetPage));
-              const rects: Array<[number, number, number, number]> = [];
-              chunksForPage.forEach((c: any) => {
-                let rn: any = (c as any).rects_norm;
-                try { if (typeof rn === 'string') rn = JSON.parse(rn); } catch {}
-                if (Array.isArray(rn)) rn.forEach((r: any) => rects.push(r as any));
-              });
-              if (rects.length > 0) {
-                const [x0, y0, x1, y1] = rects[0];
-                const pageHeight = el.clientHeight;
-                const cy = ((y0 + y1) / 2) * pageHeight;
-                const desired = el.offsetTop + cy - (sc.clientHeight / 2);
-                const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
-                const topTarget = Math.max(0, Math.min(desired, maxTop));
-                sc.scrollTo({ top: topTarget, behavior: 'smooth' });
-              } else {
-            sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
-              }
-            } catch {
-              sc.scrollTo({ top: el.offsetTop - 8, behavior: 'smooth' });
-            }
-            const waitAndPlace = (attempts: number = 0) => {
-              if (reqId !== scrollReqRef.current) return;
-              const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
-              if (ready) {
-                setTimeout(() => {
-                  if (reqId !== scrollReqRef.current) return;
-                  const sub = (() => { try { return (meta && (meta as any).snippet) ? String((meta as any).snippet) : ((meta && (meta as any).header) ? String((meta as any).header) : ''); } catch { return ''; } })();
-                  if (sub) placeSpotlightAtSubstring(el, sub);
-                  else placeSpotlightRing(el, sec);
-                  // After placing the ring, center the scroll on it so we don't land at page top
-                  try { centerOnSpotlight(sc, el, !!pdfSmoothScroll); } catch {}
-                }, 60);
-              } else if (attempts < 50) {
-                setTimeout(() => waitAndPlace(attempts + 1), 80);
-              }
-            };
-            waitAndPlace();
-          } else if (tries < 120) {
-            // Keep trying while the PDF mounts/renders
-            requestAnimationFrame(() => attemptUnified(tries + 1));
-          }
-        };
-        attemptUnified();
-      } catch {}
+       // Set target page for PdfPreview.tsx to handle
+       try {
+         const pageSet = new Set<number>();
+         chunks.forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
+         const citedPages = Array.from(pageSet).sort((a,b) => a-b);
+         const targetPage = (preferredPage && preferredPage > 0) ? preferredPage : (citedPages.length > 0 ? citedPages[0] : 1);
+         try { setPreviewTargetPage(targetPage); setAnchorNonce((n) => (n + 1) | 0); } catch {}
+       } catch {}
     } catch (e: any) {
       setSectionError(String(e?.message || e || "Failed to load section"));
     } finally {
@@ -1388,13 +1255,7 @@ export default function HomePage() {
     }
   }, [games, selectedGame]);
 
-  // (legacy spotlight code removed)
 
-  // (legacy reflow observer removed)
-
-  // (legacy rect computation removed)
-
-  const { placeSpotlightRing, placeSpotlightAtSubstring, scrollToTargetPage, centerOnSpotlight } = usePdfHeadingSpotlight();
 
   const parseCitationMeta = (title?: string | null): any | undefined => {
     if (!title) return undefined;
@@ -1433,78 +1294,31 @@ export default function HomePage() {
         if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
         try { if (selectedGame) localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, mfile); } catch {}
       }
-      try { setPreviewTargetPage(mpage); } catch {}
-      const reqId = (scrollReqRef.current = (scrollReqRef.current + 1) | 0);
-      const isPageInView = (sc: HTMLElement, el: HTMLElement): boolean => {
-        const top = el.offsetTop;
-        const bottom = top + el.clientHeight;
-        const cur = sc.scrollTop;
-        const visTop = cur - 8;
-        const visBottom = cur + sc.clientHeight + 8;
-        return bottom > visTop && top < visBottom;
-      };
-      const centerOnSubstring = (sc: HTMLElement, pageEl: HTMLElement, substring: string): void => {
+      try { 
+        setPreviewTargetPage(mpage); 
+        setAnchorNonce((n) => (n + 1) | 0);
+      } catch {}
+
+      // Synthesize minimal chunks so the unified preview panel can render/highlight the target
+      try {
+        const syntheticChunks = [
+          { text: sectionText || sec, source: mfile, page: Number(mpage) - 1, section: sec, section_number: sec } as any,
+        ];
+        setPreviewChunks(syntheticChunks as any);
+        // Also seed cache under common keys to enable quick reopening
+        const keys: string[] = [sec];
         try {
-          const norm = (s: string) => s.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
-          const needle = norm(substring || '');
-          const layer = (pageEl.querySelector('.react-pdf__Page__textContent') || pageEl.querySelector('.textLayer')) as HTMLElement | null;
-          if (!layer || !needle) return;
-          const spans = Array.from(layer.querySelectorAll('span')) as HTMLSpanElement[];
-          let targetSpan: HTMLSpanElement | null = null;
-          for (let i = 0; i < spans.length; i++) {
-            let acc = '';
-            for (let j = i; j < spans.length && acc.length < needle.length + 200; j++) {
-              acc += norm(spans[j].textContent || '');
-              if (acc.includes(needle)) { targetSpan = spans[i]; break; }
-            }
-            if (targetSpan) break;
-          }
-          if (!targetSpan) return;
-          const pageRect = pageEl.getBoundingClientRect();
-          const r = targetSpan.getBoundingClientRect();
-          const cy = (r.top + r.bottom) / 2 - pageRect.top; // y within the page
-          const desired = pageEl.offsetTop + cy - (sc.clientHeight / 2);
-          const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
-          const topTarget = Math.max(0, Math.min(desired, maxTop));
-          const cur = sc.scrollTop;
-          const epsilon = 2;
-          if (Math.abs(topTarget - cur) <= epsilon) {
-            // Provide a small visual acknowledgment: bump up slightly then back down
-            const bump = Math.max(0, Math.min(maxTop, Math.max(0, cur - 24)));
-            sc.scrollTo({ top: bump, behavior: 'auto' });
-            setTimeout(() => {
-              sc.scrollTo({ top: topTarget, behavior: (pdfSmoothScroll ? 'smooth' : 'auto') as ScrollBehavior });
-            }, 80);
-          } else {
-            sc.scrollTo({ top: topTarget, behavior: (pdfSmoothScroll ? 'smooth' : 'auto') as ScrollBehavior });
-          }
+          const m = sec.match(/^[A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*/);
+          if (m && m[0] && m[0] !== sec) keys.push(m[0]);
+          const up = sec.toUpperCase(); if (up !== sec) keys.push(up);
         } catch {}
-      };
-      const act = (tries: number = 0) => {
-        if (reqId !== scrollReqRef.current) return;
-        if (tries > 160) return;
-        const sc = document.querySelector('.modal-preview .preview-top, .preview-panel .preview-top') as HTMLElement | null;
-        const el = document.querySelector(`.modal-preview .pdf-page[data-page-number='${mpage}'], .preview-panel .pdf-page[data-page-number='${mpage}']`) as HTMLElement | null;
-        if (!sc || !el) { requestAnimationFrame(() => act(tries + 1)); return; }
-        // If not on the target page yet → single snap/scroll to page top
-        if (!isPageInView(sc, el)) {
-          sc.scrollTo({ top: Math.max(0, el.offsetTop - 8), behavior: (pdfSmoothScroll ? 'smooth' : 'auto') as ScrollBehavior });
-          return;
+        const gameKey = String(selectedGame || '');
+        for (const k of keys) {
+          const ck = `${gameKey}::${k}`;
+          try { sectionCacheRef.current.set(ck, syntheticChunks as any); } catch {}
         }
-        // Already on the page → center on section name once text layer is ready
-        let attempts = 0;
-        const waitText = () => {
-          if (reqId !== scrollReqRef.current) return;
-          const ready = !!(el.querySelector('.react-pdf__Page__textContent span, .textLayer span'));
-          if (ready) {
-            centerOnSubstring(sc, el, sectionText);
-          } else if (attempts++ < 60) {
-            setTimeout(waitText, 60);
-          }
-        };
-        waitText();
-      };
-      act();
+      } catch {}
+      
     } catch {}
   };
 
@@ -1573,6 +1387,7 @@ export default function HomePage() {
                         setPdfMeta={(m) => setPreviewPdfMeta(m as any)}
                         targetPage={previewTargetPage || undefined}
                         adjacentPageWindow={1}
+                        anchorNonce={anchorNonce}
                       />
                     );
                   })()}
@@ -1667,8 +1482,28 @@ export default function HomePage() {
               chatModalRootRef.current
             )
         )}
-          <div className="row title" style={{ gap: 12, justifyContent: 'space-between' }}>
-            <span>Board Game Jippity{selectedGame ? ` — ${selectedGame}` : ""}</span>
+          <div className="row title" style={{ gap: 12, justifyContent: 'space-between', alignItems: 'center' }}>
+            <span className="app-title">Board Game Jippity</span>
+            <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+              <select
+                className="select"
+                value={selectedGame || ""}
+                onChange={(e) => {
+                  if (selectedGame) {
+                    const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
+                    try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
+                  }
+                  setSelectedGame(e.target.value);
+                }}
+                style={{ minWidth: 220 }}
+                aria-label="Game"
+              >
+                <option value="">Select game…</option>
+                {games.map((g) => (
+                  <option key={g} value={g}>{g}</option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {/* Horizontal history strip */}
@@ -1880,9 +1715,12 @@ export default function HomePage() {
             input={input}
             onChangeInput={(v) => setInput(v)}
             onSubmit={onSubmit}
+            onSubmitWithStyle={onSubmitWithStyle}
             onStop={onStop}
             toggleSheet={() => setSheetOpen((s) => !s)}
             selectedGame={selectedGame}
+            promptStyle={promptStyle as any}
+            setPromptStyle={(s) => setPromptStyle(s as any)}
           />
 
           <BottomSheetMenu

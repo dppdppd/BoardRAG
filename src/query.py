@@ -475,6 +475,7 @@ def query_rag(
         # Build user instruction: answer plus spans for spotlight
         instruction = (
             "Answer the user's question based ONLY on the attached PDF(s).\n"
+            "Give the answer a brief title that is a succinct form of the question/ A few words, no more than 5.\n"
             "Include INLINE citations in square brackets immediately after claims, using the exact section code and title from the rule headers, e.g., [6.2 FIREPOWER], [6.4 FIRE STRENGTH].\n"
             "After the prose, return STRICT JSON as the last block with keys: answer (string), spans (array).\n"
             "Each span: {page:int, header:string}.\n"
@@ -1080,6 +1081,7 @@ def stream_query_rag(
         instruction = (
             "Answer the user's question based ONLY on the attached PDF(s).\n"
             "Do NOT include any preamble or meta commentary. Start directly with the answer.\n"
+            "Give the answer a brief title that is a succinct form of the question/ A few words, no more than 5.\n"
             "For EVERY factual claim, make a separate short paragraph and include one inline citation at the end of the paragraph exactly in this form: [<section>: {\"file\":\"<filename.pdf>\", \"page\": <1-based>, \"section\": \"<name of the section>\"}].\n"
             "- <section> is the rule code or range (e.g., 6.2, 6.4.1, 6.41-6.43).\n"
             "- The JSON must include: file (pdf filename), page (1-based), and section (the section number or designation).\n"

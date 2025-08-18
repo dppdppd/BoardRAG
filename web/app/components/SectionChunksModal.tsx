@@ -98,24 +98,9 @@ export default function SectionChunksModal({ open, onClose, loading, error, chun
                     }
                     if (startSpan >= 0) {
                       try {
-                        const host = (el.querySelector('.react-pdf__Page__textContent') || el.querySelector('.textLayer') || el) as HTMLElement;
-                        const hostRect = host.getBoundingClientRect();
                         const pageRect = el.getBoundingClientRect();
                         const sr = (spans[startSpan] as any).getBoundingClientRect?.();
                         if (sr) {
-                          const left = Math.max(0, (sr.left - hostRect.left) - 4);
-                          const top = Math.max(0, (sr.top - hostRect.top) - 2);
-                          const width = Math.max(12, (sr.right - sr.left) + 8);
-                          const height = Math.max(12, (sr.bottom - sr.top) + 6);
-                          try { host.querySelectorAll('.citation-spotlight').forEach((n) => n.remove()); } catch {}
-                          const hole = document.createElement('div');
-                          hole.className = 'citation-spotlight';
-                          hole.style.left = `${left}px`;
-                          hole.style.top = `${top}px`;
-                          hole.style.width = `${width}px`;
-                          hole.style.height = `${height}px`;
-                          hole.style.zIndex = '9999';
-                          host.appendChild(hole);
                           // Return CENTER Y of the heading relative to the page container
                           const headingCenterY = Math.max(0, (sr.top - pageRect.top) + (sr.height ? sr.height / 2 : ((sr.bottom - sr.top) / 2)));
                           return headingCenterY;

@@ -34,39 +34,9 @@ export default function BottomSheetMenu({ open, onClose, games, selectedGame, se
           <button className="btn" onClick={onClose} aria-label="Close menu" title="Close menu" style={{ width: 44, height: 44, minHeight: 44, padding: 0, display: 'inline-grid', placeItems: 'center', lineHeight: 1, fontSize: 28 }}>×</button>
         </div>
         <section className="surface pad section" style={{ marginTop: 12 }}>
-          <summary>Game</summary>
+          <summary>Settings</summary>
           <div style={{ display: "grid", gap: 10, marginTop: 8 }}>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span className="muted">Select game</span>
-              <select
-                className="select"
-                value={selectedGame}
-                onChange={(e) => {
-                  if (selectedGame) {
-                    const oldKey = `boardrag_conv:${sessionId}:${selectedGame}`;
-                    try { localStorage.setItem(oldKey, JSON.stringify(messages)); } catch {}
-                  }
-                  setSelectedGame(e.target.value);
-                }}
-              >
-                <option value="">Select game…</option>
-                {games.map((g) => (
-                  <option key={g} value={g}>{g}</option>
-                ))}
-              </select>
-            </label>
-            <label style={{ display: "grid", gap: 6 }}>
-              <span className="muted">Answer style (saved per game)</span>
-              <select
-                className="select"
-                value={promptStyle}
-                onChange={(e) => setPromptStyle((e.target.value as any) || "default")}
-              >
-                <option value="brief">Brief</option>
-                <option value="default">Normal</option>
-                <option value="detailed">Detailed</option>
-              </select>
-            </label>
+            {/* Style selection moved to Ask button long-press; removed from menu */}
             <label className="row" style={{ gap: 10 }}>
               <input type="checkbox" checked={includeWeb} onChange={(e) => setIncludeWeb(e.target.checked)} />
               <span>Include Web Search</span>

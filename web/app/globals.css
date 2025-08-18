@@ -1,21 +1,5 @@
-/* New spotlight ring */
-.spotlight-ring {
-  position: absolute;
-  pointer-events: none;
-  z-index: 10000;
-  border-radius: 50%;
-  /* filled 50% opacity, no outline */
-  background: rgba(255, 235, 59, 0.5);
-  border: none;
-  box-shadow: none;
-  opacity: 1;
-  animation: spotlightFade 3s ease-out forwards;
-}
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700;800;900&display=swap');
 
-@keyframes spotlightFade {
-  from { opacity: 1; }
-  to { opacity: 0; }
-}
 * { box-sizing: border-box; }
 /* Remove all drop shadows across the app */
 * { box-shadow: none !important; }
@@ -395,7 +379,20 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   --control-min-height: 44px;
   font-size: 16px;
 }
+.select {
+  /* Add comfortable space for caret and replace native caret with a custom one */
+  padding-right: 40px;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%2364748b'><path d='M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px 14px;
+}
+.select::-ms-expand { display: none; }
 .select.compact { min-height: 36px; padding: 8px 12px; border-radius: var(--radius); font-size: 14px; }
+.select.compact { padding-right: 34px; }
 .select:focus, .input:focus {
   outline: none;
   border-color: var(--accent);
@@ -408,6 +405,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   overflow: hidden; /* prevent growth; allow inner scroll */
 }
 .chat-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px; -webkit-overflow-scrolling: touch; min-height: 0; }
+/* Fancy title styling */
+.app-title {
+  font-family: "Cinzel", "Playfair Display", Georgia, "Times New Roman", serif;
+  font-weight: 900;
+  font-size: 32px;
+  letter-spacing: 0.4px;
+}
 /* Provide permanent scrollable whitespace at the end of the chat without pushing the input bar */
 .chat-scroll::after { content: ""; display: block; height: 100vh; }
 .bubble {
