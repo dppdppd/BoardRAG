@@ -297,6 +297,30 @@ def set_game_name_for_filenames(filenames: List[str], new_name: str) -> int:
     return updated
 
 
+def get_pdf_filenames_for_game(game_name: str) -> List[str]:
+    """Return list of PDF filenames associated with a specific game."""
+    if not game_name:
+        return []
+    
+    cat = load_catalog()
+    if not cat:
+        return []
+    
+    key = str(game_name).strip().lower()
+    filenames: List[str] = []
+    
+    for fname, meta in cat.items():
+        stored_game_name = str(meta.get("game_name") or "").strip()
+        if not stored_game_name:
+            continue
+        
+        # Match by game name or filename prefix
+        if stored_game_name.lower() == key or fname.lower().startswith(key):
+            filenames.append(fname)
+    
+    return sorted(filenames)
+
+
 def get_pdf_choices_from_catalog() -> List[str]:
     """Return entries like 'Game Name - filename.pdf' sourced from catalog."""
     cat = load_catalog()

@@ -10,7 +10,6 @@ import InputRow from "./components/InputRow";
 import HistoryStrip from "./components/HistoryStrip";
 import BottomSheetMenu from "./components/BottomSheetMenu";
 // Modal viewer removed; reuse preview panel for all screen sizes
-import PreviewChunksPanel from "./components/PreviewChunksPanel";
 import PdfPreview from "./components/PdfPreview";
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 
@@ -68,8 +67,8 @@ export default function HomePage() {
     if (!input) return input;
     let out = input;
     // Convert inline metadata citations like [6.1: {json}] -> [6.1](section:6.1 "base64(json)")
-    // Support codes like 3.5, 3.5.1, F4, F4.a, A10.2b, 1B6b, and allow optional ranges like 6.41-6.43
-    out = out.replace(/\[((?:[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+(?:\.[A-Za-z0-9]+)*)(?:-\d+(?:\.[A-Za-z0-9]+)*)?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code, json) => {
+    // Support codes like 3.5, 3.5.1, F4, F4.a, A10.2b, 1B6b, ranges like 6.41-6.43, uppercase text like HOTELS, and mixed-case text like Combat Basics
+    out = out.replace(/\[((?:[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+(?:\.[A-Za-z0-9]+)*|[A-Z][A-Z0-9 _@-]*[A-Z0-9]|[A-Z][A-Za-z0-9 _@-]*[A-Za-z0-9])(?:-\d+(?:\.[A-Za-z0-9]+)*)?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code, json) => {
       const encCode = encodeURIComponent(String(code));
       // Put the literal JSON into the title so tooltip shows the human-readable metadata
       const safe = String(json).replace(/'/g, "&#39;");
@@ -1038,7 +1037,6 @@ export default function HomePage() {
   const [previewTitle, setPreviewTitle] = useState<string>("");
   const [previewChunks, setPreviewChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
   const [previewPdfMeta, setPreviewPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
-  const [chunksExpanded, setChunksExpanded] = useState<boolean>(false);
   const [previewTargetPage, setPreviewTargetPage] = useState<number | null>(null);
   const [anchorNonce, setAnchorNonce] = useState<number>(0);
   // Stable auth token to avoid rebuilding PDF URLs on every render
@@ -1212,18 +1210,83 @@ export default function HomePage() {
 
   // Load last-used PDF filename when game changes (for preview context)
   useEffect(() => {
-    if (!selectedGame) return;
-    try {
-      const key = `boardrag_last_pdf:${selectedGame}`;
-      const fn = localStorage.getItem(key) || '';
-      if (fn) {
-        setPdfMeta({ filename: fn, pages: undefined });
-        setPreviewPdfMeta({ filename: fn, pages: undefined });
-      } else {
+    if (!selectedGame) {
+      // Clear PDF previewer when no game is selected
+      setPdfMeta({ filename: undefined, pages: undefined });
+      setPreviewPdfMeta({ filename: undefined, pages: undefined });
+      return;
+    }
+
+    let cancelled = false; // Track if this effect was cancelled by a new game selection
+
+    const loadPdfForGame = async () => {
+      try {
+        // Clear PDF previewer immediately when game switches
         setPdfMeta({ filename: undefined, pages: undefined });
         setPreviewPdfMeta({ filename: undefined, pages: undefined });
+
+        // Short delay to let any previous PDF components fully unmount
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
+        if (cancelled) return; // Exit early if user switched games again
+
+        // Check for stored PDF preference for this game
+        const key = `boardrag_last_pdf:${selectedGame}`;
+        const storedPdf = localStorage.getItem(key) || '';
+        
+        if (storedPdf) {
+          if (!cancelled) {
+            // Load stored PDF preference
+            setPdfMeta({ filename: storedPdf, pages: undefined });
+            setPreviewPdfMeta({ filename: storedPdf, pages: undefined });
+          }
+          return;
+        }
+
+        // No stored preference - fetch PDFs for this game to decide what to do
+        let token: string | null = null;
+        try { 
+          token = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token"); 
+        } catch {}
+        
+        const url = new URL(`${API_BASE}/game-pdfs`);
+        url.searchParams.set("game", selectedGame);
+        if (token) url.searchParams.set("token", token);
+        
+        const resp = await fetch(url.toString(), { 
+          headers: token ? { Authorization: `Bearer ${token}` } as any : undefined 
+        });
+        
+        if (cancelled) return; // Exit early if user switched games again
+        
+        if (!resp.ok) {
+          console.warn(`Failed to fetch PDFs for game ${selectedGame}: ${resp.status}`);
+          return;
+        }
+
+        const data = await resp.json();
+        const pdfs = data.pdfs || [];
+
+        if (!cancelled && pdfs.length === 1) {
+          // Exactly one PDF - auto-load it
+          const pdfFilename = pdfs[0];
+          setPdfMeta({ filename: pdfFilename, pages: undefined });
+          setPreviewPdfMeta({ filename: pdfFilename, pages: undefined });
+        }
+        // Note: Zero PDFs or multiple PDFs - keep previewer empty (already cleared above)
+      } catch (error) {
+        if (!cancelled) {
+          console.warn(`Error loading PDF for game ${selectedGame}:`, error);
+        }
       }
-    } catch {}
+    };
+
+    loadPdfForGame();
+
+    // Cleanup function to cancel ongoing operations when game changes
+    return () => {
+      cancelled = true;
+    };
   }, [selectedGame]);
 
   // If we have a last-used section for the game, open it automatically (desktop preview only)
@@ -1393,12 +1456,7 @@ export default function HomePage() {
                   })()}
                 </div>
               )}
-              <PreviewChunksPanel
-                loading={sectionLoading}
-                chunks={previewChunks as any}
-                expanded={chunksExpanded}
-                setExpanded={(v) => setChunksExpanded(v)}
-              />
+              {/* Chunk reveal panel removed */}
                   </div>
                         </div>
           )}
@@ -1470,12 +1528,7 @@ export default function HomePage() {
                       })()}
                 </div>
               )}
-                  <PreviewChunksPanel
-                    loading={sectionLoading}
-                    chunks={previewChunks as any}
-                    expanded={chunksExpanded}
-                    setExpanded={(v) => setChunksExpanded(v)}
-                  />
+                  {/* Chunk reveal panel removed */}
             </div>
                 <button className="btn preview-back" onClick={() => setPreviewOpen(false)} aria-label="Back" title="Back">←</button>
               </div>,
@@ -1537,9 +1590,14 @@ export default function HomePage() {
                   props["data-user-index"] = userCounter;
                   ucForHandlers = userCounter;
                 }
-                const isUser = m.role === "user";
-                const showActions = isUser && ucForHandlers != null && retryableUsers.includes(ucForHandlers);
-                return (
+                                 const isUser = m.role === "user";
+                 const showActions = isUser && ucForHandlers != null && retryableUsers.includes(ucForHandlers);
+                 // Add waiting animation class to the last submitted user message when waiting for stream to start
+                 const isWaitingForResponse = isUser && isStreaming && ucForHandlers === lastSubmittedUserIndexRef.current && !firstTokenSeenRef.current;
+                 if (isWaitingForResponse) {
+                   props.className += " waiting-response";
+                 }
+                 return (
                   <React.Fragment key={i}>
                     {m.role === 'assistant' ? (
                       <div className="assistant-row" style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) auto', columnGap: 6, alignItems: 'end' }}>
@@ -1611,12 +1669,7 @@ export default function HomePage() {
                       </div>
                     ) : (
                       <div {...props}>
-                        {/* subtle indicator of chosen style */}
-                        {m.style && (
-                          <span style={{ position: 'absolute', right: 8, top: 6, fontSize: 11, opacity: 0.6 }} title={`Style: ${m.style === 'default' ? 'normal' : m.style}`} aria-label={`Style: ${m.style === 'default' ? 'normal' : m.style}`}>
-                            {m.style === 'default' ? 'normal' : m.style}
-                          </span>
-                        )}
+                        {/* style indicator removed */}
                         <ReactMarkdown
                           // Allow custom schemes like section: without sanitization interfering
                           {...({ urlTransform: (url: string) => url } as any)}

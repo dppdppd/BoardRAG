@@ -31,6 +31,16 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
   const [renderWindowDown, setRenderWindowDown] = useState<number>(0);
   const [measuredPageHeight, setMeasuredPageHeight] = useState<number | null>(null);
   const [dynamicSpan, setDynamicSpan] = useState<number>(2);
+  const [currentScrollCenter, setCurrentScrollCenter] = useState<number | null>(null);
+  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [isInitialGameLoad, setIsInitialGameLoad] = useState<boolean>(true); // Start as true for initial load
+  const [previousAnchorCenter, setPreviousAnchorCenter] = useState<number | null>(null);
+  const prevTargetPageRef = useRef<number | null>(null);
+  // Default to US Letter aspect ratio ~ 11/8.5 ≈ 1.294 to minimize jump before we can measure
+  const [pageAspectRatio, setPageAspectRatio] = useState<number>(1.294);
+  // Suppress manual scroll tracking during programmatic anchor scrolls
+  const programmaticScrollRef = useRef<boolean>(false);
+  const programmaticTimerRef = useRef<NodeJS.Timeout | null>(null);
   const inferred = (chunks && chunks[0] && chunks[0].source ? String(chunks[0].source) : '').toLowerCase();
   const filename = String((pdfMeta && pdfMeta.filename) ? pdfMeta.filename : inferred).toLowerCase();
   const pageSet = new Set<number>();
@@ -55,10 +65,10 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     pages = totalPages ? Array.from({ length: totalPages }, (_v, i) => i + 1) : (citedPages.length > 0 ? citedPages : [1]);
   }
   const targetPageResolved = computedTarget;
-  // Use the requested target as the stable center to avoid mid-scroll window shifts
-  const effectiveCenter = targetPageResolved;
+  // Use current scroll center for manual scrolling, fall back to citation target
+  const effectiveCenter = currentScrollCenter ?? targetPageResolved;
   const pdfUrl = filename ? `${API_BASE}/pdf?filename=${encodeURIComponent(filename)}${token ? `&token=${encodeURIComponent(token)}` : ''}` : '';
-  if (!pdfUrl) return <div className="muted">Missing PDF filename.</div>;
+  if (!pdfUrl || !filename) return <div className="muted">Missing PDF filename.</div>;
   const byPage = (p: number) => chunks.filter((c) => (Number(c.page) + 1) === Number(p));
   // Measure available width and expand render window near viewport during manual scroll
   useEffect(() => {
@@ -83,27 +93,101 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     const onScroll = () => {
       const root = rootRef.current; if (!root) return;
       const sc = findScrollContainer(root); if (!sc) return;
+      
+      // Update dynamic span based on viewport
       if (measuredPageHeight) {
         const approxPages = Math.max(2, Math.ceil(sc.clientHeight / Math.max(1, measuredPageHeight)) + 1);
         setDynamicSpan((prev) => Math.max(prev, approxPages));
+      }
+      
+      // Track which page is currently in the center of the viewport during manual scrolling,
+      // but ignore events triggered by our own programmatic anchor scrolls
+      if (totalPages && !programmaticScrollRef.current) {
+        // Throttle scroll center updates for better performance
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current);
+        }
+        
+        scrollTimeoutRef.current = setTimeout(() => {
+          const scrollTop = sc.scrollTop;
+          const viewportCenter = scrollTop + (sc.clientHeight / 2);
+          
+          // Try to find the actual page element closest to viewport center
+          let bestPage = 1;
+          let bestDistance = Infinity;
+          
+          for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+            const pageEl = root.querySelector(`.pdf-page[data-page-number='${pageNum}']`) as HTMLElement;
+            if (pageEl) {
+              const pageHeight = pageEl.offsetHeight || measuredPageHeight || 800;
+              let pageTopWithin = 0;
+              try {
+                pageTopWithin = offsetTopWithin(pageEl, sc);
+              } catch {
+                pageTopWithin = pageEl.offsetTop;
+              }
+              const pageCenter = pageTopWithin + (pageHeight / 2);
+              const distance = Math.abs(pageCenter - viewportCenter);
+              
+              if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPage = pageNum;
+              }
+            }
+          }
+          
+          setCurrentScrollCenter(bestPage);
+        }, 100); // 100ms throttle
       }
     };
     update();
     window.addEventListener('resize', update);
     document.addEventListener('scroll', onScroll, true);
-    return () => { window.removeEventListener('resize', update); document.removeEventListener('scroll', onScroll, true); };
+    return () => { 
+      window.removeEventListener('resize', update); 
+      document.removeEventListener('scroll', onScroll, true);
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+        scrollTimeoutRef.current = null;
+      }
+      if (programmaticTimerRef.current) {
+        clearTimeout(programmaticTimerRef.current);
+        programmaticTimerRef.current = null;
+      }
+    };
   }, [measuredPageHeight]);
   const containerWidth = measuredWidth ?? 738; // stable default to reduce reflow
   // Back to full list of pages; we will render placeholders for non-window pages
   const allPages: number[] = (typeof totalPages === 'number' && totalPages > 0)
     ? Array.from({ length: totalPages }, (_v, i) => i + 1)
     : [Number(targetPageResolved) || 1];
+  const pageContainerHeight = measuredPageHeight ?? Math.round((containerWidth || 738) * pageAspectRatio);
   const shouldRenderReal = (p: number): boolean => {
     if (typeof effectiveCenter === 'number' && typeof totalPages === 'number') {
       const isAnchoring = anchoringRef.current === true;
-      const lower = isAnchoring ? adjacentPageWindow : dynamicSpan;
-      const upper = isAnchoring ? Math.max(adjacentPageWindow, renderWindowDown) : dynamicSpan;
-      return p >= Math.max(1, effectiveCenter - lower) && p <= Math.min(totalPages, effectiveCenter + upper);
+      const isManualScrolling = currentScrollCenter !== null; // allow manual rendering even during anchoring
+      
+      if (isManualScrolling) {
+        // During manual scrolling, use a generous window to ensure smooth reading
+        const scrollWindow = Math.max(dynamicSpan, 3); // At least 3 pages in each direction
+        return p >= Math.max(1, effectiveCenter - scrollWindow) && p <= Math.min(totalPages, effectiveCenter + scrollWindow);
+      } else {
+        // During citation anchoring, render both previous location and destination to prevent jarring transitions
+        const lower = adjacentPageWindow;
+        const upper = Math.max(adjacentPageWindow, renderWindowDown);
+        
+        // Check if page is in destination area
+        const inDestination = p >= Math.max(1, effectiveCenter - lower) && p <= Math.min(totalPages, effectiveCenter + upper);
+        
+        // Check if page is in previous area (during transition)
+        let inPrevious = false;
+        if (isAnchoring && previousAnchorCenter !== null) {
+          const prevWindow = Math.max(dynamicSpan, 3); // Use a generous window for previous area
+          inPrevious = p >= Math.max(1, previousAnchorCenter - prevWindow) && p <= Math.min(totalPages, previousAnchorCenter + prevWindow);
+        }
+        
+        return inDestination || inPrevious;
+      }
     }
     return p === (Number(targetPageResolved) || 1);
   };
@@ -304,44 +388,120 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     
     const rect = getCitationRectInPage(pageEl);
     
+    // Determine scroll behavior: instant for game switches, smooth for regular citations
+    const scrollBehavior = isInitialGameLoad ? 'auto' : 'smooth';
+    
     if (rect) {
       const rectCenterY = pageTop + rect.top + rect.height / 2;
       const currentCenterY = viewTop + sc.clientHeight / 2;
       const nearCitation = Math.abs(rectCenterY - currentCenterY) < 24;
       
-      if (nearCitation) {
-        // Already centered on citation → provide a gentle visual acknowledgment bump
+      if (nearCitation && !isInitialGameLoad) {
+        // Already centered on citation → provide a gentle visual acknowledgment bump (but only for regular citations)
         const currentTop = sc.scrollTop;
         const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
         const bumpUp = Math.max(0, Math.min(maxTop, currentTop - 8));
+        // Mark as programmatic during our controlled scrolls to avoid jitter
+        programmaticScrollRef.current = true;
+        if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
         sc.scrollTo({ top: bumpUp, behavior: 'smooth' });
         setTimeout(() => {
           const settleTop = Math.max(0, rectCenterY - sc.clientHeight / 2);
           sc.scrollTo({ top: settleTop, behavior: 'smooth' });
+          // Give the browser a moment to settle, then re-enable manual tracking
+          programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, 350);
         }, 120);
       } else {
         // Scroll to center the citation
         const top = Math.max(0, rectCenterY - sc.clientHeight / 2);
-        sc.scrollTo({ top, behavior: 'smooth' });
+        programmaticScrollRef.current = true;
+        if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
+        sc.scrollTo({ top, behavior: scrollBehavior });
+        // For instant jumps, clear immediately; for smooth, clear after a short delay
+        const delay = scrollBehavior === 'auto' ? 0 : 300;
+        programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
       }
-      if (retryCount === 0) anchoringRef.current = false;
+      if (retryCount === 0) {
+        anchoringRef.current = false;
+        setIsInitialGameLoad(false); // Reset after first scroll
+        // Clear previous anchor center after successful scroll
+        setTimeout(() => setPreviousAnchorCenter(null), 500); // Small delay to let scroll animation finish
+      }
       return true;
     } else {
       // No citation found - go to page top as fallback
       const topTo = Math.max(0, pageTop);
-      sc.scrollTo({ top: topTo, behavior: 'smooth' });
-      if (retryCount === 0) anchoringRef.current = false;
+      programmaticScrollRef.current = true;
+      if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
+      sc.scrollTo({ top: topTo, behavior: scrollBehavior });
+      const delay = scrollBehavior === 'auto' ? 0 : 300;
+      programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
+      if (retryCount === 0) {
+        anchoringRef.current = false;
+        setIsInitialGameLoad(false); // Reset after first scroll
+        // Clear previous anchor center after successful scroll
+        setTimeout(() => setPreviousAnchorCenter(null), 500); // Small delay to let scroll animation finish
+      }
       return true;
     }
   };
 
 
 
+  // Track when filename changes to detect game switches
+  const prevFilenameRef = useRef<string>(filename);
+  useEffect(() => {
+    if (prevFilenameRef.current !== filename && prevFilenameRef.current !== '' && filename !== '') {
+      // Filename changed - this is likely a game switch, use instant scrolling
+      setIsInitialGameLoad(true);
+    }
+    prevFilenameRef.current = filename;
+  }, [filename]);
+
+  // Track anchor nonce changes to detect citation clicks (vs filename changes)
+  const prevAnchorNonceRef = useRef<number>(anchorNonce || 0);
+  useEffect(() => {
+    const currentNonce = anchorNonce || 0;
+    if (prevAnchorNonceRef.current !== currentNonce && prevAnchorNonceRef.current !== 0) {
+      // Anchor nonce changed - this is a citation click, use smooth scrolling
+      setIsInitialGameLoad(false);
+    }
+    prevAnchorNonceRef.current = currentNonce;
+  }, [anchorNonce]);
+
   // Reset and attempt anchoring on change
   useEffect(() => {
     anchoringRef.current = false; // Reset to allow new anchoring
     currentTargetRef.current = Number(targetPageResolved) || null;
     setRenderWindowDown(0);
+    
+    // Capture current scroll center before anchoring (for smooth transitions)
+    // Only do this for citation clicks, not game switches
+    if (!isInitialGameLoad) {
+      if (currentScrollCenter !== null) {
+        setPreviousAnchorCenter(currentScrollCenter);
+      } else if (prevTargetPageRef.current !== null) {
+        // Use the previous target page if we don't have a current scroll center
+        setPreviousAnchorCenter(prevTargetPageRef.current);
+      } else if (typeof targetPageResolved === 'number') {
+        // Final fallback to current target
+        setPreviousAnchorCenter(targetPageResolved);
+      }
+    } else {
+      // For game switches, clear any previous anchor center
+      setPreviousAnchorCenter(null);
+    }
+    
+    // Update the previous target reference
+    prevTargetPageRef.current = Number(targetPageResolved) || null;
+    
+    // Reset scroll center tracking to let citation take control
+    setCurrentScrollCenter(null);
+    // Clear any pending scroll center updates
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+      scrollTimeoutRef.current = null;
+    }
     // If total pages are known, attempt immediately; otherwise wait for render callback
     if (typeof totalPages === 'number' && isFinite(totalPages) && totalPages > 0) {
       anchorPhaseRef.current = 0;
@@ -353,19 +513,23 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
 
   return (
     <div ref={rootRef} className="pdf-preview-root">
-    <Document key={'preview-doc'} file={pdfUrl} onLoadSuccess={(info: { numPages: number }) => setPdfMeta({ filename, pages: info.numPages })} loading={null}>
+    <Document 
+      key={`preview-doc-${filename || 'empty'}`} 
+      file={pdfUrl} 
+      onLoadSuccess={(info: { numPages: number }) => setPdfMeta({ filename, pages: info.numPages })} 
+      loading={null}
+    >
       {allPages.map((p) => {
         const renderReal = shouldRenderReal(p);
         if (!renderReal) {
-          const ph = measuredPageHeight ?? Math.round((containerWidth || 738) * 1.35);
           return (
-            <div key={p} className="pdf-page placeholder" data-page-number={p} data-target-section={title} style={{ height: ph }}>
+            <div key={p} className="pdf-page placeholder" data-page-number={p} data-target-section={title} style={{ height: pageContainerHeight }}>
               <div className="muted" style={{ fontSize: 12 }}>{`Page ${p}`}</div>
             </div>
           );
         }
         return (
-          <div key={p} className="pdf-page" data-page-number={p} data-target-section={title}>
+          <div key={p} className="pdf-page" data-page-number={p} data-target-section={title} style={{ minHeight: pageContainerHeight }}>
             <Page
               pageNumber={p}
               width={containerWidth}
@@ -389,7 +553,12 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
                   try {
                     const pageViewport = el.getBoundingClientRect();
                     // Capture a reasonable height to use for placeholders
-                    if (!measuredPageHeight && pageViewport.height) setMeasuredPageHeight(Math.round(pageViewport.height));
+                    if (!measuredPageHeight && pageViewport.height) {
+                      const h = Math.round(pageViewport.height);
+                      setMeasuredPageHeight(h);
+                      const w = pageViewport.width || containerWidth || 738;
+                      if (w > 0) setPageAspectRatio(h / w);
+                    }
                     const existing = el.querySelectorAll('.rect-overlay'); existing.forEach((n) => n.remove());
                     const rects: Array<[number, number, number, number]> = [];
                     chunksForPage.forEach((c) => {

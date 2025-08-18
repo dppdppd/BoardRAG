@@ -342,6 +342,38 @@ async def list_pdf_choices():
     return {"choices": get_pdf_dropdown_choices()}
 
 
+@app.get("/game-pdfs")
+async def get_game_pdfs(game: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    """Get list of PDF filenames associated with a specific game."""
+    # Enforce auth
+    _role = _require_auth(authorization, token)
+    
+    if not game:
+        return {"pdfs": []}
+    
+    try:
+        from src import config as _cfg  # type: ignore
+        if bool(getattr(_cfg, "DB_LESS", True)):
+            from src.catalog import get_pdf_filenames_for_game  # type: ignore
+            return {"pdfs": get_pdf_filenames_for_game(game)}
+    except Exception:
+        pass
+    
+    # Fallback: use stored game names mapping for legacy mode
+    try:
+        from src.query import get_stored_game_names  # type: ignore
+        import os
+        stored_map = get_stored_game_names()
+        game_key = game.strip().lower()
+        filenames = []
+        for fname, gname in stored_map.items():
+            if gname.lower() == game_key:
+                filenames.append(os.path.basename(fname))
+        return {"pdfs": sorted(filenames)}
+    except Exception:
+        return {"pdfs": []}
+
+
 @app.get("/storage")
 async def storage_stats():
     return {"markdown": format_storage_info()}

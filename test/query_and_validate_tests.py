@@ -10,7 +10,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.query import query_rag
+from src.query import stream_query_rag
 
 
 def query_and_validate(question: str, expected_response: str, selected_game: str = None) -> bool:
@@ -26,16 +26,15 @@ def query_and_validate(question: str, expected_response: str, selected_game: str
         bool: True if the response matches expectations, False otherwise
     """
     try:
-        # Query the RAG system
-        result = query_rag(
+        # Query the RAG system (streaming)
+        token_gen, _meta = stream_query_rag(
             query_text=question,
             selected_game=selected_game,
             chat_history=None,
             game_names=None,
-            enable_web=False
+            enable_web=False,
         )
-        
-        response_text = result.get("response_text", "").strip()
+        response_text = "".join(list(token_gen)).strip()
         expected = expected_response.strip()
         
         print(f"Question: {question}")

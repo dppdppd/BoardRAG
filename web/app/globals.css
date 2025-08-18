@@ -367,6 +367,27 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 .spinner { width: 18px; height: 18px; border: 2px solid var(--control-border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Gradient wave animation for waiting user messages */
+.bubble.user.waiting-response {
+  background: linear-gradient(
+    90deg,
+    var(--accent),
+    color-mix(in oklab, var(--accent) 70%, white),
+    var(--accent)
+  );
+  background-size: 200% 100%;
+  animation: gradientWave 3s ease-in-out infinite;
+}
+
+@keyframes gradientWave {
+  0% {
+    background-position: 0% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
 .indicator { display: flex; align-items: center; }
 .select, .input {
   background: var(--control-bg);
@@ -554,30 +575,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   }
   .preview-body { padding: 8px; flex: 1; position: relative; overflow: hidden; }
   .preview-top { height: 100%; overflow: auto; }
-  .preview-bottom { 
-    position: absolute; 
-    bottom: 0; 
-    left: 8px; 
-    right: 8px; 
-    background: var(--surface); 
-    border: 1px solid var(--border); 
-    border-radius: var(--radius) var(--radius) 0 0; 
-    padding: 12px; 
-    max-height: 60%; 
-    overflow: auto; 
-    box-shadow: 0 -8px 24px rgba(0,0,0,.15), 0 -2px 8px rgba(0,0,0,.1);
-    transform: translateY(100%);
-    transition: transform 0.3s ease-out;
-  }
-  .preview-bottom.expanded {
-    transform: translateY(0);
-  }
-  .chunks-toggle {
-    position: absolute;
-    bottom: 12px;
-    right: 20px;
-    z-index: 10;
-  }
+  
   
   /* Empty state background text */
   .preview-panel:not(.has-content)::before {

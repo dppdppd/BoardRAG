@@ -397,6 +397,8 @@ def query_rag(
     Returns:
         Dict: The response from the RAG model.
     """
+    # Deprecated: non-streaming path removed. Do not use.
+    raise NotImplementedError("query_rag (non-streaming) has been removed. Use stream_query_rag instead.")
     
     # DB-less mode: use Anthropic Sonnet 4 Files API with citations, no vector DB
     # Prefer cfg.DB_LESS defaulting to True when env is absent
@@ -1206,11 +1208,23 @@ def main():
     include_sources = args.include_sources
     include_context = args.include_context
 
-    response = query_rag(query_text, selected_game, game_names=args.game_names)
+    # Use streaming path and aggregate tokens for CLI output
+    token_gen, meta = stream_query_rag(
+        query_text=query_text,
+        selected_game=selected_game,
+        chat_history=None,
+        game_names=args.game_names,
+        enable_web=False,
+    )
+
+    aggregated = ""
+    for chunk in token_gen:
+        aggregated += str(chunk)
 
     # Extract game name from first source
-    if response["sources"]:
-        first_src = response["sources"][0]
+    sources = meta.get("sources", []) if isinstance(meta, dict) else []
+    if sources:
+        first_src = sources[0]
         if isinstance(first_src, dict):
             src_path = first_src.get("filepath", "")
         else:
@@ -1219,13 +1233,13 @@ def main():
     else:
         game_name = "Game"
 
-    response_text = f"🤖 {game_name}: {response['response_text']}"
+    response_text = f"🤖 {game_name}: {aggregated}"
 
     if include_sources:
-        response_text += f"\n\n\n 📜Sources: {response['sources']}"
+        response_text += f"\n\n\n 📜Sources: {sources}"
 
     if include_context:
-        response_text += f"\n\n\n 🌄Context: {response['context']}"
+        response_text += f"\n\n\n 🌄Context: {meta.get('context', '')}"
 
     print(response_text)
 
