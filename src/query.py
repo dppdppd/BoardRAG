@@ -433,7 +433,9 @@ def query_rag(
                 key = str(selected_game).strip().lower()
                 pdfs = [p for p in pdfs if key in p.name.lower()]
             # Upload and cache file_ids if needed
-            cache_path = _P(".cache") / "anthropic_files.json"
+            # Persist cache under data/catalog alongside catalog.json so Railway keeps it
+            from .config import DATA_PATH as _DATA_PATH  # type: ignore
+            cache_path = _P(_DATA_PATH) / "catalog" / "anthropic_files.json"
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 import json as _json

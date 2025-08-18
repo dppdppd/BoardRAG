@@ -10,7 +10,10 @@ from . import config as cfg  # type: ignore
 from .llm_outline_helpers import upload_pdf_to_anthropic_files, anthropic_pdf_messages_with_file
 
 
-CATALOG_PATH = Path(".cache/games_catalog.json")
+# Persist the catalog under the persistent data volume, e.g., /data on Railway
+# Use a dedicated subdirectory to avoid cluttering the PDF directory
+CATALOG_DIR = Path(getattr(cfg, "DATA_PATH", "data")) / "catalog"
+CATALOG_PATH = CATALOG_DIR / "games_catalog.json"
 
 
 def _now_iso() -> str:
@@ -31,7 +34,7 @@ def load_catalog() -> Dict[str, dict]:
 
 def save_catalog(cat: Dict[str, dict]) -> None:
     try:
-        CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CATALOG_DIR.mkdir(parents=True, exist_ok=True)
         CATALOG_PATH.write_text(json.dumps(cat, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
