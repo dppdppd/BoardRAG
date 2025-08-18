@@ -53,6 +53,9 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   grid-template-columns: 1fr;
   justify-content: center;
 }
+@supports (height: 100svh) {
+  .container { height: 100svh; }
+}
 .container > * { min-height: 0; }
 
 /* Desktop chat-only: center the chat */
@@ -184,6 +187,9 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     gap: 0;
     box-sizing: border-box;
     place-items: center;
+  }
+  @supports (height: 100svh) {
+    .container { height: 100svh; }
   }
   .chat.surface { 
     width: 738px; 
@@ -433,8 +439,23 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   font-size: 32px;
   letter-spacing: 0.4px;
 }
+@media (max-width: 768px) {
+  .app-title {
+    font-size: 26px;
+  }
+}
+@media (max-width: 480px) {
+  .app-title {
+    font-size: 22px;
+  }
+}
 /* Provide permanent scrollable whitespace at the end of the chat without pushing the input bar */
-.chat-scroll::after { content: ""; display: block; height: 100vh; }
+.chat-scroll::after { content: ""; display: block; height: 50vh; }
+@media (max-width: 799px) {
+  @supports (height: 100svh) {
+    .chat-scroll::after { height: 30svh; }
+  }
+}
 .bubble {
   margin: 3px 0;
   max-width: 92%;
@@ -557,6 +578,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   pointer-events: none;
   display: flex;
   flex-direction: column;
+}
+@supports (height: 100svh) {
+  .preview-panel { height: 100svh; }
 }
 @media (min-width: 1550px) {
   .preview-panel { 

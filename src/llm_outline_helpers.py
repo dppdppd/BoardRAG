@@ -346,7 +346,20 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                 try:
                     # Print a few important headers
                     hdrs = {k.lower(): v for k, v in resp.headers.items()}
-                    print("headers:", {k: hdrs.get(k) for k in ["content-type", "transfer-encoding", "cache-control"]})
+                    keys = [
+                        "content-type",
+                        "transfer-encoding",
+                        "cache-control",
+                        "anthropic-request-id",
+                        "request-id",
+                        "x-request-id",
+                        "retry-after",
+                        "x-ratelimit-remaining-requests",
+                        "x-ratelimit-remaining-tokens",
+                        "x-ratelimit-reset-requests",
+                        "x-ratelimit-reset-tokens",
+                    ]
+                    print("headers:", {k: hdrs.get(k) for k in keys})
                 except Exception:
                     pass
                 if resp.status_code >= 400:
@@ -355,6 +368,25 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                         print("=== ANTHROPIC STREAM DEBUG (ERROR BODY) ===")
                         # Log up to 4000 chars to avoid flooding
                         print(body_text[:4000])
+                        # Attempt to parse and show structured fields
+                        try:
+                            js_err = resp.json()
+                            err = (js_err.get("error") if isinstance(js_err, dict) else None) or js_err
+                            if isinstance(err, dict):
+                                etype = str(err.get("type") or err.get("code") or "")
+                                emsg = str(err.get("message") or err.get("detail") or "")
+                                edet = err.get("details")
+                                if etype:
+                                    print("error.type:", etype)
+                                if emsg:
+                                    print("error.message:", emsg)
+                                if edet is not None:
+                                    try:
+                                        print("error.details:", str(edet)[:1000])
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     # Transient HTTP errors: retry without raising
