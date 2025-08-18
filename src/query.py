@@ -1151,6 +1151,10 @@ def stream_query_rag(
                             yield "API USAGE LIMIT HIT"
                             # stop processing this file
                             continue
+                        # Anthropic overloaded / transient error surfaced by stream helper
+                        if 'overloaded' in (str(e).lower() + lower):
+                            yield "API OVERLOADED — please retry"
+                            continue
                     except Exception:
                         pass
                 # After streaming finishes for this file, spew the raw accumulated answer for debug
