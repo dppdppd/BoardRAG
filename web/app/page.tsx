@@ -1065,10 +1065,10 @@ export default function HomePage() {
       // If metadata from citation is provided (file, page, header), preselect file and page
       try {
         if (meta && typeof meta === 'object') {
-          const mfile = String((meta.file || meta.filename || '') as string).toLowerCase();
+          const mfile = String((meta.file || meta.filename || '') as string);
           const mpage = Number(meta.page);
           if (mfile) {
-            const norm = (s: string) => (s || '').trim().toLowerCase();
+            const norm = (s: string) => (s || '').trim();
             const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
             const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
             if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
@@ -1083,7 +1083,7 @@ export default function HomePage() {
       const preferredPage = (() => { try { const n = Number((meta && (meta as any).page)); return isFinite(n) && n > 0 ? n : null; } catch { return null; } })();
       // If we have complete metadata, avoid any server call: synthesize minimal chunks and proceed
       if (meta && (meta as any).file && preferredPage) {
-        const mfile = String((meta as any).file || '').toLowerCase();
+        const mfile = String((meta as any).file || '');
         const headerText = String((meta as any).header || sec || '').trim();
         const syntheticChunks = [
           { text: headerText, source: mfile, page: Number(preferredPage) - 1, section: sec, section_number: sec }
@@ -1104,7 +1104,7 @@ export default function HomePage() {
         try { setSectionChunks(syntheticChunks as any); } catch {}
         try { setPreviewChunks(syntheticChunks as any); } catch {}
         // Update viewer metas
-        const norm = (s: string) => (s || '').trim().toLowerCase();
+        const norm = (s: string) => (s || '').trim();
         const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
         const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
         if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
@@ -1132,10 +1132,10 @@ export default function HomePage() {
         try { setSectionChunks(cached as any); } catch {}
         try { setPreviewChunks(cached as any); } catch {}
         // PdfPreview now owns initial anchoring/scrolling
-        const inferFromChunk = String(cached[0]?.source || '').toLowerCase();
+        const inferFromChunk = String(cached[0]?.source || '');
         const currentKnown = (isDesktop && canShowPreview) ? (previewPdfMeta?.filename || '') : (pdfMeta?.filename || '');
-        const fn = (currentKnown || inferFromChunk || '').toLowerCase();
-        const norm = (s: string) => (s || '').trim().toLowerCase();
+        const fn = (currentKnown || inferFromChunk || '');
+        const norm = (s: string) => (s || '').trim();
         const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(fn));
         const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(fn));
         if (!sameModal) setPdfMeta({ filename: fn, pages: undefined });
@@ -1176,11 +1176,11 @@ export default function HomePage() {
       try { setSectionChunks(chunks as any); } catch {}
       try { setPreviewChunks(chunks as any); } catch {}
       // Stash filename for viewer: prefer existing loaded filename, else infer from chunks
-      const inferFromChunk = chunks && chunks.length > 0 ? String(chunks[0].source || '').toLowerCase() : '';
+      const inferFromChunk = chunks && chunks.length > 0 ? String(chunks[0].source || '') : '';
       // Prefer the last known filename if it matches the inferred; otherwise use inferred
       const currentKnown = (isDesktop && canShowPreview) ? (previewPdfMeta?.filename || '') : (pdfMeta?.filename || '');
-      const fn = (currentKnown || inferFromChunk || '').toLowerCase();
-      const norm = (s: string) => (s || '').trim().toLowerCase();
+      const fn = (currentKnown || inferFromChunk || '');
+      const norm = (s: string) => (s || '').trim();
       const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(fn));
       const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(fn));
       // Only update each viewer's meta if its file actually changed to avoid reloading
@@ -1407,8 +1407,8 @@ export default function HomePage() {
               {((previewPdfMeta && previewPdfMeta.filename) || (previewChunks && previewChunks.length > 0)) && (
                 <div className="preview-top pdf-viewer">
                   {(() => {
-                    const inferred = (previewChunks && previewChunks[0] && previewChunks[0].source ? String(previewChunks[0].source) : '').toLowerCase();
-                    const filename = String((previewPdfMeta && previewPdfMeta.filename) ? previewPdfMeta.filename : inferred).toLowerCase();
+                    const inferred = (previewChunks && previewChunks[0] && previewChunks[0].source ? String(previewChunks[0].source) : '');
+                    const filename = String((previewPdfMeta && previewPdfMeta.filename) ? previewPdfMeta.filename : inferred);
                     const pageSet = new Set<number>();
                     previewChunks.forEach((c) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
                     const citedPages = Array.from(pageSet).sort((a,b) => a-b);
@@ -1480,8 +1480,8 @@ export default function HomePage() {
                   {((previewPdfMeta && previewPdfMeta.filename) || (previewChunks && previewChunks.length > 0)) && (
                     <div className="preview-top pdf-viewer">
                       {(() => {
-                        const inferred = (previewChunks && (previewChunks as any)[0] && (previewChunks as any)[0].source ? String((previewChunks as any)[0].source) : '').toLowerCase();
-                        const filename = String((previewPdfMeta && (previewPdfMeta as any).filename) ? (previewPdfMeta as any).filename : inferred).toLowerCase();
+                        const inferred = (previewChunks && (previewChunks as any)[0] && (previewChunks as any)[0].source ? String((previewChunks as any)[0].source) : '');
+                        const filename = String((previewPdfMeta && (previewPdfMeta as any).filename) ? (previewPdfMeta as any).filename : inferred);
                         const pageSet = new Set<number>();
                         (previewChunks as any).forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
                         const citedPages = Array.from(pageSet).sort((a,b) => a-b);
