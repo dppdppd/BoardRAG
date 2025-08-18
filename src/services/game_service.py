@@ -94,26 +94,36 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
             if not matched:
                 failed_names.append(fname)
 
-    # Clean catalog entries referencing deleted files
-    if deleted_paths:
-        # DB-less: remove from catalog
-        try:
-            if getattr(config, "DB_LESS", True):
-                from ..catalog import load_catalog, save_catalog  # type: ignore
-                cat = load_catalog()
-                removed = 0
-                for p in deleted_paths:
-                    key = Path(p).name
-                    if key in cat:
-                        try:
-                            cat.pop(key, None)
-                            removed += 1
-                        except Exception:
-                            pass
-                if removed:
-                    save_catalog(cat)
-        except Exception:
-            pass
+    # Clean catalog entries referencing deleted files (and selected filenames even if file missing)
+    try:
+        if getattr(config, "DB_LESS", True):
+            from ..catalog import load_catalog, save_catalog  # type: ignore
+            cat = load_catalog()
+            keys_to_remove = set()
+            # Remove by actual deleted file basenames
+            for p in deleted_paths:
+                try:
+                    keys_to_remove.add(Path(p).name)
+                except Exception:
+                    pass
+            # Also remove by requested filenames (basename only), even if file wasn't found
+            for name in filenames:
+                try:
+                    keys_to_remove.add(Path(name).name)
+                except Exception:
+                    pass
+            removed = 0
+            for key in list(keys_to_remove):
+                if key in cat:
+                    try:
+                        cat.pop(key, None)
+                        removed += 1
+                    except Exception:
+                        pass
+            if removed:
+                save_catalog(cat)
+    except Exception:
+        pass
         # No vector store cleanup in DB-less mode
 
     # Refresh lists

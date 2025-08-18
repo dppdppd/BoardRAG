@@ -1536,7 +1536,7 @@ export default function HomePage() {
             )
         )}
           <div className="row title" style={{ gap: 12, justifyContent: 'space-between', alignItems: 'center' }}>
-            <span className="app-title">Board Game Jippity</span>
+            <span className="app-title" style={{ whiteSpace: 'nowrap' }}>Board Game Jippity</span>
             <div className="row" style={{ gap: 8, alignItems: 'center' }}>
               <select
                 className="select"
@@ -1548,7 +1548,7 @@ export default function HomePage() {
                   }
                   setSelectedGame(e.target.value);
                 }}
-                style={{ minWidth: 220 }}
+                style={{ minWidth: 260, maxWidth: 320 }}
                 aria-label="Game"
               >
                 <option value="">Select game…</option>

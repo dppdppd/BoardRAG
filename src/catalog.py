@@ -135,24 +135,50 @@ def ensure_catalog_up_to_date(log: Optional[callable] = None) -> Dict[str, dict]
             _log(f"📤 [{idx}/{len(pdfs)}] Uploading {key} …")
             fid = upload_pdf_to_anthropic_files(api_key, str(p.resolve()), retries=1, backoff_s=0.0)
             _log(f"🔗 Received file_id={fid} for {key}")
-            name = _extract_game_name_from_pdf(api_key, model, fid) or p.stem
-            if name:
+            extracted_name = _extract_game_name_from_pdf(api_key, model, fid) or p.stem
+            # Preserve any user-assigned name if present
+            existing_name = str((entry or {}).get("game_name") or "").strip()
+            final_name = existing_name or extracted_name
+            if final_name:
                 try:
-                    _log(f"🏷  Extracted game_name='{name}'")
+                    if existing_name:
+                        _log(f"🏷  Preserving assigned game_name='{existing_name}'")
+                    else:
+                        _log(f"🏷  Extracted game_name='{extracted_name}'")
                 except Exception:
                     pass
-            cat[key] = {
-                "file_id": fid,
-                "game_name": name,
-                "pages": None,
-                "size_bytes": size,
-                "updated_at": _now_iso(),
-            }
-            _log(f"✅ Cataloged {key} → '{name}' ({fid})")
+            # Update in-place to avoid dropping other fields
+            entry = entry or {}
+            entry["file_id"] = fid
+            entry["game_name"] = final_name
+            entry.setdefault("pages", None)
+            entry["size_bytes"] = size
+            entry["updated_at"] = _now_iso()
+            cat[key] = entry
+            _log(f"✅ Cataloged {key} → '{final_name}' ({fid})")
             save_catalog(cat)
         except Exception as e:
             _log(f"❌ Upload failed for {key}: {e}")
             continue
+    # Remove catalog entries for PDFs that no longer exist on disk
+    try:
+        present = {p.name for p in pdfs}
+        removed = 0
+        for key in list(cat.keys()):
+            if key not in present:
+                try:
+                    cat.pop(key, None)
+                    removed += 1
+                except Exception:
+                    pass
+        if removed:
+            try:
+                _log(f"🧹 Removed {removed} stale catalog entrie(s) with missing PDFs")
+            except Exception:
+                pass
+            save_catalog(cat)
+    except Exception:
+        pass
     try:
         if log:
             log("📚 Catalog scan complete")

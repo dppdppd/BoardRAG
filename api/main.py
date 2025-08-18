@@ -858,6 +858,13 @@ async def admin_catalog_refresh():
     try:
         from src.catalog import ensure_catalog_up_to_date, load_catalog, list_games_from_catalog  # type: ignore
         await _admin_log_publish("📚 Catalog refresh requested …")
+        # Explicitly reload current catalog from disk before warming
+        try:
+            _ = load_catalog()
+            await _admin_log_publish("📖 Catalog file reloaded from disk")
+        except Exception:
+            pass
+        # Warm the catalog (scan /data, add missing entries, remove stale, preserve names)
         await asyncio.to_thread(ensure_catalog_up_to_date, _admin_log_publish)
         await _admin_log_publish("📚 Catalog refresh complete")
         cat = load_catalog()

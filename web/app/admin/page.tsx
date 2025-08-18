@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useMemo } from "react";
 import useSWR from "swr";
 
 import { API_BASE } from "../../lib/config";
@@ -32,6 +32,47 @@ export default function AdminPage() {
   // --- Global Model Selector (applies to all users) -------------------------
   const [modelLabel, setModelLabel] = useState<string>("");
   const [savingModel, setSavingModel] = useState<boolean>(false);
+
+  // Catalog data and sorting — declared before any early returns so hooks are stable
+  const catalog = catalogData?.entries || [];
+  const SORT_KEYS = ["filename", "game_name", "file_id", "size_bytes", "updated_at"] as const;
+  type SortKey = typeof SORT_KEYS[number];
+  const [sortBy, setSortBy] = useState<SortKey>(SORT_KEYS[0]);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const toggleSort = (key: SortKey) => {
+    if (sortBy === key) {
+      setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
+    } else {
+      setSortBy(key);
+      setSortDir("asc");
+    }
+  };
+  const sortedCatalog = useMemo(() => {
+    const entries = [...catalog];
+    const cmp = (a: any, b: any) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+      const av = (a?.[sortBy] ?? null);
+      const bv = (b?.[sortBy] ?? null);
+      if (sortBy === "size_bytes") {
+        const an = typeof av === "number" ? av : -1;
+        const bn = typeof bv === "number" ? bv : -1;
+        if (an === bn) return 0;
+        return an < bn ? -1 * dir : 1 * dir;
+      }
+      if (sortBy === "updated_at") {
+        const an = av ? Date.parse(String(av)) : 0;
+        const bn = bv ? Date.parse(String(bv)) : 0;
+        if (an === bn) return 0;
+        return an < bn ? -1 * dir : 1 * dir;
+      }
+      const as = String(av || "").toLowerCase();
+      const bs = String(bv || "").toLowerCase();
+      if (as === bs) return 0;
+      return as < bs ? -1 * dir : 1 * dir;
+    };
+    entries.sort(cmp);
+    return entries;
+  }, [catalog, sortBy, sortDir]);
 
   useEffect(() => {
     // Fetch current global model
@@ -287,6 +328,7 @@ export default function AdminPage() {
     const data = await resp.json();
     setMessage(data.message || "");
     if (data?.message) appendConsole(data.message);
+    setRenameSelection([]);
     await Promise.all([refetchGames(), refetchChoices(), refetchStorage(), refetchCatalog()]);
   };
 
@@ -324,7 +366,6 @@ export default function AdminPage() {
   const games = gamesData?.games || [];
   const pdfChoices = pdfChoicesData?.choices || [];
   const blockedSessions = blockedData?.sessions || [];
-  const catalog = catalogData?.entries || [];
 
   const saveModel = async () => {
     setSavingModel(true);
@@ -367,83 +408,68 @@ export default function AdminPage() {
     <div style={{ display: "grid", gap: 8, padding: 8, gridTemplateColumns: "1fr", height: "100vh", overflowY: "auto", alignContent: "start", fontSize: 14 }}>
       {message && <div style={{ color: "#444", background: "#f3f3f3", padding: 6, borderRadius: 4 }}>{message}</div>}
 
-      <div className="admin-tool">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Library</h3>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={rebuild} disabled={busy!==null} style={{ padding: "6px 10px" }}>
-            {busy === "rebuild" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Rebuilding…</span>) : "🔄 Rebuild Library"}
-          </button>
-          <button onClick={refresh} disabled={busy!==null} style={{ padding: "6px 10px" }}>
-            {busy === "refresh" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Processing…</span>) : "🔄 Process New PDFs"}
-          </button>
-          <button onClick={rechunk} disabled={busy!==null} style={{ padding: "6px 10px" }}>
-            {busy === "rechunk" ? (<span className="indicator" style={{ gap: 8 }}><span className="spinner" /> Rechunking…</span>) : "🧩 Rechunk Library (preserve names)"}
-          </button>
-        </div>
-      </div>
+      {/* Library controls removed (obsolete) */}
 
       <div className="admin-tool alt">
         <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Catalog (DB-less)</h3>
-        <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-          <button onClick={async () => {
-            try {
-              appendConsole("📚 Refreshing catalog …");
-              const resp = await fetch(`${API_BASE}/admin/catalog/refresh`, { method: "POST" });
-              let bodyText = "";
-              try { bodyText = await resp.text(); } catch {}
-              let js: any = null;
-              try { js = bodyText ? JSON.parse(bodyText) : null; } catch {}
-              if (!resp.ok) {
-                const detail = (js && (js.message || js.error)) || bodyText || `HTTP ${resp.status}`;
-                throw new Error(detail);
-              }
-              appendConsole("✅ Catalog refreshed");
-              await refetchCatalog();
-            } catch (e: any) {
-              appendConsole(`❌ Catalog refresh failed: ${e?.message || e || "unknown error"}`);
-            }
-          }} style={{ padding: "6px 10px" }}>🔄 Refresh Catalog</button>
-          <div className="muted" style={{ fontSize: 12 }}>
-            {catalog.length === 0 ? "No entries found (place PDFs in /data)" : `${catalog.length} PDF(s)`}
-          </div>
+        {/* Fixed header outside scroll panel */}
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "32px 1.4fr 1fr 1.2fr 0.6fr 1fr",
+            alignItems: "center",
+            padding: 2,
+            border: "1px solid #eee",
+            borderRadius: 4,
+            borderBottomLeftRadius: 0,
+            borderBottomRightRadius: 0,
+            background: "#fafafa",
+            fontSize: 11,
+            fontWeight: 600,
+          }}
+        >
+          <div />
+          <button className="btn link" onClick={() => toggleSort("filename")} style={{ textAlign: "left", padding: 0 }}>
+            Filename{sortBy === "filename" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+          </button>
+          <button className="btn link" onClick={() => toggleSort("game_name")} style={{ textAlign: "left", padding: 0 }}>
+            Game{sortBy === "game_name" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+          </button>
+          <button className="btn link" onClick={() => toggleSort("file_id")} style={{ textAlign: "left", padding: 0 }}>
+            File ID{sortBy === "file_id" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+          </button>
+          <button className="btn link" onClick={() => toggleSort("size_bytes")} style={{ textAlign: "left", padding: 0 }}>
+            Size{sortBy === "size_bytes" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+          </button>
+          <button className="btn link" onClick={() => toggleSort("updated_at")} style={{ textAlign: "left", padding: 0 }}>
+            Updated{sortBy === "updated_at" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
+          </button>
         </div>
-        <div style={{ maxHeight: 260, overflow: "auto", border: "1px solid #eee", borderRadius: 4 }}>
-          <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left" }}>
-                <th style={{ padding: 6, borderBottom: "1px solid #eee" }} />
-                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Filename</th>
-                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Game</th>
-                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>File ID</th>
-                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Size</th>
-                <th style={{ padding: 6, borderBottom: "1px solid #eee" }}>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {catalog.map((e) => {
-                const selected = renameSelection.includes(e.filename);
-                return (
-                  <tr key={e.filename}>
-                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={(ev) => {
-                          const fn = e.filename;
-                          setRenameSelection((cur) => ev.target.checked ? Array.from(new Set([...(cur||[]), fn])) : (cur||[]).filter((v) => v !== fn));
-                        }}
-                      />
-                    </td>
-                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{e.filename}</td>
-                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{e.game_name || "—"}</td>
-                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }} title={e.file_id || ""}>{(e.file_id || "").slice(0, 24) || "—"}</td>
-                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{typeof e.size_bytes === "number" ? `${Math.round(e.size_bytes/1024/1024)} MB` : "—"}</td>
-                    <td style={{ padding: 6, borderBottom: "1px solid #f2f2f2" }}>{e.updated_at ? new Date(e.updated_at).toLocaleString() : "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div style={{ height: "35vh", overflow: "auto", border: "1px solid #eee", borderTop: "none", borderRadius: 4, borderTopLeftRadius: 0, borderTopRightRadius: 0, fontSize: 11 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "32px 1.4fr 1fr 1.2fr 0.6fr 1fr" }}>
+            {sortedCatalog.map((e) => {
+              const selected = renameSelection.includes(e.filename);
+              return (
+                <React.Fragment key={e.filename}>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={(ev) => {
+                        const fn = e.filename;
+                        setRenameSelection((cur) => ev.target.checked ? Array.from(new Set([...(cur||[]), fn])) : (cur||[]).filter((v) => v !== fn));
+                      }}
+                    />
+                  </div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{e.filename}</div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{e.game_name || "—"}</div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }} title={e.file_id || ""}>{(e.file_id || "").slice(0, 24) || "—"}</div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{typeof e.size_bytes === "number" ? `${Math.round(e.size_bytes/1024/1024)} MB` : "—"}</div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{e.updated_at ? new Date(e.updated_at).toLocaleString() : "—"}</div>
+                </React.Fragment>
+              );
+            })}
+          </div>
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
           <input
@@ -474,6 +500,24 @@ export default function AdminPage() {
             disabled={renameSelection.length === 0}
             style={{ padding: "6px 10px" }}
           >Delete Selected</button>
+          <button onClick={async () => {
+            try {
+              appendConsole("📚 Refreshing catalog …");
+              const resp = await fetch(`${API_BASE}/admin/catalog/refresh`, { method: "POST" });
+              let bodyText = "";
+              try { bodyText = await resp.text(); } catch {}
+              let js: any = null;
+              try { js = bodyText ? JSON.parse(bodyText) : null; } catch {}
+              if (!resp.ok) {
+                const detail = (js && (js.message || js.error)) || bodyText || `HTTP ${resp.status}`;
+                throw new Error(detail);
+              }
+              appendConsole("✅ Catalog refreshed");
+              await refetchCatalog();
+            } catch (e: any) {
+              appendConsole(`❌ Catalog refresh failed: ${e?.message || e || "unknown error"}`);
+            }
+          }} style={{ padding: "6px 10px", marginLeft: "auto" }}>🔄 Refresh Catalog</button>
         </div>
       </div>
 
