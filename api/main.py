@@ -180,12 +180,23 @@ async def _lifespan(_app: FastAPI):
                             except Exception:
                                 pass
                     await _admin_log_publish("📚 Catalog: scanning data/ for new PDFs …")
-                    await asyncio.to_thread(ensure_catalog_up_to_date, _log_cb)
-                    await _admin_log_publish("📚 Catalog: ready")
-                    _catalog_warmed_once = True
+                    async def _warm_catalog_async() -> None:
+                        try:
+                            await asyncio.to_thread(ensure_catalog_up_to_date, _log_cb)
+                            await _admin_log_publish("📚 Catalog: ready")
+                            try:
+                                globals()["_catalog_warmed_once"] = True
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            try:
+                                await _admin_log_publish(f"⚠️ Catalog warmup failed during lifespan: {e}")
+                            except Exception:
+                                pass
+                    loop.create_task(_warm_catalog_async())
                 except Exception as e:
                     try:
-                        await _admin_log_publish(f"⚠️ Catalog warmup failed during lifespan: {e}")
+                        await _admin_log_publish(f"⚠️ Catalog warmup scheduling failed during lifespan: {e}")
                     except Exception:
                         pass
         except Exception:
@@ -281,9 +292,20 @@ async def _print_routes_on_startup():
                         except Exception:
                             pass
                 await _admin_log_publish("📚 Catalog: scanning data/ for new PDFs …")
-                await asyncio.to_thread(ensure_catalog_up_to_date, _log_cb)
-                await _admin_log_publish("📚 Catalog: ready")
-                _catalog_warmed_once = True
+                async def _warm_catalog_async2() -> None:
+                    try:
+                        await asyncio.to_thread(ensure_catalog_up_to_date, _log_cb)
+                        await _admin_log_publish("📚 Catalog: ready")
+                        try:
+                            globals()["_catalog_warmed_once"] = True
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        try:
+                            await _admin_log_publish(f"⚠️ Catalog warmup failed: {e}")
+                        except Exception:
+                            pass
+                loop.create_task(_warm_catalog_async2())
     except Exception as e:
         try:
             await _admin_log_publish(f"⚠️ Catalog warmup failed: {e}")
