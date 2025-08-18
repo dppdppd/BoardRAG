@@ -41,8 +41,8 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
   // Suppress manual scroll tracking during programmatic anchor scrolls
   const programmaticScrollRef = useRef<boolean>(false);
   const programmaticTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const inferred = (chunks && chunks[0] && chunks[0].source ? String(chunks[0].source) : '').toLowerCase();
-  const filename = String((pdfMeta && pdfMeta.filename) ? pdfMeta.filename : inferred).toLowerCase();
+  const inferred = (chunks && chunks[0] && chunks[0].source ? String(chunks[0].source) : '');
+  const filename = String((pdfMeta && pdfMeta.filename) ? pdfMeta.filename : inferred);
   const pageSet = new Set<number>();
   chunks.forEach((c) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
   const citedPages = Array.from(pageSet).sort((a,b) => a-b);
