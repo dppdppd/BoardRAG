@@ -92,6 +92,15 @@ def gather_candidates_regex(pages: List[str]) -> List[Tuple[int, str]]:
     return cands
 
 
+def _get_anthropic_base_url() -> str:
+    """Return Anthropic base URL, allowing region override via config."""
+    try:
+        from src import config as cfg  # type: ignore
+        return getattr(cfg, "ANTHROPIC_API_URL", "https://api.anthropic.com")
+    except Exception:
+        return "https://api.anthropic.com"
+
+
 def make_llm() -> Any:
     """Outline-specific LLM factory.
 
@@ -130,7 +139,7 @@ def anthropic_pdf_messages(api_key: str, model: str, system_prompt: str, user_pr
     with open(pdf_path, "rb") as f:
         data_b64 = base64.b64encode(f.read()).decode("ascii")
 
-    url = "https://api.anthropic.com/v1/messages"
+    url = f"{_get_anthropic_base_url().rstrip('/')}/v1/messages"
     headers = {
         "content-type": "application/json",
         "x-api-key": api_key,
@@ -196,7 +205,7 @@ def upload_pdf_to_anthropic_files(api_key: str, pdf_path: str, *, retries: int =
     Raises RuntimeError with status details on persistent failure.
     """
     import time as _time
-    url = "https://api.anthropic.com/v1/files"
+    url = f"{_get_anthropic_base_url().rstrip('/')}/v1/files"
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -235,7 +244,7 @@ def upload_pdf_to_anthropic_files(api_key: str, pdf_path: str, *, retries: int =
 
 def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: str, user_prompt: str, file_id: str) -> str:
     """Send a Messages API call referencing an uploaded file_id."""
-    url = "https://api.anthropic.com/v1/messages"
+    url = f"{_get_anthropic_base_url().rstrip('/')}/v1/messages"
     headers = {
         "content-type": "application/json",
         "x-api-key": api_key,
@@ -292,6 +301,57 @@ def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: st
     return "\n".join(texts).strip()
 
 
+def anthropic_pdf_messages_with_files(api_key: str, model: str, system_prompt: str, user_prompt: str, file_ids: List[str]) -> str:
+    """Send a Messages API call referencing multiple uploaded file_ids."""
+    url = f"{_get_anthropic_base_url().rstrip('/')}/v1/messages"
+    headers = {
+        "content-type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "files-api-2025-04-14",
+    }
+    content: List[Dict[str, Any]] = []
+    for fid in file_ids:
+        content.append({
+            "type": "document",
+            "source": {"type": "file", "file_id": fid},
+            "citations": {"enabled": True},
+        })
+    content.append({"type": "text", "text": user_prompt})
+    body = {
+        "model": model,
+        "max_tokens": 4096,
+        "system": system_prompt,
+        "messages": [{"role": "user", "content": content}],
+    }
+    import time as _time
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
+            if resp.status_code in (429,) or resp.status_code >= 500:
+                last_err = RuntimeError(f"messages (files) {resp.status_code}: {resp.text[:1000]}")
+                if attempt < 2:
+                    _time.sleep(2 ** attempt)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            js = resp.json()
+            parts = js.get("content") or []
+            texts: List[str] = []
+            for p in parts:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    texts.append(str(p.get("text") or ""))
+            return "\n".join(texts).strip()
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _time.sleep(2 ** attempt)
+                continue
+            raise
+    raise RuntimeError(f"Anthropic messages with files failed: {last_err}")
+
+
 def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_prompt: str, user_prompt: str, file_id: str):
     """Yield text chunks by streaming Messages API referencing an uploaded file_id.
 
@@ -300,7 +360,7 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
     """
     import json as _json
     import time as _time
-    url = "https://api.anthropic.com/v1/messages"
+    url = f"{_get_anthropic_base_url().rstrip('/')}/v1/messages"
     headers = {
         "content-type": "application/json",
         "x-api-key": api_key,
@@ -508,7 +568,7 @@ def validate_anthropic_file(api_key: str, file_id: str) -> bool:
     This uses a lightweight GET request and avoids retries.
     """
     try:
-        url = f"https://api.anthropic.com/v1/files/{file_id}"
+        url = f"{_get_anthropic_base_url().rstrip('/')}/v1/files/{file_id}"
         headers = {
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
