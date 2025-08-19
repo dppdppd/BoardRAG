@@ -23,6 +23,17 @@ export default function AdminPage() {
   const { data: storageData, mutate: refetchStorage } = useSWR<{ markdown: string }>(`${API_BASE}/storage`, fetcher);
   const { data: blockedData, mutate: refetchBlocked } = useSWR<{ sessions: { sid: string; since?: string | null }[] }>(`${API_BASE}/admin/blocked`, fetcher, { revalidateOnFocus: true });
   const { data: catalogData, mutate: refetchCatalog } = useSWR<{ entries: { filename: string; file_id?: string; game_name?: string; size_bytes?: number; updated_at?: string }[]; games: string[]; error?: string }>(`${API_BASE}/admin/catalog`, fetcher, { revalidateOnFocus: true });
+  const pdfStatusUrl = useMemo(() => {
+    try {
+      const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+      const u = new URL(`${API_BASE}/admin/pdf-status`);
+      if (t) u.searchParams.set("token", t);
+      return u.toString();
+    } catch {
+      return `${API_BASE}/admin/pdf-status`;
+    }
+  }, [role]);
+  const { data: pdfStatusData, mutate: refetchPdfStatus } = useSWR<{ items: { filename: string; total_pages: number; processed_pages?: number }[] }>(pdfStatusUrl, fetcher, { revalidateOnFocus: true });
   const appendConsole = (line: string) => setConsoleText((cur) => (cur ? cur + "\n" + line : line));
 
   const [renameSelection, setRenameSelection] = useState<string[]>([]);
@@ -73,6 +84,14 @@ export default function AdminPage() {
     entries.sort(cmp);
     return entries;
   }, [catalog, sortBy, sortDir]);
+  const statusMap = useMemo(() => {
+    const map = new Map<string, { total: number; processed: number }>();
+    const items = pdfStatusData?.items || [];
+    for (const it of items) {
+      map.set(it.filename, { total: it.total_pages || 0, processed: it.processed_pages || 0 });
+    }
+    return map;
+  }, [pdfStatusData]);
 
   useEffect(() => {
     // Fetch current global model
@@ -416,7 +435,7 @@ export default function AdminPage() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "32px 1.4fr 1fr 1.2fr 0.6fr 1fr",
+            gridTemplateColumns: "32px 1.2fr 0.9fr 1fr 0.6fr 0.8fr 0.8fr",
             alignItems: "center",
             padding: 2,
             border: "1px solid #eee",
@@ -444,11 +463,14 @@ export default function AdminPage() {
           <button className="btn link" onClick={() => toggleSort("updated_at")} style={{ textAlign: "left", padding: 0 }}>
             Updated{sortBy === "updated_at" ? (sortDir === "asc" ? " ▲" : " ▼") : ""}
           </button>
+          <div style={{ textAlign: "left" }}>Processed</div>
         </div>
         <div style={{ height: "35vh", overflow: "auto", border: "1px solid #eee", borderTop: "none", borderRadius: 4, borderTopLeftRadius: 0, borderTopRightRadius: 0, fontSize: 11 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "32px 1.4fr 1fr 1.2fr 0.6fr 1fr" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "32px 1.2fr 0.9fr 1fr 0.6fr 0.8fr 0.8fr" }}>
             {sortedCatalog.map((e) => {
               const selected = renameSelection.includes(e.filename);
+              const st = statusMap.get(e.filename);
+              const processed = st ? `${st.processed} / ${st.total}` : "—";
               return (
                 <React.Fragment key={e.filename}>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>
@@ -466,6 +488,7 @@ export default function AdminPage() {
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" }} title={e.file_id || ""}>{(e.file_id || "").slice(0, 24) || "—"}</div>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{typeof e.size_bytes === "number" ? `${Math.round(e.size_bytes/1024/1024)} MB` : "—"}</div>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{e.updated_at ? new Date(e.updated_at).toLocaleString() : "—"}</div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{processed}</div>
                 </React.Fragment>
               );
             })}
@@ -485,6 +508,67 @@ export default function AdminPage() {
           >Assign</button>
           <button
             onClick={async () => {
+              if (renameSelection.length === 0) return;
+              appendConsole(`Clearing DB for: ${renameSelection.join(", ")}`);
+              try {
+                const headers: any = { "Content-Type": "application/json" };
+                try {
+                  const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+                  if (t) headers["Authorization"] = `Bearer ${t}`;
+                } catch {}
+                const resp = await fetch(`${API_BASE}/admin/clear-selected`, {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify(renameSelection),
+                });
+                const data = await resp.json().catch(() => ({} as any));
+                if (!resp.ok) throw new Error(data?.detail || `HTTP ${resp.status}`);
+                appendConsole(data?.message || "Cleared.");
+                // Also refresh Admin log stream is already open and pdf-status
+                await Promise.all([refetchPdfStatus()]);
+              } catch (e: any) {
+                appendConsole(`Clear failed: ${e?.message || e || "error"}`);
+              }
+            }}
+            disabled={renameSelection.length === 0}
+            style={{ padding: "6px 10px" }}
+          >Clear Selected (DB)</button>
+          <button
+            onClick={async () => {
+              if (renameSelection.length === 0) return;
+              const label = renameSelection.length === 1 ? renameSelection[0] : `${renameSelection.length} PDFs`;
+              appendConsole(`🧩 Process selected requested: ${label}`);
+              logClient(`[client] 🧩 Process selected requested…`);
+              try {
+                const url = new URL(`${API_BASE}/admin/process-selected-stream`);
+                url.searchParams.set("entries", JSON.stringify(renameSelection));
+                try {
+                  const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+                  if (t) url.searchParams.set("token", t);
+                } catch {}
+                const es = new EventSource(url.toString());
+                es.onmessage = (ev) => {
+                  try {
+                    const parsed = JSON.parse(ev.data);
+                    if (parsed.type === "log") {
+                      setConsoleText((cur) => (cur ? cur + "\n" + parsed.line : parsed.line));
+                    } else if (parsed.type === "done") {
+                      setConsoleText((cur) => (cur ? cur + "\n" + (parsed.message || "Done.") : (parsed.message || "Done.")));
+                      es.close();
+                      Promise.all([refetchGames(), refetchChoices(), refetchStorage(), refetchCatalog(), refetchPdfStatus()]).catch(() => {});
+                    }
+                  } catch {}
+                };
+                es.onerror = () => { try { es.close(); } catch {}; appendConsole("❌ Process selected stream error"); };
+              } catch (e) {
+                setConsoleText("❌ Process selected failed. See server logs.");
+              }
+            }}
+            disabled={renameSelection.length === 0}
+            style={{ padding: "6px 10px" }}
+          >Process Selected</button>
+          <button
+            onClick={async () => {
               appendConsole(`🗑️ Delete PDF requested: ${renameSelection.join(", ") || "<none>"}`);
               const resp = await fetch(`${API_BASE}/admin/delete-pdfs`, {
                 method: "POST",
@@ -502,7 +586,7 @@ export default function AdminPage() {
           >Delete Selected</button>
           <button onClick={async () => {
             try {
-              appendConsole("📚 Refreshing catalog …");
+              appendConsole("Refreshing catalog …");
               const resp = await fetch(`${API_BASE}/admin/catalog/refresh`, { method: "POST" });
               let bodyText = "";
               try { bodyText = await resp.text(); } catch {}
@@ -512,12 +596,13 @@ export default function AdminPage() {
                 const detail = (js && (js.message || js.error)) || bodyText || `HTTP ${resp.status}`;
                 throw new Error(detail);
               }
-              appendConsole("✅ Catalog refreshed");
-              await refetchCatalog();
+              appendConsole("Catalog refreshed");
+              await Promise.all([refetchCatalog(), refetchPdfStatus()]);
             } catch (e: any) {
-              appendConsole(`❌ Catalog refresh failed: ${e?.message || e || "unknown error"}`);
+              appendConsole(`Catalog refresh failed: ${e?.message || e || "unknown error"}`);
             }
           }} style={{ padding: "6px 10px", marginLeft: "auto" }}>🔄 Refresh Catalog</button>
+          <button onClick={async () => { appendConsole("Refreshing processed status …"); await refetchPdfStatus(); appendConsole("Processed status refreshed"); }} style={{ padding: "6px 10px", marginLeft: 6 }}>Refresh Processed</button>
         </div>
       </div>
 

@@ -98,8 +98,23 @@ SEARCH_REWRITE_MODEL = os.getenv("SEARCH_REWRITE_MODEL", GENERATOR_MODEL)
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 
 # ---------------------------------------------------------------------------
-# Vector Database Configuration (removed)
+# Retrieval Mode Configuration (single source of truth)
 # ---------------------------------------------------------------------------
+CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma")
+
+# Primary switch: RAG_MODE = "vector" or "db-less"
+_env_mode = (os.getenv("RAG_MODE") or "").strip().lower()
+if _env_mode not in {"vector", "db-less", ""}:
+    _env_mode = ""
+
+# Back-compat: if RAG_MODE not set, infer from legacy envs
+if not _env_mode:
+    _use_vec = os.getenv("USE_VECTOR_DB", "0").lower() in {"1", "true", "yes"}
+    _env_mode = "vector" if _use_vec else "db-less"
+
+RAG_MODE = _env_mode
+IS_VECTOR_MODE = RAG_MODE == "vector"
+IS_DB_LESS_MODE = RAG_MODE == "db-less"
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
@@ -214,12 +229,10 @@ if not AUTH_SECRET:
 # Token time-to-live in seconds
 AUTH_TOKEN_TTL_SECS = int(os.getenv("AUTH_TOKEN_TTL_SECS", "43200"))  # 12 hours
 
-# ---------------------------------------------------------------------------
-# DB-less Mode
-# ---------------------------------------------------------------------------
-# Defaults to enabled when the environment variable is absent.
-DB_LESS = os.getenv("DB_LESS", "1").lower() in {"1", "true", "yes"}
-print(f"[config] DB_LESS = {DB_LESS}")
+# Back-compat shim: expose DB_LESS for older code paths (do not print separate flags)
+DB_LESS = IS_DB_LESS_MODE
+
+print(f"[config] RAG_MODE = {RAG_MODE}")
 
 
 def validate_config():

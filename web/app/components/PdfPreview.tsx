@@ -112,30 +112,28 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
           const scrollTop = sc.scrollTop;
           const viewportCenter = scrollTop + (sc.clientHeight / 2);
           
-          // Try to find the actual page element closest to viewport center
+          // Optimize: only consider pages actually rendered in the DOM
+          const pageEls = Array.from(root.querySelectorAll('.pdf-page')) as HTMLElement[];
           let bestPage = 1;
           let bestDistance = Infinity;
-          
-          for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-            const pageEl = root.querySelector(`.pdf-page[data-page-number='${pageNum}']`) as HTMLElement;
-            if (pageEl) {
-              const pageHeight = pageEl.offsetHeight || measuredPageHeight || 800;
-              let pageTopWithin = 0;
-              try {
-                pageTopWithin = offsetTopWithin(pageEl, sc);
-              } catch {
-                pageTopWithin = pageEl.offsetTop;
-              }
-              const pageCenter = pageTopWithin + (pageHeight / 2);
-              const distance = Math.abs(pageCenter - viewportCenter);
-              
-              if (distance < bestDistance) {
-                bestDistance = distance;
-                bestPage = pageNum;
-              }
+          for (const el of pageEls) {
+            const pageAttr = el.getAttribute('data-page-number');
+            const pageNum = pageAttr ? Number(pageAttr) : NaN;
+            if (!Number.isFinite(pageNum)) continue;
+            const pageHeight = el.offsetHeight || measuredPageHeight || 800;
+            let pageTopWithin = 0;
+            try {
+              pageTopWithin = offsetTopWithin(el, sc);
+            } catch {
+              pageTopWithin = el.offsetTop;
+            }
+            const pageCenter = pageTopWithin + (pageHeight / 2);
+            const distance = Math.abs(pageCenter - viewportCenter);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestPage = pageNum;
             }
           }
-          
           setCurrentScrollCenter(bestPage);
         }, 100); // 100ms throttle
       }
@@ -192,6 +190,8 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     return p === (Number(targetPageResolved) || 1);
   };
 
+  // Disable text layer entirely to avoid AbortException spam and heavy rAF work
+
   // No center tracking; keep render window centered on the requested target to avoid bounce
 
   const highlight = (el: HTMLElement, texts: string[]) => {
@@ -237,128 +237,14 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
       || (document?.querySelector?.(`.preview-panel .pdf-page[data-page-number='${pageNum}']`) as HTMLElement)
       || null;
   };
-  const getCitationRectInPage = (pageEl: HTMLElement): { top: number; left: number; width: number; height: number } | null => {
-    
-    // 1) If a heading overlay/highlight exists, use it
-    const heading = pageEl.querySelector('.heading-overlay, .heading-highlight') as HTMLElement | null;
-    if (heading) {
+  // No fallback-based citation detection. Anchoring relies solely on chunk-provided coordinates.
 
-      const r = heading.getBoundingClientRect(); const pr = pageEl.getBoundingClientRect();
-      return { top: r.top - pr.top, left: r.left - pr.left, width: r.width, height: r.height };
-    }
-    // 2) Try to resolve by explicit section number (e.g., "28.3") across logical lines
-    try {
-      // First try title, then fall back to chunk section data
-      let sectionNum: string | null = null;
-      const numMatch = (title || '').match(/^\s*(\d+(?:\.\d+)+)/);
-      if (numMatch) {
-        sectionNum = String(numMatch[1]).trim();
-      } else if (chunks && chunks.length > 0) {
-        // Try to get section number from chunk data
-        const chunk = chunks[0] as any;
-        const candidateSection = chunk.section_number || chunk.section || chunk.text;
-        if (candidateSection && typeof candidateSection === 'string') {
-          const chunkMatch = candidateSection.match(/^\s*(\d+(?:\.\d+)+)/);
-          if (chunkMatch) {
-            sectionNum = String(chunkMatch[1]).trim();
-          } else if (/^\d+(\.\d+)+$/.test(candidateSection.trim())) {
-            sectionNum = candidateSection.trim();
-          }
-        }
-      }
-      
-      
-      // More comprehensive span detection
-      const spanNodes = Array.from(pageEl.querySelectorAll('.textLayer span, .react-pdf__Page__textContent span, .react-pdf__Page__textLayer span')) as HTMLSpanElement[];
-
-      
-      if (spanNodes.length === 0) {
-        // Text layer might not be ready
-        return null;
-      }
-      
-      if (spanNodes.length > 0 && sectionNum) {
-        const pr = pageEl.getBoundingClientRect();
-        // Sort spans by visual position
-        const sorted = spanNodes.map((el) => ({ el, r: el.getBoundingClientRect() }))
-          .sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
-        // Group into lines by near-equal top (within 3px)
-        const lines: { text: string; rect: { top: number; left: number; width: number; height: number } }[] = [];
-        let i = 0;
-        while (i < sorted.length) {
-          const lineTop = sorted[i].r.top;
-          let j = i;
-          let left = Infinity, right = -Infinity, top = Infinity, bottom = -Infinity, text = '';
-          while (j < sorted.length && Math.abs(sorted[j].r.top - lineTop) < 3) {
-            left = Math.min(left, sorted[j].r.left);
-            right = Math.max(right, sorted[j].r.right);
-            top = Math.min(top, sorted[j].r.top);
-            bottom = Math.max(bottom, sorted[j].r.bottom);
-            text += (sorted[j].el.textContent || '');
-            j += 1;
-          }
-          lines.push({
-            text: text.replace(/\s+/g, ' ').trim(),
-            rect: { top: top - pr.top, left: left - pr.left, width: Math.max(1, right - left), height: Math.max(1, bottom - top) },
-          });
-          i = j;
-        }
-        
-
-        
-        // Find the exact span containing "4.3" 
-        
-        // Look for spans containing "4.3" - try multiple patterns
-        let matchingSpan = null;
-        
-        // Pattern 1: Exact "4.3" with word boundaries
-        const exactRegex = new RegExp(`\\b${sectionNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-        matchingSpan = spanNodes.find(span => {
-          const text = span.textContent || '';
-          return exactRegex.test(text);
-        });
-        
-        // Pattern 2: Contains "4.3" but not "4.31", "4.32", etc.
-        if (!matchingSpan) {
-          const noExtensionRegex = new RegExp(`${sectionNum.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`);
-          matchingSpan = spanNodes.find(span => {
-            const text = span.textContent || '';
-            return noExtensionRegex.test(text);
-          });
-        }
-        
-        // Pattern 3: Simple contains check as last resort
-        if (!matchingSpan) {
-          matchingSpan = spanNodes.find(span => {
-            const text = span.textContent || '';
-            return text.includes(sectionNum);
-          });
-        }
-        
-        if (matchingSpan) {
-          const spanRect = matchingSpan.getBoundingClientRect();
-          const pr = pageEl.getBoundingClientRect();
-          return {
-            top: spanRect.top - pr.top,
-            left: spanRect.left - pr.left,
-            width: Math.max(1, spanRect.width),
-            height: Math.max(1, spanRect.height)
-          };
-        }
-        
-
-      }
-    } catch (e) {
-      // Silent error handling
-    }
-    // 4) If we can't find the section header, return null to trigger page-level scroll
-    return null;
-  };
-
-  const debugLog = (...args: any[]) => { try { if (typeof window !== 'undefined' && isLocalhost()) console.debug('[PdfPreview]', ...args); } catch {} };
+  const debugLog = (...args: any[]) => { try { if (typeof window !== 'undefined') console.debug('[PdfPreview]', ...args); } catch {} };
 
   const performAnchorOnce = (retryCount = 0) => {
+    debugLog('performAnchorOnce enter', { retryCount, targetPageResolved, anchorPhase: anchorPhaseRef.current, isInitialGameLoad });
     if (anchoringRef.current && retryCount === 0) {
+      debugLog('performAnchorOnce: already anchoring; bail');
       return false; // Prevent multiple simultaneous anchoring attempts
     }
     
@@ -369,81 +255,110 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     if (retryCount === 0) anchoringRef.current = true; // Mark as anchoring
     const pageEl = getTargetPageEl(target);
     if (!pageEl) {
+      debugLog('performAnchorOnce: pageEl not ready');
       return false;
     }
 
-    // Check if text layer is ready FIRST - don't scroll until it's ready
-    const spanNodes = Array.from(pageEl.querySelectorAll('.textLayer span, .react-pdf__Page__textContent span, .react-pdf__Page__textLayer span'));
-    
-    if (spanNodes.length === 0 && retryCount < 2) {
-      // Text layer not ready, wait a bit and retry - don't scroll yet
-      setTimeout(() => performAnchorOnce(retryCount + 1), 300);
-      return false;
-    }
-    
     const sc = getScrollableAncestor(pageEl) || (document?.querySelector?.('.modal-preview .preview-top') as HTMLElement) || (document?.querySelector?.('.preview-panel .preview-top') as HTMLElement) || null;
     if (!sc) return false;
     const pageTop = offsetTopWithin(pageEl, sc);
     const viewTop = sc.scrollTop;
     
-    const rect = getCitationRectInPage(pageEl);
+    // Prefer header anchor from chunk metadata if available first
+    let rect: { top: number; left: number; width: number; height: number } | null = null;
+    try {
+      const chunksForPage = byPage(target);
+      for (const c of chunksForPage) {
+        const anchorsRaw: any = (c as any).header_anchors_pct || (c as any).header_anchors || (c as any).anchors;
+        let anchors: Record<string, number[]> | null = null;
+        try { anchors = typeof anchorsRaw === 'string' ? JSON.parse(anchorsRaw) : anchorsRaw; } catch { anchors = null; }
+        if (anchors && typeof anchors === 'object') {
+          const names = Object.keys(anchors);
+          if (names.length > 0) {
+            const first = anchors[names[0]] as any;
+            if (Array.isArray(first) && first.length >= 4) {
+              const pageBox = pageEl.getBoundingClientRect();
+              const w = pageEl.clientWidth || pageBox.width;
+              const h = pageEl.clientHeight || pageBox.height;
+              const x = Number(first[0]) || 0; const y = Number(first[1]) || 0; const bw = Number(first[2]) || 0; const bh = Number(first[3]) || 0;
+              const left = (y / 100) * w; // y is left→right
+              const top = (x / 100) * h;  // x is top→bottom
+              const width = Math.max(1, (bw / 100) * w);
+              const height = Math.max(1, (bh / 100) * h);
+              rect = { top, left, width, height } as any;
+              debugLog('performAnchorOnce: using header_anchors_pct', { top, left, width, height });
+              break;
+            }
+          }
+        }
+      }
+    } catch {}
+    if (!rect) {
+      debugLog('performAnchorOnce: no anchor rect found in chunk data; skipping phase 1 centering');
+    }
     
     // Determine scroll behavior: instant for game switches, smooth for regular citations
     const scrollBehavior = isInitialGameLoad ? 'auto' : 'smooth';
-    
-    if (rect) {
-      const rectCenterY = pageTop + rect.top + rect.height / 2;
-      const currentCenterY = viewTop + sc.clientHeight / 2;
-      const nearCitation = Math.abs(rectCenterY - currentCenterY) < 24;
-      
-      if (nearCitation && !isInitialGameLoad) {
-        // Already centered on citation → provide a gentle visual acknowledgment bump (but only for regular citations)
-        const currentTop = sc.scrollTop;
-        const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
-        const bumpUp = Math.max(0, Math.min(maxTop, currentTop - 8));
-        // Mark as programmatic during our controlled scrolls to avoid jitter
-        programmaticScrollRef.current = true;
-        if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
-        sc.scrollTo({ top: bumpUp, behavior: 'smooth' });
-        setTimeout(() => {
-          const settleTop = Math.max(0, rectCenterY - sc.clientHeight / 2);
-          sc.scrollTo({ top: settleTop, behavior: 'smooth' });
-          // Give the browser a moment to settle, then re-enable manual tracking
-          programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, 350);
-        }, 120);
-      } else {
-        // Scroll to center the citation
-        const top = Math.max(0, rectCenterY - sc.clientHeight / 2);
-        programmaticScrollRef.current = true;
-        if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
-        sc.scrollTo({ top, behavior: scrollBehavior });
-        // For instant jumps, clear immediately; for smooth, clear after a short delay
-        const delay = scrollBehavior === 'auto' ? 0 : 300;
-        programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
-      }
-      if (retryCount === 0) {
-        anchoringRef.current = false;
-        setIsInitialGameLoad(false); // Reset after first scroll
-        // Clear previous anchor center after successful scroll
-        setTimeout(() => setPreviousAnchorCenter(null), 500); // Small delay to let scroll animation finish
-      }
-      return true;
-    } else {
-      // No citation found - go to page top as fallback
+    const phase = Number(anchorPhaseRef.current || 0);
+    debugLog('performAnchorOnce: phase begin', { phase, hasRect: !!rect, pageTop, viewTop });
+
+    // Phase 0: scroll to page top
+    if (phase === 0) {
       const topTo = Math.max(0, pageTop);
       programmaticScrollRef.current = true;
       if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
       sc.scrollTo({ top: topTo, behavior: scrollBehavior });
       const delay = scrollBehavior === 'auto' ? 0 : 300;
       programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
+      anchorPhaseRef.current = 1; // next click → center on heading
+      debugLog('performAnchorOnce: phase 0 → scroll page top; next phase=1');
       if (retryCount === 0) {
         anchoringRef.current = false;
-        setIsInitialGameLoad(false); // Reset after first scroll
-        // Clear previous anchor center after successful scroll
-        setTimeout(() => setPreviousAnchorCenter(null), 500); // Small delay to let scroll animation finish
+        setIsInitialGameLoad(false);
+        setTimeout(() => setPreviousAnchorCenter(null), 500);
       }
       return true;
     }
+
+    // Phase 1: center on heading/citation if available
+    if (phase === 1 && rect) {
+      const rectCenterY = pageTop + rect.top + rect.height / 2;
+      const top = Math.max(0, rectCenterY - sc.clientHeight / 2);
+      programmaticScrollRef.current = true;
+      if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
+      sc.scrollTo({ top, behavior: scrollBehavior });
+      const delay = scrollBehavior === 'auto' ? 0 : 300;
+      programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
+      anchorPhaseRef.current = 2; // next click → bump
+      debugLog('performAnchorOnce: phase 1 → center heading; next phase=2', { rectCenterY: rectCenterY, top });
+      if (retryCount === 0) {
+        anchoringRef.current = false;
+        setIsInitialGameLoad(false);
+        setTimeout(() => setPreviousAnchorCenter(null), 500);
+      }
+      return true;
+    }
+
+    // Phase 2 or no rect: provide a gentle bump and reset
+    const currentTop = sc.scrollTop;
+    const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    const bumpUp = Math.max(0, Math.min(maxTop, currentTop - 8));
+    programmaticScrollRef.current = true;
+    if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
+    sc.scrollTo({ top: bumpUp, behavior: 'smooth' });
+    setTimeout(() => {
+      const settleTop = Math.max(0, currentTop);
+      sc.scrollTo({ top: settleTop, behavior: 'smooth' });
+      programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, 350);
+    }, 120);
+    anchorPhaseRef.current = 0; // reset cycle
+    debugLog('performAnchorOnce: phase 2 → bump and reset');
+    if (retryCount === 0) {
+      anchoringRef.current = false;
+      setIsInitialGameLoad(false);
+      setTimeout(() => setPreviousAnchorCenter(null), 500);
+    }
+    return true;
   };
 
 
@@ -521,6 +436,7 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     >
       {allPages.map((p) => {
         const renderReal = shouldRenderReal(p);
+        const renderText = false;
         if (!renderReal) {
           return (
             <div key={p} className="pdf-page placeholder" data-page-number={p} data-target-section={title} style={{ height: pageContainerHeight }}>
@@ -533,10 +449,11 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
             <Page
               pageNumber={p}
               width={containerWidth}
-              renderTextLayer
+              renderTextLayer={renderText}
               renderAnnotationLayer={false}
               onRenderSuccess={() => {
                 try {
+                  debugLog('onRenderSuccess', { page: p, renderText });
                   const container =
                     (document?.querySelector?.(`.modal-preview .pdf-page[data-page-number='${p}']`) as HTMLElement) ||
                     (document?.querySelector?.(`.preview-panel .pdf-page[data-page-number='${p}']`) as HTMLElement) ||
@@ -546,9 +463,8 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
                     (document?.querySelector?.('.modal-preview .pdf-page:last-child') as HTMLElement) ||
                     (document?.querySelector?.('.preview-panel .pdf-page:last-child') as HTMLElement);
                   if (!el) return;
+                  // Text-layer based highlighting disabled with text layer off
                   const chunksForPage = byPage(p);
-                  const texts = chunksForPage.map((c) => c.text);
-                  highlight(el, texts);
                   // Draw rectangle overlays from normalized rects
                   try {
                     const pageViewport = el.getBoundingClientRect();
@@ -561,7 +477,7 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
                     }
                     const existing = el.querySelectorAll('.rect-overlay'); existing.forEach((n) => n.remove());
                     const rects: Array<[number, number, number, number]> = [];
-                    chunksForPage.forEach((c) => {
+                    chunksForPage.forEach((c: Chunk) => {
                       let rn: any = (c as any).rects_norm;
                       try { if (typeof rn === 'string') rn = JSON.parse(rn); } catch {}
                       if (Array.isArray(rn)) rn.forEach((r: any) => rects.push(r as any));
@@ -582,15 +498,15 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
                       el.appendChild(div);
                     });
                   } catch {}
-                  // If this is the target page, run anchor logic after text layer is ready
+                  // If this is the target page, run anchor logic for phase 0 only
                   const target = currentTargetRef.current;
                   if (typeof target === 'number' && target === p) {
-                    // Wait a moment for text layer to be fully ready
-                    setTimeout(() => performAnchorOnce(), 100);
+                    if ((anchorPhaseRef.current || 0) === 0) {
+                      setTimeout(() => performAnchorOnce(), 60);
+                    }
                   }
                 } catch {}
               }}
-              customTextRenderer={({ str }: { str: string }) => str}
             />
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{filename}</div>
           </div>

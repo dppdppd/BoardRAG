@@ -1035,15 +1035,267 @@ def stream_query_rag(
     print(f"💬 Chat history length: {len(chat_history) if chat_history else 0}")
     print(f"🌐 Web search enabled: {enable_web}")
 
+    # ---- Optional Vector-DB branch: per-page retrieval + routing ----
+    try:
+        from . import config as _cfg  # type: ignore
+        use_vector = bool(getattr(_cfg, "IS_VECTOR_MODE", False))
+    except Exception:
+        use_vector = False
+    if use_vector:
+        try:
+            from .vector_store import search_chunks, count_processed_pages  # type: ignore
+        except Exception as e:
+            def _err_gen():
+                yield f"Vector DB unavailable: {e}"
+            meta = {"sources": [], "context": "", "prompt": "", "original_query": query_text, "spans": []}
+            return _err_gen(), meta
+
+        # Resolve one or more PDF filenames for the selected game (handle str or list)
+        pdf_filenames: list[str] = []
+        if selected_game:
+            try:
+                def _norm_game(g):
+                    if isinstance(g, list):
+                        return (g[0] if g else "").strip()
+                    if isinstance(g, str):
+                        return g.strip()
+                    return str(g or "").strip()
+                norm_game = _norm_game(selected_game)
+                if norm_game:
+                    from .catalog import get_pdf_filenames_for_game  # type: ignore
+                    pdf_filenames = list(get_pdf_filenames_for_game(norm_game) or [])
+            except Exception:
+                pdf_filenames = []
+        # Determine a sensible k based on how many pages are processed for this PDF
+        k_results = 6
+        results: list[tuple[Any, float]] = []
+        if pdf_filenames:
+            try:
+                from .pdf_pages import get_page_count  # type: ignore
+                for fn in pdf_filenames:
+                    per_k = k_results
+                    try:
+                        pdf_path = data_dir / fn
+                        total_pages = get_page_count(pdf_path) if pdf_path.exists() else 0
+                        processed_pages = count_processed_pages(_P(fn).stem, total_pages) if total_pages > 0 else 0
+                        if processed_pages > 0:
+                            per_k = max(1, min(6, processed_pages))
+                        elif total_pages > 0:
+                            per_k = max(1, min(6, total_pages))
+                    except Exception:
+                        per_k = k_results
+                    results.extend(search_chunks(query_text, pdf=fn, k=per_k))
+            except Exception:
+                for fn in pdf_filenames:
+                    results.extend(search_chunks(query_text, pdf=fn, k=k_results))
+        else:
+            # If a game was specified but we couldn't resolve any filenames, avoid cross-game leakage
+            if selected_game:
+                results = []
+            else:
+                results = search_chunks(query_text, pdf=None, k=k_results)
+        # Dedupe by section_id (header) using metadata.section_pages when available; prefer chunk whose page==section_page
+        deduped: list[tuple[Any, float]] = []
+        seen: dict[tuple[str, str], tuple[Any, float]] = {}
+        for doc, score in results:
+            meta = getattr(doc, 'metadata', {}) or {}
+            src = str(meta.get('source') or '')
+            # section_pages serialized as JSON
+            sp_raw = meta.get('section_pages')
+            section_page_map = {}
+            try:
+                import json as _json
+                if isinstance(sp_raw, str) and sp_raw:
+                    section_page_map = _json.loads(sp_raw)
+            except Exception:
+                section_page_map = {}
+            # Use first section as id when available
+            sec_ids = []
+            try:
+                prim_raw = meta.get('primary_sections')
+                if isinstance(prim_raw, str) and prim_raw:
+                    import json as _json
+                    sec_ids = _json.loads(prim_raw) or []
+            except Exception:
+                pass
+            section_id = str(sec_ids[0]) if sec_ids else ''
+            key = (src, section_id)
+            if not section_id:
+                deduped.append((doc, score))
+                continue
+            # Prefer page==section_page
+            try:
+                doc_page = int(meta.get('page_1based') or (int(meta.get('page') or 0) + 1))
+            except Exception:
+                doc_page = int(meta.get('page') or 0) + 1
+            desired_page = int(section_page_map.get(section_id) or 0)
+            prev = seen.get(key)
+            if not prev:
+                seen[key] = (doc, score, doc_page == desired_page)
+            else:
+                _, prev_score, prev_ok = prev
+                ok = (doc_page == desired_page)
+                if ok and not prev_ok:
+                    seen[key] = (doc, score, ok)
+                elif ok == prev_ok and score < prev_score:
+                    seen[key] = (doc, score, ok)
+        if seen:
+            deduped = [(d, s) for (d, s, _ok) in seen.values()]
+        results = deduped or results
+
+        # Decision: for each chunk, if visual_importance >= 4 attach PDFs; else use text
+        from pathlib import Path as _P
+        from . import config as _cfg2  # type: ignore
+        data_dir = _P(getattr(_cfg2, "DATA_PATH", "data"))
+
+        def _gen():
+            # Build a single Anthropic request with attached PDFs and a plain-text context
+            attach_paths: list[_P] = []
+            context_blocks: list[str] = []
+            seen_attach = set()
+            for doc, score in results:
+                meta = getattr(doc, 'metadata', {}) or {}
+                source = str(meta.get('source') or '')
+                page0 = int(meta.get('page') or 0)
+                vi = int(meta.get('visual_importance') or 1)
+                base = _P(source).name
+                pages_dir = data_dir / "pages" / _P(source).stem
+                # Resolve 1-based filenames
+                p1 = pages_dir / f"p{(page0 if page0 > 0 else page0+1):04}.pdf"
+                if not p1.exists():
+                    p1 = pages_dir / f"p{page0+1:04}.pdf"
+                p2 = pages_dir / f"p{(page0+1 if page0 > 0 else page0+2):04}.pdf"
+                if not p2.exists():
+                    p2 = pages_dir / f"p{page0+2:04}.pdf"
+                # Attach for high-visual chunks
+                if vi >= 4 and p1.exists():
+                    if str(p1) not in seen_attach:
+                        attach_paths.append(p1)
+                        seen_attach.add(str(p1))
+                    if p2.exists() and str(p2) not in seen_attach:
+                        attach_paths.append(p2)
+                        seen_attach.add(str(p2))
+                else:
+                    ctx = str(getattr(doc, 'page_content', '') or '')
+                    context_blocks.append(f"[Context from {base} p{page0+1}]\n{ctx}")
+
+            if not attach_paths and not context_blocks:
+                yield "No relevant chunks found."
+                return
+
+            # Compose Anthropic request with multiple document blocks and a single context text block
+            from base64 import b64encode as _b64
+            import requests as _req
+            import json as _json
+            api_key = _cfg2.ANTHROPIC_API_KEY
+            model = _cfg2.GENERATOR_MODEL
+            url = "https://api.anthropic.com/v1/messages"
+            headers = {
+                "content-type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            }
+            content = []
+            for p in attach_paths:
+                try:
+                    with open(p, "rb") as f:
+                        data_b64 = _b64(f.read()).decode("ascii")
+                    content.append({
+                        "type": "document",
+                        "source": {"type": "base64", "media_type": "application/pdf", "data": data_b64},
+                        "citations": {"enabled": True},
+                    })
+                except Exception:
+                    continue
+            # Build Allowed citations block from selected chunks (consistent format for both PDF and text-only cases)
+            allowed_lines = []
+            # Gather by (file,page) and merge section names
+            grouped: dict[tuple[str, int], set[str]] = {}
+            for doc, _score in results:
+                meta = getattr(doc, 'metadata', {}) or {}
+                src = str(meta.get('source') or '')
+                try:
+                    p1 = int(meta.get('page_1based') or (int(meta.get('page') or 0) + 1))
+                except Exception:
+                    p1 = int(meta.get('page') or 0) + 1
+                # Merge primary and continuation sections
+                sects = []
+                try:
+                    import json as _json
+                    prim = _json.loads(meta.get('primary_sections') or '[]')
+                    sects.extend([str(s) for s in (prim or [])])
+                except Exception:
+                    pass
+                try:
+                    import json as _json
+                    cont = _json.loads(meta.get('continuation_sections') or '[]')
+                    sects.extend([str(s) for s in (cont or [])])
+                except Exception:
+                    pass
+                key = (src, p1)
+                s = grouped.get(key)
+                if s is None:
+                    grouped[key] = set(sects)
+                else:
+                    s.update(sects)
+            for (src, p1), sects in grouped.items():
+                def _sanitize_section_name(name: str) -> str:
+                    # Normalize smart quotes to straight, then replace straight double quotes with single quotes
+                    s = str(name or "")
+                    s = s.replace("“", '"').replace("”", '"')
+                    s = s.replace('"', "'")
+                    return s
+                sect_list = ", ".join([f"\"{_sanitize_section_name(x)}\"" for x in sorted(sects) if x])
+                allowed_lines.append(f"- file={Path(src).name}, page={p1}, sections=[{sect_list}]")
+
+            allowed_block = "\n".join(["Allowed citations:"] + allowed_lines) if allowed_lines else ""
+
+            # Build instruction with strict inline citation requirements
+            instruction = (
+                "Answer the user's question based ONLY on the attached material.\n"
+                "At the end of each paragraph, add exactly one inline citation in this identical format: "
+                "[<section>: {\"file\": \"<filename.pdf>\", \"page\": <1-based>, \"section\": \"<section>\"}].\n"
+                "Do NOT wrap the JSON in backticks or code spans.\n"
+                "Strict JSON rules for the citation object: keys must be double-quoted (\"file\", \"page\", \"section\"); string values must be double-quoted; page is an integer. Do NOT use bare keys or single quotes.\n"
+                "Use ONLY file/page values from the Allowed citations list below. Do not invent files or pages. The human-readable section title (the text before ': {') should exactly match the source (copy verbatim; do not misspell or paraphrase).\n"
+                "Do not include code blocks.\n\n"
+                f"{allowed_block}\n\n"
+                f"Question: {query_text}\n\n"
+            )
+            if context_blocks:
+                instruction += "\n\n" + "\n\n".join(context_blocks)
+            content.append({"type": "text", "text": instruction})
+            system_prompt = "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations."
+            body = {"model": model, "max_tokens": 4096, "system": system_prompt, "messages": [{"role": "user", "content": content}]}
+
+            try:
+                resp = _req.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
+                resp.raise_for_status()
+                js = resp.json()
+                parts = js.get("content") or []
+                texts = []
+                for p in parts:
+                    if isinstance(p, dict) and p.get("type") == "text":
+                        texts.append(str(p.get("text") or ""))
+                out = "\n".join(texts).strip()
+                yield out if out else "No answer."
+            except Exception as e:
+                yield f"[anthropic error: {e}]"
+
+        meta = {"sources": [], "context": "", "prompt": query_text, "original_query": query_text, "spans": []}
+        print("="*80)
+        print("🔍 STREAM_QUERY_RAG DEBUG END (VECTOR)")
+        print("="*80 + "\n")
+        return _gen(), meta
+
     # ---- DB-less branch: use Anthropic Files API on original PDFs ----
     # When DB_LESS is enabled, do NOT fall back to DB. Stream a clear error instead.
     db_less_enabled = True
     try:
         from . import config as _cfg  # type: ignore
-        db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+        db_less_enabled = bool(getattr(_cfg, "IS_DB_LESS_MODE", True))
     except Exception:
-        import os as _os
-        db_less_enabled = _os.getenv("DB_LESS", "1").lower() in {"1", "true", "yes"}
+        db_less_enabled = True
     if db_less_enabled:
         import os as _os
         api_key = _os.getenv("ANTHROPIC_API_KEY", "")

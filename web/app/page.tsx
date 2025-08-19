@@ -5,13 +5,13 @@ import { createPortal } from "react-dom";
 import { mutate as swrMutate } from "swr";
 import useSWR from "swr";
 import ReactMarkdown from "react-markdown";
-import { Document, Page, pdfjs } from "react-pdf";
+import { pdfjs } from "react-pdf";
 import InputRow from "./components/InputRow";
 import HistoryStrip from "./components/HistoryStrip";
 import BottomSheetMenu from "./components/BottomSheetMenu";
 // Modal viewer removed; reuse preview panel for all screen sizes
 import PdfPreview from "./components/PdfPreview";
-import 'react-pdf/dist/esm/Page/TextLayer.css';
+// TextLayer CSS removed; we do not render text layers
 
 type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; style?: "default" | "brief" | "detailed" };
 
@@ -66,9 +66,10 @@ export default function HomePage() {
   const decorateCitations = (input: string): string => {
     if (!input) return input;
     let out = input;
-    // Convert inline metadata citations like [6.1: {json}] -> [6.1](section:6.1 "base64(json)")
-    // Support codes like 3.5, 3.5.1, F4, F4.a, A10.2b, 1B6b, ranges like 6.41-6.43, uppercase text like HOTELS, and mixed-case text like Combat Basics
-    out = out.replace(/\[((?:[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+(?:\.[A-Za-z0-9]+)*|[A-Z][A-Z0-9 _@-]*[A-Z0-9]|[A-Z][A-Za-z0-9 _@-]*[A-Za-z0-9])(?:-\d+(?:\.[A-Za-z0-9]+)*)?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code, json) => {
+    // Convert inline metadata citations like [<label>: {json}] -> [<label>](section:<label> '<json>')
+    // We keep this permissive because the presence of a JSON object after the colon
+    // is a strong signal that this is a citation block.
+    out = out.replace(/\[([^\]\n]+?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code, json) => {
       const encCode = encodeURIComponent(String(code));
       // Put the literal JSON into the title so tooltip shows the human-readable metadata
       const safe = String(json).replace(/'/g, "&#39;");
@@ -554,6 +555,14 @@ export default function HomePage() {
   const startQuery = async (question: string, reuseUserIndex?: number | null, styleOverride?: PromptStyle) => {
     if (!selectedGame || !question) return;
     setIsStreaming(true);
+    try {
+      // Log to admin console so operators see the query begin immediately
+      fetch(`${API_BASE}/admin/log`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ line: `[client] Ask: ${question} — game=${selectedGame}` }),
+      }).catch(() => {});
+    } catch {}
     let workingMessages = messages;
     if (reuseUserIndex == null) {
       // append new user message
@@ -1711,7 +1720,7 @@ export default function HomePage() {
                             },
                           }}
                         >
-                          {m.content}
+                          {decorateCitations(m.content)}
                         </ReactMarkdown>
                       </div>
                     )}

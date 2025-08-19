@@ -158,9 +158,9 @@ async def _lifespan(_app: FastAPI):
             # Resolve DB-less flag
             try:
                 from src import config as _cfg  # type: ignore
-                db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+                db_less_enabled = bool(getattr(_cfg, "IS_DB_LESS_MODE", True))
             except Exception:
-                db_less_enabled = str(os.getenv("DB_LESS", "1")).lower() in ("1", "true", "yes")
+                db_less_enabled = True
             global _catalog_warmed_once
             if db_less_enabled and not _catalog_warmed_once:
                 try:
@@ -266,12 +266,12 @@ async def _print_routes_on_startup():
     # Catalog warmup: scan data/ and upload new PDFs to Anthropic Files API (fallback if lifespan missed)
     try:
         # Only useful in DB-less mode; default enabled
-        # Prefer cfg.DB_LESS if available; fallback to env defaulting to enabled
+        # Prefer cfg.IS_DB_LESS_MODE if available
         try:
             from src import config as _cfg  # type: ignore
-            db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
+            db_less_enabled = bool(getattr(_cfg, "IS_DB_LESS_MODE", True))
         except Exception:
-            db_less_enabled = str(os.getenv("DB_LESS", "1")).lower() in ("1", "true", "yes")
+            db_less_enabled = True
         if db_less_enabled:
             from src.catalog import ensure_catalog_up_to_date  # type: ignore
             # Avoid double-run if lifespan already warmed
@@ -318,7 +318,7 @@ async def list_games():
     # DB-less: return catalog names only; do not touch DB or trigger refresh
     try:
         from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
+        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
             try:
                 from src.catalog import list_games_from_catalog  # type: ignore
                 return {"games": list_games_from_catalog()}
@@ -352,7 +352,7 @@ async def list_pdf_choices():
     # In DB-less mode, source choices from catalog explicitly
     try:
         from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
+        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
             try:
                 from src.catalog import get_pdf_choices_from_catalog  # type: ignore
                 choices = get_pdf_choices_from_catalog()
@@ -375,7 +375,7 @@ async def get_game_pdfs(game: str, token: Optional[str] = None, authorization: O
     
     try:
         from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
+        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
             from src.catalog import get_pdf_filenames_for_game  # type: ignore
             return {"pdfs": get_pdf_filenames_for_game(game)}
     except Exception:
@@ -423,7 +423,46 @@ async def get_pdf(filename: str, token: Optional[str] = None, authorization: Opt
 
 @app.get("/section-chunks")
 async def section_chunks(section: Optional[str] = None, game: Optional[str] = None, limit: int = 12, id: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
-    raise HTTPException(status_code=501, detail="section-chunks is not available in DB-less mode")
+    # Enforce auth (accept Authorization header or token query param)
+    _ = _require_auth(authorization, token)
+    try:
+        from src import config as _cfg  # type: ignore
+    except Exception:
+        _cfg = None  # type: ignore
+
+    # If vector mode available, perform a similarity search for the requested section text
+    try:
+        if _cfg and bool(getattr(_cfg, "IS_VECTOR_MODE", False)):
+            from src.vector_store import search_chunks  # type: ignore
+            pdf_filter: Optional[str] = None
+            if game:
+                try:
+                    from src.catalog import get_pdf_filenames_for_game  # type: ignore
+                    files = get_pdf_filenames_for_game(game)
+                    pdf_filter = files[0] if files else None
+                except Exception:
+                    pdf_filter = None
+            query_text = (section or "").strip() or (id or "").strip()
+            if not query_text:
+                return {"chunks": []}
+            results = search_chunks(query_text, pdf=pdf_filter, k=max(1, int(limit)))
+            chunks = []
+            for doc, score in results[: max(1, int(limit))]:
+                meta = getattr(doc, "metadata", {}) or {}
+                chunks.append({
+                    "text": getattr(doc, "page_content", "") or "",
+                    "source": str(meta.get("source") or ""),
+                    "page": int(meta.get("page") or 0),
+                    "section": query_text,
+                    "section_number": query_text,
+                })
+            return {"chunks": chunks}
+    except Exception:
+        # Fall through to empty list on any retrieval error
+        pass
+
+    # Default: return empty list rather than 501 so auth probe succeeds
+    return {"chunks": []}
 
 
 @app.post("/auth/unlock")
@@ -509,7 +548,7 @@ async def upload(files: List[UploadFile] = File(...)):
     # DB-less: update catalog instead of DB refresh
     try:
         from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
+        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
             await _admin_log_publish("📚 Updating catalog for uploaded PDFs…")
             try:
                 from src.catalog import ensure_catalog_up_to_date, list_games_from_catalog  # type: ignore
@@ -788,6 +827,167 @@ async def admin_rechunk_selected_stream(entries: str):
             return
 
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
+
+# ----------------------------------------------------------------------------
+# Vector DB Rebuild: PDF processing status and processing endpoints
+# ----------------------------------------------------------------------------
+
+
+@app.get("/admin/pdf-status")
+async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from src.pdf_pages import get_page_count
+    from src.vector_store import count_processed_pages  # type: ignore
+    from pathlib import Path as _P
+    import os as _os
+    data = _P(cfg.DATA_PATH)
+    pdfs = sorted([p for p in data.glob("*.pdf") if p.is_file()])
+    items = []
+    for p in pdfs:
+        total = 0
+        try:
+            total = get_page_count(p)
+        except Exception:
+            pass
+        processed = 0
+        try:
+            processed = count_processed_pages(p.stem, total)
+        except Exception:
+            processed = 0
+        items.append({"filename": p.name, "total_pages": total, "processed_pages": processed})
+    return {"items": items}
+
+
+class ProcessSelectedPayload(BaseModel):
+    entries: List[str]
+
+
+@app.get("/admin/process-selected-stream")
+async def admin_process_selected_stream(entries: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    import json as _json
+    from pathlib import Path as _P
+
+    def _parse_entries(raw: str) -> List[str]:
+        try:
+            data = _json.loads(raw)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+        except Exception:
+            pass
+        return [s.strip() for s in (raw or "").split(",") if s.strip()]
+
+    selected = _parse_entries(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    async def run_job():
+        try:
+            await _admin_log_publish("Processing selected PDFs (per-page)...")
+            for pdf in pdfs:
+                await _admin_log_publish(f"Processing { _P(pdf).name }")
+                # Synchronously run the script in a worker thread to keep SSE responsive
+                code = await asyncio.to_thread(_run_process_pdf_incremental, pdf)
+                if code != 0:
+                    await queue.put(("log", f"ERROR: { _P(pdf).name } failed (exit {code})"))
+                    break
+                await queue.put(("log", f"{ _P(pdf).name } done"))
+            await queue.put(("done", "ok"))
+            await queue.put(("close", ""))
+        except Exception as e:
+            await queue.put(("log", f"error: {e}"))
+            await queue.put(("done", "error"))
+            await queue.put(("close", ""))
+
+    def _run_process_pdf_incremental(pdf_path: str) -> int:
+        import subprocess as _sp
+        import sys as _sys
+        from pathlib import Path as __P
+        root = __P(__file__).resolve().parent.parent
+        script = root / "scripts" / "process_pdf_incremental.py"
+        return _sp.call([_sys.executable, str(script), pdf_path])
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        task = asyncio.create_task(run_job())
+        try:
+            while True:
+                try:
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:
+            return
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/admin/clear-selected")
+async def admin_clear_selected(entries: List[str], token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    try:
+        from src.vector_store import clear_pdf_chunks  # type: ignore
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"vector store unavailable: {e}")
+    total = 0
+    try:
+        await _admin_log_publish(f"Clearing DB for {len(entries or [])} PDF(s)...")
+    except Exception:
+        pass
+    for name in entries or []:
+        try:
+            # Ensure only basename with .pdf
+            from pathlib import Path as _P
+            fname = _P(name).name
+            if not fname.lower().endswith('.pdf'):
+                fname = f"{_P(fname).stem}.pdf"
+            try:
+                await _admin_log_publish(f"Clearing: {fname}")
+            except Exception:
+                pass
+            n = clear_pdf_chunks(fname)
+            total += int(n or 0)
+            try:
+                await _admin_log_publish(f"Cleared: {fname}")
+            except Exception:
+                pass
+        except Exception:
+            pass
+    # Force a post-clear status refresh on the server side (best-effort)
+    try:
+        await _admin_log_publish("Refreshing processed status...")
+        # Nothing to do server-side beyond log; client will refetch /admin/pdf-status
+    except Exception:
+        pass
+    try:
+        await _admin_log_publish("Clear complete.")
+    except Exception:
+        pass
+    return {"message": f"Cleared DB entries for {len(entries or [])} PDF(s)", "cleared": total}
 
 
 @app.post("/admin/delete")
