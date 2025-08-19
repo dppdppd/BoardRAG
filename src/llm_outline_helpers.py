@@ -148,7 +148,7 @@ def anthropic_pdf_messages(api_key: str, model: str, system_prompt: str, user_pr
     }
     body = {
         "model": model,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "system": system_prompt,
         "messages": [
             {
@@ -253,7 +253,7 @@ def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: st
     }
     body = {
         "model": model,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "system": system_prompt,
         "messages": [
             {
@@ -370,7 +370,7 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
     }
     body = {
         "model": model,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "system": system_prompt,
         "stream": True,
         "messages": [

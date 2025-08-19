@@ -113,45 +113,81 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
         content_blocks.append(_doc_block(spillover_page_pdf))
     content_blocks.append({"type": "text", "text": user_prompt + appendix})
 
-    body = {
-        "model": model,
-        "max_tokens": 8000,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": content_blocks}],
-    }
+    def _send_and_collect_text(
+        req_blocks: list[dict],
+        sys_msg: str,
+        user_suffix_text: str,
+        existing_file_ids: Optional[list[str]] = None,
+    ) -> tuple[str, Optional[list[str]]]:
+        """Send a messages request and return (text, file_ids_used).
 
-    print(f"[anthropic] sending pages: primary={primary_page_pdf.name} spillover={'yes' if (spillover_page_pdf and spillover_page_pdf.exists()) else 'no'}")
-    resp = _req.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
-    raw = ""
-    if resp.status_code >= 400:
-        # Fallback: use Files API if base64 document path is rejected (e.g., 404/405/415)
-        err_text = ""
-        try:
-            err_text = resp.text[:1000]
-        except Exception:
+        - If existing_file_ids is provided, use Files API directly with those ids.
+        - Otherwise try base64 document blocks; on certain 4xx errors, upload once and return the new file_ids so callers can reuse them.
+        """
+        # If we already have uploaded file ids, use them directly
+        if existing_file_ids:
+            from .llm_outline_helpers import anthropic_pdf_messages_with_files  # type: ignore
+            txt = anthropic_pdf_messages_with_files(api_key, model, sys_msg, user_suffix_text, existing_file_ids)
+            return txt, existing_file_ids
+        # Build combined content
+        merged = []
+        for b in req_blocks:
+            merged.append(b)
+        merged.append({"type": "text", "text": user_suffix_text})
+
+        body = {
+            "model": model,
+            "max_tokens": 8192,
+            "system": sys_msg,
+            "messages": [{"role": "user", "content": merged}],
+        }
+
+        print(f"[anthropic] sending pages: primary={primary_page_pdf.name} spillover={'yes' if (spillover_page_pdf and spillover_page_pdf.exists()) else 'no'}")
+        resp = _req.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
+        if resp.status_code >= 400:
             err_text = ""
-        if resp.status_code in (400, 404, 405, 415, 422):
             try:
-                from .llm_outline_helpers import upload_pdf_to_anthropic_files, anthropic_pdf_messages_with_files  # type: ignore
-                fids = [upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))]
-                if spillover_page_pdf and spillover_page_pdf.exists():
-                    try:
-                        fids.append(upload_pdf_to_anthropic_files(api_key, str(spillover_page_pdf)))
-                    except Exception:
-                        pass
-                raw = anthropic_pdf_messages_with_files(api_key, model, system_prompt, user_prompt + appendix, fids)
-            except Exception as e:
-                raise RuntimeError(f"Anthropic base64 messages {resp.status_code}: {err_text}; Files fallback failed: {e}")
-        else:
+                err_text = resp.text[:1000]
+            except Exception:
+                err_text = ""
+            if resp.status_code in (400, 404, 405, 415, 422):
+                try:
+                    from .llm_outline_helpers import upload_pdf_to_anthropic_files, anthropic_pdf_messages_with_files  # type: ignore
+                    fids = [upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))]
+                    if spillover_page_pdf and spillover_page_pdf.exists():
+                        try:
+                            fids.append(upload_pdf_to_anthropic_files(api_key, str(spillover_page_pdf)))
+                        except Exception:
+                            pass
+                    txt = anthropic_pdf_messages_with_files(api_key, model, sys_msg, user_suffix_text, fids)
+                    return txt, fids
+                except Exception as e:
+                    raise RuntimeError(f"Anthropic base64 messages {resp.status_code}: {err_text}; Files fallback failed: {e}")
             raise RuntimeError(f"Anthropic messages {resp.status_code}: {err_text}")
-    else:
         js = resp.json()
         parts = js.get("content") or []
         texts = []
         for p in parts:
             if isinstance(p, dict) and p.get("type") == "text":
                 texts.append(str(p.get("text") or ""))
-        raw = "\n".join(texts).strip()
+        return "\n".join(texts).strip(), None
+
+    # Pass 1: extract full_text only (as plain text) with a dedicated system prompt and explicit text-only task
+    pass1_system = "You extract plain text from boardgame PDF pages. Output only the relevant page text, nothing else."
+    fulltext_instr = (
+        "TEXT-ONLY TASK:\n"
+        f"Primary page: {_infer_1based(primary_page_pdf)}; a second page may be attached ONLY to capture continuation of sections that START on the primary page.\n"
+        "Return ONLY the concatenated page text under detected section headers for the primary page (and continuation portions from the next page if needed).\n"
+        "Do NOT return JSON, code fences, bullet lists, or explanations.\n"
+        "If no content is found, return an empty string.\n"
+    )
+    shared_fids: Optional[list[str]] = None
+    full_text_raw, shared_fids = _send_and_collect_text(content_blocks[:-1], pass1_system, fulltext_instr + appendix)
+
+    # Pass 2: structured JSON, but require empty full_text to minimize tokens
+    json_user_prompt = user_prompt + "\n\nOVERRIDE: In the OUTPUT, set \"full_text\" to an empty string \"\"."
+    json_raw, _ = _send_and_collect_text(content_blocks[:-1], system_prompt, json_user_prompt + appendix, existing_file_ids=shared_fids)
+
     # Optional debug dump
     try:
         if debug_dir:
@@ -160,10 +196,16 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
             (debug_dir / f"{stem}.system.txt").write_text(system_prompt, encoding="utf-8")
             (debug_dir / f"{stem}.user.txt").write_text(user_prompt, encoding="utf-8")
             (debug_dir / f"{stem}.appendix.txt").write_text(appendix, encoding="utf-8")
-            (debug_dir / f"{stem}.raw.txt").write_text(raw, encoding="utf-8")
+            (debug_dir / f"{stem}.fulltext.txt").write_text(full_text_raw, encoding="utf-8")
+            (debug_dir / f"{stem}.raw.txt").write_text(json_raw, encoding="utf-8")
     except Exception:
         pass
-    obj = _parse_strict_json(raw)
+
+    obj = _parse_strict_json(json_raw)
+    try:
+        obj["full_text"] = str(full_text_raw or "")
+    except Exception:
+        pass
     return obj
 
 
