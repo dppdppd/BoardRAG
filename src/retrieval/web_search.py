@@ -104,8 +104,7 @@ def rewrite_search_query(raw_query: str) -> str:
 
             model = Ollama(model=cfg.SEARCH_REWRITE_MODEL, base_url=cfg.OLLAMA_URL)
         else:
-            temp = 1 if cfg.SEARCH_REWRITE_MODEL == "o3" else 0
-            model = ChatOpenAI(model=cfg.SEARCH_REWRITE_MODEL, temperature=temp, timeout=60)
+            model = ChatOpenAI(model=cfg.SEARCH_REWRITE_MODEL, temperature=0, timeout=60)
 
         prompt = (
             "You are a search expert. Rewrite the following user question into a concise, "

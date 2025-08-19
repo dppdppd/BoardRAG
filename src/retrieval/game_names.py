@@ -55,8 +55,7 @@ def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
 
                 model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL)
             else:
-                # use default temperature=1 for o3
-                temp = 1 if str(cfg.GENERATOR_MODEL).lower().startswith("o3") else 0
+                temp = 0
                 model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=temp, timeout=60)
 
             context_section = f"\n\nCONTENT FROM FIRST PAGES:\n{pdf_context}\n\n" if pdf_context else ""
