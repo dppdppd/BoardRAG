@@ -29,9 +29,9 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
 # Model configurations by provider
 MODEL_CONFIGS = {
     "openai": {
-        "generator": "o3",
+        "generator": "gpt-4o",
         "embedder": "text-embedding-3-small",
-        "evaluator": "o3",
+        "evaluator": "gpt-4o",
     },
     "anthropic": {
         "generator": "claude-sonnet-4-20250514",
@@ -118,7 +118,6 @@ IS_DB_LESS_MODE = RAG_MODE == "db-less"
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
-    "o3": {"chunk_size": 3000, "chunk_overlap": 400},  # Optimized for o3's advanced reasoning
     "claude-sonnet-4-20250514": {
         "chunk_size": 1400,
         "chunk_overlap": 250,

@@ -62,6 +62,13 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
 
     api_key = cfg.ANTHROPIC_API_KEY  # type: ignore
     model = getattr(cfg, "GENERATOR_MODEL", "claude-sonnet-4-20250514")
+    try:
+        provider = str(getattr(cfg, "LLM_PROVIDER", "anthropic")).lower()
+        if provider != "anthropic":
+            # Force a valid Anthropic model for page extraction when provider is not Anthropic
+            model = "claude-sonnet-4-20250514"
+    except Exception:
+        pass
 
     # Prefer a single Messages API call that includes both PDFs as separate document blocks.
     system_prompt = "You extract structured data from boardgame PDF pages. Be precise and faithful to the page text."

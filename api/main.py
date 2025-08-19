@@ -1133,7 +1133,7 @@ async def admin_set_model(payload: ModelSelection):
     lower = generator.lower()
     if "claude" in lower:
         provider = "anthropic"
-    elif "gpt" in lower or "o3" in lower:
+    elif "gpt" in lower:
         provider = "openai"
     else:
         # Default to OpenAI unless explicitly set elsewhere

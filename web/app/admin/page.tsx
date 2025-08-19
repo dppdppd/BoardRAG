@@ -649,7 +649,7 @@ export default function AdminPage() {
           >
             <option value="claude-3-5-haiku-latest">claude-3-5-haiku-latest</option>
             <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
-            <option value="o3">o3</option>
+            <option value="gpt-4o">gpt-4o</option>
             <option value="gpt-4o-mini">gpt-4o-mini</option>
             <option value="gpt-5-mini">gpt-5-mini</option>
           </select>
