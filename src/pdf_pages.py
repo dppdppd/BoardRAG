@@ -26,6 +26,22 @@ def export_single_page_pdfs(pdf_path: Path, pages_dir: Path) -> Tuple[int, List[
     except Exception as e:
         raise RuntimeError(f"PyMuPDF (fitz) is required for page export: {e}")
 
+    def _validate_page_pdf(p: Path) -> None:
+        """Open the page PDF and load page 0 to ensure it is readable."""
+        try:
+            if p.stat().st_size <= 0:
+                raise RuntimeError("file size is 0")
+        except Exception:
+            raise RuntimeError("file not found or unreadable size")
+        try:
+            with fitz.open(str(p)) as d:
+                if getattr(d, "page_count", len(d)) < 1:
+                    raise RuntimeError("no pages present")
+                # Attempt to load first page to ensure structure is valid
+                _ = d.load_page(0)
+        except Exception as _e:
+            raise RuntimeError(f"invalid page pdf: {_e}")
+
     doc = fitz.open(str(pdf_path))
     count = doc.page_count
     out_paths: List[Path] = []
@@ -37,6 +53,10 @@ def export_single_page_pdfs(pdf_path: Path, pages_dir: Path) -> Tuple[int, List[
             single.insert_pdf(doc, from_page=i, to_page=i)
             single.save(str(out))
             single.close()
+            _validate_page_pdf(out)
+        else:
+            # Validate existing file as well to catch prior corrupt outputs
+            _validate_page_pdf(out)
         out_paths.append(out)
     doc.close()
     return count, out_paths
