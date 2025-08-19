@@ -79,7 +79,13 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
     import json as _json
     import requests as _req
 
-    url = "https://api.anthropic.com/v1/messages"
+    # Build endpoint from configurable base URL (supports regional endpoints)
+    try:
+        from . import config as _cfg  # type: ignore
+        _anth_base = getattr(_cfg, "ANTHROPIC_API_URL", "https://api.anthropic.com")
+    except Exception:
+        _anth_base = "https://api.anthropic.com"
+    url = f"{_anth_base.rstrip('/')}/v1/messages"
     headers = {
         "content-type": "application/json",
         "x-api-key": api_key,
@@ -109,14 +115,36 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
 
     print(f"[anthropic] sending pages: primary={primary_page_pdf.name} spillover={'yes' if (spillover_page_pdf and spillover_page_pdf.exists()) else 'no'}")
     resp = _req.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
-    resp.raise_for_status()
-    js = resp.json()
-    parts = js.get("content") or []
-    texts = []
-    for p in parts:
-        if isinstance(p, dict) and p.get("type") == "text":
-            texts.append(str(p.get("text") or ""))
-    raw = "\n".join(texts).strip()
+    raw = ""
+    if resp.status_code >= 400:
+        # Fallback: use Files API if base64 document path is rejected (e.g., 404/405/415)
+        err_text = ""
+        try:
+            err_text = resp.text[:1000]
+        except Exception:
+            err_text = ""
+        if resp.status_code in (400, 404, 405, 415, 422):
+            try:
+                from .llm_outline_helpers import upload_pdf_to_anthropic_files, anthropic_pdf_messages_with_files  # type: ignore
+                fids = [upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))]
+                if spillover_page_pdf and spillover_page_pdf.exists():
+                    try:
+                        fids.append(upload_pdf_to_anthropic_files(api_key, str(spillover_page_pdf)))
+                    except Exception:
+                        pass
+                raw = anthropic_pdf_messages_with_files(api_key, model, system_prompt, user_prompt + appendix, fids)
+            except Exception as e:
+                raise RuntimeError(f"Anthropic base64 messages {resp.status_code}: {err_text}; Files fallback failed: {e}")
+        else:
+            raise RuntimeError(f"Anthropic messages {resp.status_code}: {err_text}")
+    else:
+        js = resp.json()
+        parts = js.get("content") or []
+        texts = []
+        for p in parts:
+            if isinstance(p, dict) and p.get("type") == "text":
+                texts.append(str(p.get("text") or ""))
+        raw = "\n".join(texts).strip()
     # Optional debug dump
     try:
         if debug_dir:
