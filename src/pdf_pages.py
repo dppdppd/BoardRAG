@@ -54,9 +54,19 @@ def export_single_page_pdfs(pdf_path: Path, pages_dir: Path) -> Tuple[int, List[
             single.save(str(out))
             single.close()
             _validate_page_pdf(out)
+            try:
+                size = out.stat().st_size
+                print(f"[pages] Created page {i+1}: {out} size={size} bytes")
+            except Exception:
+                print(f"[pages] Created page {i+1}: {out} (size unavailable)")
         else:
             # Validate existing file as well to catch prior corrupt outputs
             _validate_page_pdf(out)
+            try:
+                size = out.stat().st_size
+                print(f"[pages] Reused page {i+1}: {out} size={size} bytes")
+            except Exception:
+                print(f"[pages] Reused page {i+1}: {out} (size unavailable)")
         out_paths.append(out)
     doc.close()
     return count, out_paths
