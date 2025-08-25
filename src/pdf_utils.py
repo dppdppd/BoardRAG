@@ -565,6 +565,32 @@ def compute_normalized_header_bbox(
                 words.append((x0, y0, x1, y1, t, b, l, wn))
             words.sort(key=lambda ww: (ww[6], ww[7], ww[5], ww[1], ww[0]))
 
+            # If a section code token exists (e.g., 6/3, 3.1.2), highlight ONLY that token
+            try:
+                code_only = _extract_section_code(text_norm)
+            except Exception:
+                code_only = ""
+            if code_only:
+                def _norm_word(s: str) -> str:
+                    import re as _re
+                    s2 = (s or "").lower().replace("\u00a0", " ")
+                    return _re.sub(r"^[\s\-–—:;,.]+|[\s\-–—:;,.]+$", "", s2)
+                for wrec in words:
+                    try:
+                        x0, y0, x1, y1, t = float(wrec[0]), float(wrec[1]), float(wrec[2]), float(wrec[3]), str(wrec[4])
+                    except Exception:
+                        continue
+                    tw = _norm_word(t)
+                    if not tw:
+                        continue
+                    if tw == code_only or tw.startswith(code_only):
+                        # Convert this single word rect to normalized percentages and return immediately
+                        y_pct = max(0.0, min(100.0, ((float(x0) - frame_left) / frame_w) * 100.0))
+                        x_pct = max(0.0, min(100.0, ((float(y0) - frame_top) / frame_h) * 100.0))
+                        w_pct = max(0.2, min(100.0, ((float(x1) - float(x0)) / frame_w) * 100.0))
+                        h_pct = max(0.2, min(100.0, ((float(y1) - float(y0)) / frame_h) * 100.0))
+                        return (x_pct, y_pct, w_pct, h_pct)
+
             # Find a contiguous sequence matching the exact header tokens (case/space/punct-insensitive)
             header_tokens = tokens
             def _norm_word(s: str) -> str:

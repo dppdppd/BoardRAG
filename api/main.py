@@ -1657,7 +1657,7 @@ async def admin_populate_db_stream(entries: str, mode: str = "missing", token: O
 
 
 @app.get("/admin/pipeline-stream")
-async def admin_pipeline_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+async def admin_pipeline_stream(entries: str, mode: str = "missing", start: str = "split", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
     _ = _require_auth(authorization, token)
     from src import config as cfg  # type: ignore
     from pathlib import Path as _P
@@ -1690,7 +1690,14 @@ async def admin_pipeline_stream(entries: str, mode: str = "missing", token: Opti
     asyncio.create_task(_jobs_publish({"type": "start", "job": _JOBS_REGISTRY.get(job_id)}))
     async def run_job(queue: asyncio.Queue):
         try:
-            for step in ("split", "eval", "populate"):
+            # Full ordered list; select slice based on requested start step
+            all_steps = ("split", "eval", "compute", "populate")
+            try:
+                s_norm = (start or "split").strip().lower()
+                idx = list(all_steps).index(s_norm) if s_norm in all_steps else 0
+            except Exception:
+                idx = 0
+            for step in all_steps[idx:]:
                 await _admin_log_publish(f"Pipeline step: {step} ({mode})")
                 for pdf in pdfs:
                     p = _P(pdf)
@@ -1794,7 +1801,7 @@ async def admin_pipeline_stream(entries: str, mode: str = "missing", token: Opti
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
-def _start_pipeline_job_for_pdfs(pdfs: List[str], mode: str = "missing") -> None:
+def _start_pipeline_job_for_pdfs(pdfs: List[str], mode: str = "missing", start: str = "split") -> None:
     """Start a background Pipeline job (split → eval → populate) for the given PDFs.
 
     - Uses the same job registry/progress system as the /admin/pipeline-stream endpoint
@@ -1822,7 +1829,13 @@ def _start_pipeline_job_for_pdfs(pdfs: List[str], mode: str = "missing") -> None
 
     async def run_job():
         try:
-            for step in ("split", "eval", "populate"):
+            all_steps = ("split", "eval", "compute", "populate")
+            try:
+                s_norm = (start or "split").strip().lower()
+                idx = list(all_steps).index(s_norm) if s_norm in all_steps else 0
+            except Exception:
+                idx = 0
+            for step in all_steps[idx:]:
                 await _admin_log_publish(f"Pipeline step: {step} ({mode})")
                 for pdf in pdfs:
                     p = _P(pdf)
@@ -2014,7 +2027,15 @@ async def admin_catalog_refresh():
         except Exception:
             pass
         # Warm the catalog (scan /data, add missing entries, remove stale, preserve names)
-        await asyncio.to_thread(ensure_catalog_up_to_date, _admin_log_publish)
+        # ensure_catalog_up_to_date is synchronous and may be run in a worker thread;
+        # wrap the async logger so calls from the worker thread are scheduled on the main loop
+        loop = asyncio.get_running_loop()
+        def _sync_log(msg: str) -> None:
+            try:
+                loop.call_soon_threadsafe(asyncio.create_task, _admin_log_publish(msg))
+            except Exception:
+                pass
+        await asyncio.to_thread(ensure_catalog_up_to_date, _sync_log)
         await _admin_log_publish("📚 Catalog refresh complete")
         cat = load_catalog()
         entries = []

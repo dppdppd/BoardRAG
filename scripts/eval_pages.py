@@ -52,9 +52,16 @@ def main() -> int:
 
 	# If forcing, remove existing per-page JSON artifacts to ensure a clean run
 	if args.force:
+		# Clear structured eval outputs
 		for fp in sorted(eval_dir.glob("p*.json")):
 			try:
 				fp.unlink()
+			except Exception:
+				pass
+		# Clear cached raw LLM outputs so we re-call the LLM
+		for rp in sorted(analyzed_dir.glob("p*.raw.txt")):
+			try:
+				rp.unlink()
 			except Exception:
 				pass
 

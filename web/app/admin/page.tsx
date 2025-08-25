@@ -497,10 +497,11 @@ export default function AdminPage() {
     const token = (() => {
       try { return sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token"); } catch { return null; }
     })();
-    const buildAndRun = (path: string, mode: "all" | "missing") => {
+    const buildAndRun = (path: string, mode: "all" | "missing", start?: string) => {
       const url = new URL(`${API_BASE}${path}`);
       url.searchParams.set("entries", JSON.stringify(renameSelection));
       url.searchParams.set("mode", mode);
+      if (start) url.searchParams.set("start", start);
       if (token) url.searchParams.set("token", token);
       const es = new EventSource(url.toString());
       es.onmessage = (ev) => {
@@ -518,28 +519,32 @@ export default function AdminPage() {
     };
     switch (action) {
       case "split-all":
-        buildAndRun("/admin/split-pages-stream", "all");
+        // Run full pipeline starting from split
+        buildAndRun("/admin/pipeline-stream", "all", "split");
         break;
       case "split-missing":
-        buildAndRun("/admin/split-pages-stream", "missing");
+        buildAndRun("/admin/pipeline-stream", "missing", "split");
         break;
       case "eval-all":
-        buildAndRun("/admin/eval-pages-stream", "all");
+        // Start from eval, then compute, then populate
+        buildAndRun("/admin/pipeline-stream", "all", "eval");
         break;
       case "eval-missing":
-        buildAndRun("/admin/eval-pages-stream", "missing");
+        buildAndRun("/admin/pipeline-stream", "missing", "eval");
         break;
       case "compute-all":
-        buildAndRun("/admin/compute-local-stream", "all");
+        // Start from compute → populate
+        buildAndRun("/admin/pipeline-stream", "all", "compute");
         break;
       case "compute-missing":
-        buildAndRun("/admin/compute-local-stream", "missing");
+        buildAndRun("/admin/pipeline-stream", "missing", "compute");
         break;
       case "populate-all":
-        buildAndRun("/admin/populate-db-stream", "all");
+        // Populate only; this is effectively pipeline start=populate
+        buildAndRun("/admin/pipeline-stream", "all", "populate");
         break;
       case "populate-missing":
-        buildAndRun("/admin/populate-db-stream", "missing");
+        buildAndRun("/admin/pipeline-stream", "missing", "populate");
         break;
       case "pipeline-all":
         buildAndRun("/admin/pipeline-stream", "all");
