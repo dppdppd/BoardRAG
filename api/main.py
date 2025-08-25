@@ -591,6 +591,62 @@ async def storage_stats():
     return {"markdown": format_storage_info()}
 
 
+@app.get("/admin/fs-list")
+async def admin_fs_list(path: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _ = _require_auth(authorization, token)
+    try:
+        from src import config as cfg  # type: ignore
+        base = Path(cfg.DATA_PATH).resolve()
+        # Normalize and constrain target within base
+        rel = (path or "").strip().lstrip("/").replace("\\", "/")
+        target = (base / rel).resolve()
+        if not str(target).startswith(str(base)):
+            raise HTTPException(status_code=400, detail="invalid path")
+        if target.exists() and target.is_file():
+            # If a file is targeted, list its parent
+            target = target.parent
+        if not target.exists():
+            target = base
+        entries = []
+        try:
+            for p in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                try:
+                    st = p.stat()
+                    size = int(st.st_size) if p.is_file() else None
+                    mtime = datetime.fromtimestamp(st.st_mtime).isoformat() + "Z"
+                except Exception:
+                    size = None
+                    mtime = ""
+                entries.append({
+                    "name": p.name,
+                    "is_dir": p.is_dir(),
+                    "size": size,
+                    "mtime": mtime,
+                    "ext": (p.suffix or ""),
+                })
+        except Exception:
+            entries = []
+        try:
+            cwd_rel = str(target.relative_to(base)).replace("\\\\", "/").replace("\\", "/")
+        except Exception:
+            cwd_rel = ""
+        try:
+            parent_rel = "" if target == base else str(target.parent.relative_to(base)).replace("\\\\", "/").replace("\\", "/")
+        except Exception:
+            parent_rel = None
+        return {
+            "base": str(base),
+            "cwd": cwd_rel,
+            "parent": parent_rel,
+            "entries": entries,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
+
+
 @app.get("/pdf")
 async def get_pdf(filename: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
     # Enforce auth

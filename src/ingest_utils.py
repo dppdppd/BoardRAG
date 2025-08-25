@@ -26,6 +26,8 @@ def build_embed_and_metadata(
 	section_pages: Dict[str, int] = {}
 	section_ids: Dict[str, str] = {}
 	header_anchors: Dict[str, List[float]] = {}
+	# Map header -> canonical section_id for quick lookups
+	header_to_code: Dict[str, str] = {}
 	text_spans: Dict[str, List[Dict[str, int]]] = {}
 	primary_sections: List[str] = []
 	cont_sections: List[str] = []
@@ -41,6 +43,7 @@ def build_embed_and_metadata(
 				sections_list.append(header)
 				section_pages[header] = pg
 				section_ids[header] = sid
+				header_to_code[header] = sid
 				if spans:
 					text_spans[header] = spans
 				if pg == page_1based:
@@ -109,10 +112,15 @@ def build_embed_and_metadata(
 			for hdr, pg in section_pages.items():
 				try:
 					if hdr and int(pg) == page_1based:
+						# Only compute/store anchors when we have a canonical section_id
+						code = (header_to_code.get(hdr) or "").strip()
+						if not code:
+							continue
 						bbox = compute_normalized_header_bbox(str(page_pdf), 1, hdr)
 						if bbox:
 							x, y, bw, bh = bbox
-							anchors_local[hdr] = [float(x), float(y), float(bw), float(bh)]
+							# Store by section_id code
+							anchors_local[code] = [float(x), float(y), float(bw), float(bh)]
 				except Exception:
 					continue
 		if anchors_local:

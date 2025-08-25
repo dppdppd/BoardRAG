@@ -1,10 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Rubik+Condensed:wght@400;500;700&display=swap');
-
 * { box-sizing: border-box; }
 /* Remove all drop shadows across the app */
 * { box-shadow: none !important; }
 html, body { height: 100%; }
-html, body { margin: 0; padding: 0; overflow: hidden; font-family: 'Nunito', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial; letter-spacing: 0; }
+html, body { margin: 0; padding: 0; overflow: hidden; font-family: 'Barlow Condensed', 'Cutive', Georgia, 'Times New Roman', serif; letter-spacing: 0; font-size: 20px; }
 /* Ensure all native form controls inherit the app font */
 input, select, textarea, button { font-family: inherit; color: var(--text); }
 input[type="file"] { font-family: inherit; }
@@ -15,30 +14,40 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 
 /* Theming (Light default) */
 :root {
-  /* Cool light palette: ice / slate / steel */
-  --bg: #f6f8fb;             /* cool very light background */
-  --surface: #ffffff;        /* panels default to white */
-  --border: #d9e2ec;         /* cool light border */
-  --text: #1f2937;           /* cool dark slate text */
-  --muted: #64748b;          /* slate muted */
-  --accent: #4f7cac;         /* desaturated steel blue */
-  --accent-2: #6fb1c5;       /* soft aqua secondary */
-  --control-bg: #eef2f7;     /* cool input/chip background */
-  --control-border: #d0dbe7; /* control border */
-  --answer-surface: #ffffff; /* clean white for assistant answers */
-  --answer-text: #0f172a;    /* deep cool text for assistant answers */
-  --radius: 0px;
+  /* Black & white typewriter */
+  --bg: #fafafa;
+  --surface: #ffffff;
+  --border: #e5e5e5;
+  --text: #111111;
+  --muted: #6b6b6b;
+  --accent: #111111;
+  --accent-2: #111111;
+  --control-bg: #f5f5f5;
+  --control-border: #e5e5e5;
+  --answer-surface: #ffffff;
+  --answer-text: #111111;
+  --radius: 4px;
+  --chat-bg: #f6f6f6;
+  /* Pronounced waiting text wave colors */
+  --wave-1: #ff6a00;   /* orange */
+  --wave-2: #ffd166;   /* warm yellow */
+  --wave-3: #1e90ff;   /* blue */
 }
 [data-theme="dark"] {
-  --bg: #0b0f14;
-  --surface: #0f172a;
-  --border: #1f2937;
-  --text: #e5e7eb;
-  --muted: #9ca3af;
-  --control-bg: #11161b;
-  --control-border: #243040;
-  --answer-surface: #0f172a;
-  --answer-text: #e5e7eb;
+  /* Black & white dark mode */
+  --bg: #0f0f0f;
+  --surface: #111111;
+  --border: #2a2a2a;
+  --text: #e9e9e9;
+  --muted: #a0a0a0;
+  --control-bg: #171717;
+  --control-border: #2a2a2a;
+  --answer-surface: #111111;
+  --answer-text: #e9e9e9;
+  --chat-bg: #121212;
+  --wave-1: #ff6a00;
+  --wave-2: #ffd166;
+  --wave-3: #5ab1ff;
 }
 
 .container {
@@ -130,8 +139,7 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     padding: 16px;
     width: 738px; 
     max-width: calc(100vw - 24px);
-    /* Position over chat panel only - center of right column */
-    left: calc(50% + 792px/2 + 12px + 738px/2); /* Center of viewport + PDF width/2 + gap + chat width/2 */
+    left: 50%; 
     transform: translate(-50%, 100%);
     z-index: 15;
   }
@@ -155,19 +163,19 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     position: fixed;
     bottom: 0;
     background: var(--bg);
-    border-top: 3px solid var(--accent);
+    border-top: 1px solid var(--border);
     border-left: 1px solid var(--border);
     border-right: 1px solid var(--border);
     max-height: 62vh;
     overflow: auto;
     transform: translateY(100%);
     transition: transform .25s ease;
-    box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
     border-radius: var(--radius) var(--radius) 0 0;
     padding: 16px;
     width: 738px; 
     max-width: calc(100vw - 24px);
-    left: 50%; 
+    /* Position over chat panel only - center of right column */
+    left: calc(50% + 792px/2 + 12px + 738px/2); /* Center of viewport + PDF width/2 + gap + chat width/2 */
     transform: translate(-50%, 100%);
     z-index: 15;
   }
@@ -206,14 +214,13 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
     position: fixed;
     bottom: 0;
     background: var(--bg);
-    border-top: 3px solid var(--accent);
+    border-top: 1px solid var(--border);
     border-left: 1px solid var(--border);
     border-right: 1px solid var(--border);
     max-height: 62svh;
     overflow: auto;
     transform: translateY(100%);
     transition: transform .25s ease;
-    box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
     border-radius: var(--radius) var(--radius) 0 0;
     padding: 16px;
     width: 738px; 
@@ -315,14 +322,7 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 /* Chat pane with subtle playful game-parts pattern (very light) */
 .chat.surface {
   position: relative;
-  background-color: var(--bg);
-  /* 24px icons with 24px gaps on a 48px grid. Two layers are offset to stagger rows */
-  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='48' viewBox='0 0 240 48'><g fill='none' stroke='%23c7d5e7' stroke-opacity='0.6' stroke-width='1.4'><g transform='translate(12,12)'><circle cx='12' cy='6' r='6'/><path d='M6 22h12c0-6-3-10-6-10s-6 4-6 10z'/></g><g transform='translate(60,12)'><polygon points='12,0 9,4 6,6 9,10 8,16 12,13 16,16 15,10 18,6 15,4'/></g><g transform='translate(108,12)'><rect x='0' y='0' width='24' height='24' rx='4'/></g><g transform='translate(156,12)'><polygon points='12,2 20,8 20,16 12,22 4,16 4,8'/></g><g transform='translate(204,12)'><rect x='4' y='1' width='16' height='22' rx='2' transform='rotate(-12 12 12)'/></g></g><g fill='%23c7d5e7' fill-opacity='0.6'><g transform='translate(108,12)'><circle cx='6' cy='6' r='2'/><circle cx='12' cy='12' r='2'/><circle cx='18' cy='18' r='2'/></g></g></svg>"), url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='48' viewBox='0 0 240 48'><g fill='none' stroke='%23c7d5e7' stroke-opacity='0.6' stroke-width='1.4'><g transform='translate(12,12)'><circle cx='12' cy='6' r='6'/><path d='M6 22h12c0-6-3-10-6-10s-6 4-6 10z'/></g><g transform='translate(60,12)'><polygon points='12,0 9,4 6,6 9,10 8,16 12,13 16,16 15,10 18,6 15,4'/></g><g transform='translate(108,12)'><rect x='0' y='0' width='24' height='24' rx='4'/></g><g transform='translate(156,12)'><polygon points='12,2 20,8 20,16 12,22 4,16 4,8'/></g><g transform='translate(204,12)'><rect x='4' y='1' width='16' height='22' rx='2' transform='rotate(-12 12 12)'/></g></g><g fill='%23c7d5e7' fill-opacity='0.6'><g transform='translate(108,12)'><circle cx='6' cy='6' r='2'/><circle cx='12' cy='12' r='2'/><circle cx='18' cy='18' r='2'/></g></g></svg>");
-  /* Increase vertical spacing: 24px icon + 48px gap = 72px tile height */
-  background-size: 240px 72px, 240px 72px;
-  /* Stagger second layer more: 84px horizontally, half-tile vertically */
-  background-position: 0 0, 84px 36px;
-  background-repeat: repeat;
+  background-color: var(--chat-bg);
 }
 
 /* Bottom sheet menu scoped to chat panel: span chat width and overlay chat only */
@@ -332,14 +332,13 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   right: 0;
   bottom: 0;
   background: var(--bg);
-  border-top: 3px solid var(--accent);
+  border-top: 1px solid var(--border);
   border-left: 1px solid var(--border);
   border-right: 1px solid var(--border);
   max-height: 62%;
   overflow: auto;
   transform: translateY(100%);
   transition: transform .25s ease;
-  box-shadow: 0 -12px 32px rgba(0,0,0,.25), 0 -4px 16px rgba(0,0,0,.1);
   border-radius: var(--radius) var(--radius) 0 0;
   padding: 16px;
   z-index: 15;
@@ -356,12 +355,12 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
   pointer-events: none;
 }
 .row { display: flex; gap: 8px; align-items: center; }
-.title { padding: 8px 12px; font-weight: 700; text-align: center; font-size: 18px; color: var(--text); letter-spacing: -0.01em; }
+.title { padding: 8px 12px; font-weight: 600; text-align: center; font-size: 22px; color: var(--text); letter-spacing: -0.01em; }
 .subtitle { text-align: center; color: var(--muted); margin: 4px 0 8px; font-size: 14px; }
 .pad { padding: 8px; }
 .muted { color: var(--muted); }
 .chip { background: var(--control-bg); border: 1px solid var(--control-border); padding: 6px 10px; border-radius: var(--radius); }
-.btn { background: var(--control-bg); color: var(--text); border: 1px solid var(--control-border); border-radius: var(--radius); padding: 10px 16px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, transform .05s ease, box-shadow .12s ease; -webkit-tap-highlight-color: transparent; }
+.btn { background: var(--control-bg); color: var(--text); border: 1px solid var(--control-border); border-radius: var(--radius); padding: 10px 16px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, transform .05s ease; -webkit-tap-highlight-color: transparent; }
 .btn.primary { background: var(--accent); color: #ffffff; border-color: var(--accent); border-radius: var(--radius); }
 .btn.ghost { background: transparent; border-color: var(--control-border); }
 .btn.stop { background: #ef4444; color: #ffffff; border-color: #ef4444; }
@@ -373,25 +372,25 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 .spinner { width: 18px; height: 18px; border: 2px solid var(--control-border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Gradient wave animation for waiting user messages */
+/* Pronounced monochrome text wave for waiting user messages; bubble stays black */
 .bubble.user.waiting-response {
-  background: linear-gradient(
-    90deg,
-    var(--accent),
-    color-mix(in oklab, var(--accent) 70%, white),
-    var(--accent)
-  );
-  background-size: 200% 100%;
-  animation: gradientWave 3s ease-in-out infinite;
+  background: #000000;
+  border: 1px solid #000000;
+  position: relative;
+  --wave-duration: 2s;
 }
-
-@keyframes gradientWave {
-  0% {
-    background-position: 0% 0;
-  }
-  100% {
-    background-position: 200% 0;
-  }
+.bubble.user.waiting-response > * {
+  background: linear-gradient(90deg, #ffffff, #cfcfcf, #9f9f9f, #ffffff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  background-size: 300% 100%;
+  animation: textWave var(--wave-duration) ease-in-out infinite;
+}
+@keyframes textWave {
+  0% { background-position: 0% 0; }
+  50% { background-position: 150% 0; }
+  100% { background-position: 300% 0; }
 }
 
 .indicator { display: flex; align-items: center; }
@@ -434,10 +433,10 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .chat-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px; -webkit-overflow-scrolling: touch; min-height: 0; }
 /* Fancy title styling */
 .app-title {
-  font-family: "Rubik Condensed", "Playfair Display", Georgia, "Times New Roman", serif;
-  font-weight: 700;
-  font-size: 24px;
-  letter-spacing: 0px;
+  font-family: 'Barlow Condensed', 'Cutive', Georgia, 'Times New Roman', serif;
+  font-weight: 600;
+  font-size: 30px;
+  letter-spacing: 0.005em;
 }
 @media (max-width: 768px) {
   .app-title {
@@ -459,16 +458,18 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .bubble {
   margin: 3px 0;
   max-width: 92%;
-  /* tighter inner padding to reduce perceived whitespace */
   padding: 12px 14px;
   border-radius: var(--radius);
-  line-height: 1.4;
+  line-height: 1.5;
   white-space: pre-wrap;
+  border: 1px solid transparent;
 }
 /* Extra separation between an answer and the next question */
-.bubble.assistant + .bubble.user { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); }
-.bubble.user { background: var(--accent); border: 1px solid var(--accent); color: #ffffff; margin-left: auto; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
-.bubble.assistant { background: var(--answer-surface); border: 1px solid var(--border); color: var(--answer-text); }
+.bubble.assistant + .bubble.user { margin-top: 20px; padding-top: 12px; border-top: 0; }
+/* When assistant rows include an actions column wrapper, ensure spacing before the next user bubble */
+.assistant-row + .bubble.user { margin-top: 20px; }
+.bubble.user { background: #000000; border: 1px solid #000000; color: #ffffff; margin-left: auto; }
+.bubble.assistant { background: var(--answer-surface); border: 0; color: var(--answer-text); }
 .input-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 8px; }
 .input-row { align-items: stretch; }
 .input-row .actions { display: flex; gap: 8px; align-items: stretch; }
@@ -727,15 +728,9 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
-  padding: 8px 18px 8px 18px;
-  background: linear-gradient(
-    to bottom,
-    color-mix(in oklab, var(--accent) 14%, var(--surface)) 0%,
-    color-mix(in oklab, var(--accent) 12%, var(--surface)) 45%,
-    color-mix(in oklab, var(--accent) 22%, var(--surface)) 50%,
-    color-mix(in oklab, var(--accent) 12%, var(--surface)) 55%,
-    color-mix(in oklab, var(--accent) 10%, var(--surface)) 100%
-  );
+  padding: 8px 16px;
+  background: var(--control-bg);
+  border: 1px solid var(--control-border);
   font-size: 13px;
   position: relative;
   scroll-snap-align: start;
@@ -751,16 +746,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   border-top-left-radius: var(--radius);
   border-bottom-left-radius: var(--radius);
 }
-.history-pill:hover {
-  background: linear-gradient(
-    to bottom,
-    color-mix(in oklab, var(--accent) 18%, var(--surface)) 0%,
-    color-mix(in oklab, var(--accent) 16%, var(--surface)) 45%,
-    color-mix(in oklab, var(--accent) 28%, var(--surface)) 50%,
-    color-mix(in oklab, var(--accent) 16%, var(--surface)) 55%,
-    color-mix(in oklab, var(--accent) 14%, var(--surface)) 100%
-  );
-}
+.history-pill:hover { background: color-mix(in oklab, var(--control-bg) 75%, white); }
 .history-pill:first-child { opacity: 0.9; }
 .bubble h4 { font-size: 0.90rem; }
 .bubble h5 { font-size: 0.90rem; }
@@ -777,26 +763,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
   .history-strip { scroll-snap-type: x proximity; gap: 0px; padding: 6px 8px; }
 }
 
-/* Faint background label across the history strip (always visible) */
-.history-strip::before {
-  content: "BOOKMARKS";
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-  opacity: 0.12;
-  font-size: clamp(14px, 4vw, 28px);
-  pointer-events: none;
-  user-select: none;
-  z-index: 0;
-}
-/* Ensure pills sit above the background text */
-.history-strip > * { position: relative; z-index: 1; }
-
+/* Decorative label removed for minimalism */
 
 
 /* Admin tool panels with alternating backgrounds */

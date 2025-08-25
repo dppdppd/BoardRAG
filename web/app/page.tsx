@@ -189,6 +189,8 @@ export default function HomePage() {
     });
     // Replace [3.5] with markdown link [3.5](section:3.5) only when not already a link
     out = out.replace(/\[(\d+(?:\.\d+)+)\](?!\()/g, "[$1](section:$1)");
+    // Replace numeric slash codes like [6/7] (and deeper like [6/7/2]) when not already a link
+    out = out.replace(/\[(\d+\/(?:\d+\/)*\d+)\](?!\()/g, "[$1](section:$1)");
     // Replace alpha/alpha-numeric codes like [F4], [F4.a], [A10.2b], [1B6b] when not already a link
     out = out.replace(/\[((?:[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?|\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?))\](?!\()/g, "[$1](section:$1)");
     // Replace verbal-only tags like [EQUIPMENT], [ATTACKING], [The 56 RISK@ Cards]
@@ -1220,6 +1222,8 @@ export default function HomePage() {
   const forcedOnceRef = useRef<boolean>(false);
   const postLog = (line: string) => {
     try {
+      // Do not send any network logs for citation-related UI interactions
+      if (/citation|sectionModal/i.test(line)) { console.log(line); return; }
       const allow = (typeof window !== 'undefined') && (isLocalhost() || localStorage.getItem('boardrag_debug_log') === '1');
       if (!allow) return;
       fetch(`${API_BASE}/admin/log`, {
@@ -1542,9 +1546,11 @@ export default function HomePage() {
     } catch {}
   }, [selectedGame, canShowPreview]);
 
-  // On first mobile visit, if no saved game and none selected, auto-open menu to prompt game choice
+  // On first mobile visit, if no saved game and none selected, auto-open menu to prompt game choice (once per session)
+  const menuAutopenRef = useRef<boolean>(false);
   useEffect(() => {
-    if (forcedOnceRef.current) return;
+    if (forcedOnceRef.current || menuAutopenRef.current) return;
+    try { if (sessionStorage.getItem('boardrag_menu_autopen_done') === '1') return; } catch {}
     const isMobile = typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
     if (!isMobile) return;
     if (!games || games.length === 0) return;
@@ -1554,10 +1560,14 @@ export default function HomePage() {
       if (!last) {
         setSheetOpen(true);
         forcedOnceRef.current = true;
+        menuAutopenRef.current = true;
+        try { sessionStorage.setItem('boardrag_menu_autopen_done', '1'); } catch {}
       }
     } catch {
       setSheetOpen(true);
       forcedOnceRef.current = true;
+      menuAutopenRef.current = true;
+      try { sessionStorage.setItem('boardrag_menu_autopen_done', '1'); } catch {}
     }
   }, [games, selectedGame]);
 

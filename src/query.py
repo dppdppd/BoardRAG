@@ -501,37 +501,51 @@ def stream_query_rag(
                 ctx = _strip_embed_prefixes(ctx_raw)
                 context_blocks.append(f"[Context from {base} p{page0+1}]\n{ctx}")
 
-        # Build Allowed citations block from selected chunks (list only file and section labels; no pages)
+        # Build Allowed citations block from selected chunks using ONLY canonical section codes.
+        # We derive codes from metadata.section_ids when available; otherwise we parse a numeric code prefix from headers.
         allowed_lines = []
-        grouped: dict[str, set[str]] = {}
+        grouped_codes: dict[str, set[str]] = {}
         for doc, _score in top_n:
             meta = getattr(doc, 'metadata', {}) or {}
             src = str(meta.get('source') or '')
-            sects = []
+            # Load per-chunk header lists and header->code map
             try:
                 import json as _json
-                prim = _json.loads(meta.get('primary_sections') or '[]')
-                sects.extend([str(s) for s in (prim or [])])
+                prim = _json.loads(meta.get('primary_sections') or '[]') or []
             except Exception:
-                pass
+                prim = []
             try:
                 import json as _json
-                cont = _json.loads(meta.get('continuation_sections') or '[]')
-                sects.extend([str(s) for s in (cont or [])])
+                cont = _json.loads(meta.get('continuation_sections') or '[]') or []
             except Exception:
-                pass
-            s = grouped.get(src)
-            if s is None:
-                grouped[src] = set(sects)
-            else:
-                s.update(sects)
-        for src, sects in grouped.items():
-            def _sanitize_section_name(name: str) -> str:
-                s = str(name or "")
-                s = s.replace("“", '"').replace("”", '"')
-                s = s.replace('"', "'")
-                return s
-            sect_list = ", ".join([f"\"{_sanitize_section_name(x)}\"" for x in sorted(sects) if x])
+                cont = []
+            try:
+                import json as _json
+                sid_map = _json.loads(meta.get('section_ids') or '{}') or {}
+            except Exception:
+                sid_map = {}
+
+            # Helper to emit only explicit section_ids from metadata (no header parsing fallback)
+            def _to_code(header: str) -> str:
+                code = str(sid_map.get(str(header or '').strip()) or '').strip()
+                return code
+
+            codes: set[str] = set()
+            for h in list(prim) + list(cont):
+                code = _to_code(h)
+                if code:
+                    codes.add(code)
+            if codes:
+                dest = grouped_codes.get(src)
+                if dest is None:
+                    grouped_codes[src] = set(codes)
+                else:
+                    dest.update(codes)
+
+        # Emit lines with codes only
+        for src, codes in grouped_codes.items():
+            sorted_codes = sorted([c for c in codes if c])
+            sect_list = ", ".join([f"\"{c}\"" for c in sorted_codes])
             allowed_lines.append(f"- file={_P(src).name}, sections=[{sect_list}]")
 
         allowed_block = "\n".join(["Allowed citations:"] + allowed_lines) if allowed_lines else ""
@@ -598,7 +612,13 @@ def stream_query_rag(
                         "code": str(sid_map.get(hdr) or ""),
                     }
                     try:
-                        arr = anchors.get(hdr)
+                        # Prefer anchors keyed by canonical section code; fall back to header for backward compat
+                        code_key = str(sid_map.get(hdr) or "").strip()
+                        arr = None
+                        if code_key:
+                            arr = anchors.get(code_key)
+                        if arr is None:
+                            arr = anchors.get(hdr)
                         if isinstance(arr, list) and len(arr) >= 4:
                             entry["header_anchor_bbox_pct"] = [float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])]
                     except Exception:
@@ -623,7 +643,6 @@ def stream_query_rag(
             "Do not combine multiple sections into a single bracketed citation.\n"
             "Do not enclose a citation with parentheses or unnecessary text, such as \"(see [13.1])\".\n"
             "Use ONLY section labels from the Allowed citations list below; do not invent or paraphrase labels.\n"
-            "Combining the first letter of every paragraph should add up to a word in the theme of the question.\n"
             "Example (format only; replace with an allowed citation):\n"
             "Wire cards can only be placed as a discard. [13.1]\n"
             f"{allowed_block}\n\n"

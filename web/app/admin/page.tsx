@@ -63,6 +63,43 @@ export default function AdminPage() {
   const [unblockSelection, setUnblockSelection] = useState<string[]>([]);
   const [action, setAction] = useState<string>("split-missing");
 
+  // Simple DATA_PATH browser
+  type FsEntry = { name: string; is_dir: boolean; size?: number | null; mtime?: string; ext?: string };
+  type FsListResp = { base: string; cwd: string; parent?: string | null; entries: FsEntry[] };
+  const [fsOpen, setFsOpen] = useState<boolean>(false);
+  const [fsCwd, setFsCwd] = useState<string>("");
+  const [fsParent, setFsParent] = useState<string | null>(null);
+  const [fsEntries, setFsEntries] = useState<FsEntry[]>([]);
+  const [fsLoading, setFsLoading] = useState<boolean>(false);
+  const formatSize = (n?: number | null) => {
+    if (!n && n !== 0) return "—";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    return `${Math.round(n / 1024 / 1024)} MB`;
+  };
+  const fetchFs = async (path?: string) => {
+    setFsLoading(true);
+    try {
+      const headers: any = {};
+      try {
+        const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+        if (t) headers["Authorization"] = `Bearer ${t}`;
+      } catch {}
+      const u = new URL(`${API_BASE}/admin/fs-list`);
+      if (path) u.searchParams.set("path", path);
+      const resp = await fetch(u.toString(), { headers });
+      const data: FsListResp = await resp.json();
+      setFsCwd(data?.cwd || "");
+      setFsParent((data?.parent as any) ?? null);
+      setFsEntries(Array.isArray(data?.entries) ? data.entries : []);
+    } catch {}
+    setFsLoading(false);
+  };
+  const openFs = async () => {
+    setFsOpen(true);
+    await fetchFs("");
+  };
+
   // Global model fixed to Sonnet 4; no selector
 
   // Catalog data and sorting — declared before any early returns so hooks are stable
@@ -544,7 +581,7 @@ export default function AdminPage() {
   };
 
   return (
-    <div style={{ display: "grid", gap: 8, padding: 8, gridTemplateColumns: "1fr", height: "100vh", overflowY: "auto", alignContent: "start", fontSize: 14 }}>
+    <div style={{ display: "grid", gap: 8, padding: 8, gridTemplateColumns: "1fr", height: "100vh", overflowY: "auto", alignContent: "start", fontSize: 16 }}>
       {message && <div style={{ color: "#444", background: "#f3f3f3", padding: 6, borderRadius: 4 }}>{message}</div>}
 
       {/* Library controls removed (obsolete) */}
@@ -553,20 +590,20 @@ export default function AdminPage() {
         {jobs && jobs.length > 0 && (
           <div style={{ margin: "6px 0", padding: 6, border: "1px dashed #ddd", borderRadius: 4 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-              <div style={{ fontSize: 12, fontWeight: 600 }}>Active jobs</div>
-              <button onClick={clearJobs} className="btn" style={{ padding: "2px 6px", fontSize: 11 }}>Clear</button>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>Active jobs</div>
+              <button onClick={clearJobs} className="btn" style={{ padding: "4px 8px", fontSize: 13 }}>Clear</button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 0.6fr 1fr 1fr", gap: 4 }}>
-              <div style={{ fontSize: 11, fontWeight: 600 }}>Step</div>
-              <div style={{ fontSize: 11, fontWeight: 600 }}>Mode</div>
-              <div style={{ fontSize: 11, fontWeight: 600 }}>Entries</div>
-              <div style={{ fontSize: 11, fontWeight: 600 }}>Status</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Step</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Mode</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Entries</div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Status</div>
               {jobs.map((j: any) => (
                 <React.Fragment key={j.id}>
-                  <div style={{ fontSize: 11 }}>{j.step}</div>
-                  <div style={{ fontSize: 11 }}>{j.mode}</div>
-                  <div style={{ fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{Array.isArray(j.entries) ? j.entries.join(", ") : ""}</div>
-                  <div style={{ fontSize: 11 }}>{j.status || "running"}</div>
+                  <div style={{ fontSize: 13 }}>{j.step}</div>
+                  <div style={{ fontSize: 13 }}>{j.mode}</div>
+                  <div style={{ fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{Array.isArray(j.entries) ? j.entries.join(", ") : ""}</div>
+                  <div style={{ fontSize: 13 }}>{j.status || "running"}</div>
                 </React.Fragment>
               ))}
             </div>
@@ -584,7 +621,7 @@ export default function AdminPage() {
             borderBottomLeftRadius: 0,
             borderBottomRightRadius: 0,
             background: "#fafafa",
-            fontSize: 11,
+            fontSize: 13,
             fontWeight: 600,
           }}
         >
@@ -607,7 +644,7 @@ export default function AdminPage() {
           <div style={{ textAlign: "left" }}>Chunks</div>
           <div style={{ textAlign: "left" }}>Complete</div>
         </div>
-        <div style={{ height: "35vh", overflow: "auto", border: "1px solid #eee", borderTop: "none", borderRadius: 4, borderTopLeftRadius: 0, borderTopRightRadius: 0, fontSize: 11 }}>
+        <div style={{ height: "35vh", overflow: "auto", border: "1px solid #eee", borderTop: "none", borderRadius: 4, borderTopLeftRadius: 0, borderTopRightRadius: 0, fontSize: 13 }}>
           <div style={{ display: "grid", gridTemplateColumns: "32px 1.2fr 1fr 0.6fr 0.7fr 0.7fr 0.5fr 0.5fr 0.5fr 0.5fr" }}>
             {sortedCatalog.map((e) => {
               const selected = renameSelection.includes(e.filename);
@@ -649,7 +686,7 @@ export default function AdminPage() {
             placeholder="New game name for selected"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            style={{ fontSize: 13, padding: 6, flex: 1 }}
+            style={{ fontSize: 15, padding: 8, flex: 1 }}
           />
           <button
             onClick={renameReq}
@@ -688,7 +725,7 @@ export default function AdminPage() {
             <select
               value={action}
               onChange={(e) => setAction(e.target.value)}
-              style={{ padding: 6, fontSize: 13 }}
+              style={{ padding: 8, fontSize: 15 }}
             >
               <option value="split-all">Split (all)</option>
               <option value="split-missing">Split (missing)</option>
@@ -747,10 +784,10 @@ export default function AdminPage() {
       </div>
 
       <div className="admin-tool alt">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Blocked Sessions</h3>
+        <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Blocked Sessions</h3>
         <div style={{ display: "grid", gap: 6 }}>
           {blockedSessions.length === 0 ? (
-            <div className="muted" style={{ fontSize: 13 }}>No blocked sessions</div>
+            <div className="muted" style={{ fontSize: 15 }}>No blocked sessions</div>
           ) : (
             <>
               <select
@@ -758,7 +795,7 @@ export default function AdminPage() {
                 size={Math.min(8, Math.max(3, blockedSessions.length))}
                 value={unblockSelection}
                 onChange={(e) => setUnblockSelection(Array.from(e.target.selectedOptions).map((o) => o.value))}
-                style={{ width: "100%", fontSize: 12, padding: 4 }}
+                style={{ width: "100%", fontSize: 14, padding: 6 }}
               >
                 {blockedSessions.map((s) => (
                   <option key={s.sid} value={s.sid} title={s.sid}>
@@ -778,8 +815,8 @@ export default function AdminPage() {
       
 
       <div className="admin-tool">
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Global Model</h3>
-        <div className="muted" style={{ fontSize: 13 }}>
+        <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Global Model</h3>
+        <div className="muted" style={{ fontSize: 15 }}>
           {(() => {
             const prov = (modelData?.provider || '').toLowerCase();
             const gen = modelData?.generator || '';
@@ -796,15 +833,55 @@ export default function AdminPage() {
       {/* Removed legacy Assign/Reprocess/Delete control; use Catalog section above */}
 
       <div className="admin-tool" style={{ gridColumn: "1 / -1" }}>
-        <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Technical Info</h3>
-        <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 8, borderRadius: 4, fontSize: 12 }}>{storageData?.markdown || ""}</pre>
-        <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
+        <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Technical Info</h3>
+        <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 4, fontSize: 14 }}>{storageData?.markdown || ""}</pre>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
+          <button onClick={openFs} style={{ padding: "6px 10px" }}>Browse DATA</button>
+        </div>
       </div>
+
+      {/* Simple FS browser modal */}
+      {fsOpen && (
+        <div className="modal" role="dialog" style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div style={{ background: "#fff", padding: 12, borderRadius: 6, width: "80vw", height: "70vh", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <strong>DATA Browser</strong>
+              <span style={{ color: "#666" }}>/ {fsCwd || ""}</span>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                <button onClick={() => fetchFs(fsParent || "")} disabled={!fsParent || fsLoading} style={{ padding: "6px 10px" }}>Up</button>
+                <button onClick={() => fetchFs(fsCwd)} disabled={fsLoading} style={{ padding: "6px 10px" }}>Refresh</button>
+                <button onClick={() => setFsOpen(false)} style={{ padding: "6px 10px" }}>Close</button>
+              </div>
+            </div>
+            <div style={{ border: "1px solid #eee", borderRadius: 4, overflow: "hidden", flex: 1 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 180px", gap: 0, background: "#fafafa", fontSize: 14, fontWeight: 600, padding: 8 }}>
+                <div>Name</div>
+                <div>Size</div>
+                <div>Modified</div>
+              </div>
+              <div style={{ height: "100%", overflow: "auto" }}>
+                {fsLoading ? (
+                  <div style={{ padding: 10, fontSize: 15 }}>Loading…</div>
+                ) : (
+                  fsEntries.map((e) => (
+                    <div key={e.name} style={{ display: "grid", gridTemplateColumns: "1fr 120px 180px", gap: 0, padding: 6, borderTop: "1px solid #f3f3f3", cursor: e.is_dir ? "pointer" : "default" }} onClick={() => { if (e.is_dir) fetchFs((fsCwd ? fsCwd + "/" : "") + e.name); }}>
+                      <div>{e.is_dir ? "📁 " : "📄 "}{e.name}</div>
+                      <div>{e.is_dir ? "—" : formatSize(e.size)}</div>
+                      <div>{e.mtime ? new Date(e.mtime).toLocaleString() : ""}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Shared console output pinned at bottom with fixed height */}
       <div className="admin-tool alt" style={{ gridColumn: "1 / -1" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h3 style={{ margin: "4px 0", fontSize: 14, lineHeight: 1.2 }}>Console</h3>
+          <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Console</h3>
           <div>
             <button onClick={() => setConsoleText("")} style={{ padding: "6px 10px" }}>🧹 Clear</button>
           </div>
@@ -812,7 +889,7 @@ export default function AdminPage() {
         <div className="surface" style={{ padding: 6 }}>
           <pre
             ref={consoleRef}
-            style={{ whiteSpace: "pre-wrap", height: 180, overflow: "auto", margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace", fontSize: 12 }}
+            style={{ whiteSpace: "pre-wrap", height: 220, overflow: "auto", margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace", fontSize: 14 }}
           >
 {consoleText || ""}
           </pre>
