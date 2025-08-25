@@ -14,14 +14,14 @@ def build_user_prompt(page_num_1based: int) -> str:
         "You are analyzing one primary PDF page from a boardgame rulebook.\n"
         f"Primary page: {page_num_1based} (1-based). Only the primary page is attached; you may not see page {next_page}.\n"
         "\nDEFINITIONS:\n"
-        "- Section and subsection header (not exhaustive):\n"
-        "  • Line-start alphanumeric codes (letters and digits may be interleaved) with optional dots/slashes/letters/parentheses: e.g., '3', '3.1', '3.1.2', '10.12', '10.123', 'A1', '4A3', 'A.4', 'A1.2', 'B.2.3', '6/3', '16/4', 'A)', 'b)'.\n"
-        "  • Codes followed by a title on the same line, with optional trailing ':' — e.g., '21.1 SECONDARY WEAPONS:'; the full line is the header, the code is section_id.\n"
-        "  • Standalone Title Case line (<= 80 chars), not a sentence (no ending '.', '?', '!'), not a list item.\n"
-        "  • ALL CAPS short heading (<= 8 words), no ending punctuation.\n"
-        "  • Exclude bullets/list items ('-', '•') and ordinary paragraphs.\n"
+        "- Section identifiers (codes) appear at line start and may include letters, digits, dots and slashes (e.g., '3', '3.1', '3.1.2', 'A1', '6/3').\n"
+        "- A section label (title) may follow the code on the same line.\n"
         "\nFIELD DEFINITIONS:\n"
-        "- section_id: normalized id; prefer the EXACT printed code when present (e.g., '3.1.2', '6/3'). Do not convert characters in printed codes — keep slashes as slashes (e.g., '6/3' MUST remain '6/3', NOT '6-3' or '6.3'). Only if no code is present, return a lowercase slug of the header (spaces→dashes, strip punctuation).\n"
+        "- section_id: the EXACT printed code when present (e.g., '3.1.2', '6/3'). Preserve separators (never substitute '/' with '-' or '.'). If no code is present, return a lowercase slug of the label (spaces→dashes, strip punctuation).\n"
+        "- section_id_2: a base identifier composed of section_id plus a short, normalized slug of the first two words following the code (e.g., '20.2-infiltration').\n"
+        "- section_start: the first 10 words of the section's first line on its page, inclusive of the printed code and its title/label (join with single spaces).\n"
+        "- title: the textual heading (label) for the section, without the code and without trailing ':' or '.'. Example: 'INFILTRATION & CLOSE COMBAT'.\n"
+        "- summary: a single concise sentence (<= 160 chars) summarizing what this specific section covers.\n"
         f"- page: integer; exactly {page_num_1based} or {next_page}.\n"
         f"- boundary_header_on_next: the first new header on page {next_page}, or null if none (it may not be visible).\n"
         "\nINSTRUCTIONS:\n"
@@ -31,6 +31,7 @@ def build_user_prompt(page_num_1based: int) -> str:
         "   - Recognize headers even if the title ends with a colon ':'; exclude the colon from the header text.\n"
         "   - Use regex at line starts to ensure coverage: match ^[A-Za-z]?\\d+(?:[./][A-Za-z0-9]+)*\\b for codes like '21.1', 'A10.2b', '3.1.2', '6/3'. If such a line exists, it MUST be included in sections.\n"
         "3) Write \"summary\" as a comprehensive overview for identifying the relevant material; it should cover all of the topics on the page.\n"
+        "   Additionally, include per-section \"summary\" fields (one sentence each) in sections[].\n"
         "4) Derive concise search aids from the page content only (no invention):\n"
         "   - search_questions: 6–8 short user questions (<= 140 chars) like 'How do I …', 'When can I …'\n"
         "   - search_synonyms: 30-50 short alias lines (<= 50 chars), e.g., 'range = distance'\n"
@@ -42,7 +43,7 @@ def build_user_prompt(page_num_1based: int) -> str:
         "\nOUTPUT (single JSON object only; strict JSON, no prose):\n"
         "{\n"
         "  \"summary\": string,\n"
-        "  \"sections\": [ { \"header\": string, \"section_id\": string, \"page\": number } ],\n"
+        "  \"sections\": [ { \"section_id\": string, \"section_id_2\": string, \"section_start\": string, \"title\": string, \"summary\": string, \"page\": number } ],\n"
         "  \"visuals\": [ { \"type\": string, \"description\": string, \"relevance\": string } ],\n"
         "  \"visual_importance\": 1,\n"
         "  \"boundary_header_on_next\": string | null,\n"
@@ -56,6 +57,7 @@ def build_user_prompt(page_num_1based: int) -> str:
         "- Output MUST be a single valid JSON object only. No markdown, no code fences, no commentary.\n"
         "- Do NOT wrap the JSON in ```json fences. Return raw JSON starting with { and ending with }.\n"
         "- Include a separate \"sections\" item for every visible subsection heading (e.g., if 10.1 and 10.12 appear, include both).\n"
+        "- Ensure \"section_id_2\" is only the base (no checksum).\n"
         "- Preserve the exact separator characters in printed codes. If a section uses slash separators (e.g., '6/3', '16/4'), return them exactly with slashes in section_id. Never substitute '-' or '.' for '/'.\n"
         f"- Self-check: compare your extracted headers against the regex above on page {page_num_1based} text; if any code line is missing from sections, add it.\n"
         "- In search_keywords, include both singular and plural where applicable (e.g., 'leader', 'leaders') and any common abbreviations (e.g., 'SL' for Squad Leader).\n"
@@ -89,7 +91,7 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
         "=== PAGE 1 TEXT (PRIMARY) ===\n" + (primary_text or "")
     )
 
-    # Single call path: attach one or two PDFs as document blocks
+    # Single call path: attach one or two PDFs as document blocks (fallback)
     from base64 import b64encode
     import json as _json
     import requests as _req
@@ -119,32 +121,40 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
     content_blocks = [_doc_block(primary_page_pdf)]
     content_blocks.append({"type": "text", "text": user_prompt + appendix})
 
-    # Pre-upload PDFs to Anthropic Files API to avoid large base64 bodies in /messages
+    # Prefer using persisted file_id from catalog; if missing, upload, else fallback to base64
     shared_fids: Optional[list[str]] = None
+    parent_pdf_name = primary_page_pdf.parent.name + ".pdf"
+    page_num_1based = _infer_1based(primary_page_pdf)
     try:
-        from .llm_outline_helpers import upload_pdf_to_anthropic_files  # type: ignore
-        fids: list[str] = [upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))]
-        shared_fids = fids
+        from .catalog import get_page_file_id as _get_page_fid  # type: ignore
+        fid0 = _get_page_fid(parent_pdf_name, page_num_1based)
+        if fid0:
+            shared_fids = [fid0]
+    except Exception:
+        shared_fids = None
+    # If not in catalog, attempt one upload to get a reusable file_id
+    if not shared_fids:
         try:
-            print(f"[anthropic] uploaded files: {','.join(fids)}")
-        except Exception:
-            pass
-        # Persist per-page file_id in catalog for later reuse on visual queries
-        try:
-            from .catalog import set_page_file_id  # type: ignore
-            from .pdf_pages import compute_sha256 as _sha256  # type: ignore
-            # Parent PDF filename (basename under DATA_PATH) inferred from pages/<stem>/pXXXX.pdf
-            parent_pdf_name = primary_page_pdf.parent.name + ".pdf"
-            page_num_1based = _infer_1based(primary_page_pdf)
-            page_hash = _sha256(primary_page_pdf)
-            set_page_file_id(parent_pdf_name, page_num_1based, fids[0], page_hash)
-        except Exception:
-            pass
-    except Exception as _e_upload:
-        try:
-            print(f"[anthropic] files upload failed; falling back to base64: {_e_upload}")
-        except Exception:
-            pass
+            from .llm_outline_helpers import upload_pdf_to_anthropic_files  # type: ignore
+            fids: list[str] = [upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))]
+            shared_fids = fids
+            try:
+                print(f"[anthropic] uploaded files: {','.join(fids)}")
+            except Exception:
+                pass
+            # Persist per-page file_id in catalog for later reuse on visual queries
+            try:
+                from .catalog import set_page_file_id  # type: ignore
+                from .pdf_pages import compute_sha256 as _sha256  # type: ignore
+                page_hash = _sha256(primary_page_pdf)
+                set_page_file_id(parent_pdf_name, page_num_1based, fids[0], page_hash)
+            except Exception:
+                pass
+        except Exception as _e_upload:
+            try:
+                print(f"[anthropic] files upload failed; falling back to base64: {_e_upload}")
+            except Exception:
+                pass
 
     def _send_and_collect_text(
         req_blocks: list[dict],
@@ -232,10 +242,15 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
         json_raw = str(raw_override)
     else:
         json_user_prompt = user_prompt
-        # Use base64 document blocks for reliability in eval pipeline; do not use Files API here
-        json_raw, _ = _send_and_collect_text(
-            content_blocks[:-1], system_prompt, json_user_prompt, existing_file_ids=None
-        )
+        # Prefer Files API if we have file_ids; else fall back to base64 doc blocks
+        if shared_fids:
+            json_raw, _ = _send_and_collect_text(
+                [], system_prompt, json_user_prompt, existing_file_ids=shared_fids
+            )
+        else:
+            json_raw, _ = _send_and_collect_text(
+                content_blocks[:-1], system_prompt, json_user_prompt, existing_file_ids=None
+            )
 
     # Optional artifact dump: persist raw to raw_dir and other artifacts to debug_dir
     try:
@@ -251,234 +266,11 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
     except Exception:
         pass
 
-    obj = _parse_strict_json(json_raw)
-    # Locally compose full_text from provided page texts, including optional continuation
-    def _norm_text(s: str | None) -> str:
-        try:
-            return (s or "").replace("\u00a0", " ").strip()
-        except Exception:
-            return s or ""
-
-    primary_text_local = _norm_text(primary_text)
-    cont_text_local = ""
-    try:
-        # Always consider local continuation if we have next-page text
-        if spillover_text:
-            spill_raw = _norm_text(spillover_text)
-
-            # Helper: detect first next-page header line index (character offset in spill_raw)
-            def _first_header_char_index(txt: str) -> Optional[int]:
-                import re as _re
-                # Patterns for numbered/alphanumeric headers at line start
-                pats = [
-                    _re.compile(r"^\s*(?:[A-Z]\))\s+.+$"),  # A) Heading
-                    _re.compile(r"^\s*(\d+(?:\.[A-Za-z0-9]+)+)\b"),
-                    _re.compile(r"^\s*([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?)\b"),
-                    _re.compile(r"^\s*(\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?)\b"),
-                ]
-
-                def _is_title_case_header(line: str) -> bool:
-                    s = (line or "").strip()
-                    if not s or len(s) > 80:
-                        return False
-                    if s.endswith(('.', '?', '!')):
-                        return False
-                    if s.startswith(('-', '•')):
-                        return False
-                    # Title Case or ALL CAPS short heading
-                    words = [w for w in s.split() if w]
-                    if not words:
-                        return False
-                    all_caps = all(w.isupper() for w in words if any(c.isalpha() for c in w))
-                    if all_caps and len(words) <= 8:
-                        return True
-                    title_like = sum(1 for w in words if w[:1].isupper()) >= max(2, len(words) // 2)
-                    return title_like
-
-                offset = 0
-                for ln in txt.splitlines(True):  # keepends=True to increment offsets correctly
-                    raw = (ln or "")
-                    s = raw.strip()
-                    if len(s) >= 2:
-                        if any(p.match(s) for p in pats) or _is_title_case_header(s):
-                            return offset
-                    offset += len(raw)
-                return None
-
-            # Prefer model-suggested boundary if present; else detect locally
-            boundary = str(obj.get("boundary_header_on_next") or "").strip()
-            boundary_idx: Optional[int] = None
-            if boundary:
-                import re as _re
-                pat = _re.compile(r"\b" + _re.escape(boundary).replace("\\ ", r"\s+") + r"\b", _re.IGNORECASE)
-                m = pat.search(spill_raw)
-                if m:
-                    boundary_idx = max(0, m.start())
-            if boundary_idx is None:
-                boundary_idx = _first_header_char_index(spill_raw)
-                if boundary_idx is not None and not boundary:
-                    try:
-                        # Store a best-effort boundary header line text for metadata/debug
-                        line_start = spill_raw.rfind("\n", 0, boundary_idx) + 1
-                        line_end_n = spill_raw.find("\n", boundary_idx)
-                        if line_end_n == -1:
-                            line_end_n = len(spill_raw)
-                        obj["boundary_header_on_next"] = spill_raw[line_start:line_end_n].strip()[:120]
-                    except Exception:
-                        pass
-
-            # Apply maximum: half of the next page
-            half_chars = max(0, len(spill_raw) // 2)
-            cut_at = half_chars
-            if boundary_idx is not None:
-                cut_at = min(half_chars, boundary_idx)
-            cont_text_local = spill_raw[:cut_at].rstrip()
-    except Exception:
-        cont_text_local = ""
-
-    full_text_local = primary_text_local
-    if cont_text_local:
-        full_text_local = (primary_text_local + "\n\n" + cont_text_local).strip()
-    obj["full_text"] = full_text_local
-
-    # Compute local text_spans per section based on header positions in local text
-    try:
-        import re as _re
-        prim_len = len(primary_text_local)
-        sections = obj.get("sections") or []
-        page_num = _infer_1based(primary_page_pdf)
-        # Also prepare to compute normalized header bounding boxes for primary-page headers
-        anchors_local: dict[str, list[float]] = {}
-        try:
-            from .pdf_utils import compute_normalized_header_bbox  # type: ignore
-        except Exception:
-            compute_normalized_header_bbox = None  # type: ignore
-        # Find starts for sections whose header appears on the primary page
-        def _find_header_start(hdr: str) -> int | None:
-            if not hdr:
-                return None
-            # Build a whitespace-tolerant regex for the header
-            toks = [t for t in _re.split(r"\s+", hdr.strip()) if t]
-            if not toks:
-                return None
-            pat = _re.compile(r"\b" + r"\s+".join(_re.escape(t) for t in toks) + r"\b", _re.IGNORECASE)
-            m = pat.search(primary_text_local)
-            if m:
-                return m.start()
-            # Fallback: try section_id at line start
-            return None
-
-        primary_sections_with_idx: list[tuple[int, dict]] = []
-        for it in sections:
-            if not isinstance(it, dict):
-                continue
-            try:
-                if int(it.get("page")) != page_num:
-                    continue
-            except Exception:
-                continue
-            hdr = str(it.get("header") or "").strip()
-            idx = _find_header_start(hdr)
-            if idx is None:
-                continue
-            primary_sections_with_idx.append((idx, it))
-        primary_sections_with_idx.sort(key=lambda t: t[0])
-
-        # Compute spans: end at next header or end of primary text; if spillover was appended, extend the last section to include continuation
-        for i, (start_idx, it) in enumerate(primary_sections_with_idx):
-            if i + 1 < len(primary_sections_with_idx):
-                end_idx = primary_sections_with_idx[i + 1][0]
-            else:
-                end_idx = prim_len
-                # If we appended continuation text, extend the final section to cover it
-                if cont_text_local:
-                    end_idx = prim_len + len(cont_text_local) + (2 if full_text_local[prim_len:prim_len+2] == "\n\n" else 0)
-            span = {
-                "page": int(it.get("page") or page_num),
-                "start_char": int(max(0, start_idx)),
-                "end_char": int(max(0, end_idx)),
-            }
-            it["text_spans"] = [span]
-            # Compute header bbox per section on the primary page
-            try:
-                if compute_normalized_header_bbox is not None:
-                    hdr = str(it.get("header") or "").strip()
-                    if hdr:
-                        bbox = compute_normalized_header_bbox(str(primary_page_pdf), 1, hdr)
-                        if bbox and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
-                            x, y, bw, bh = bbox[0], bbox[1], bbox[2], bbox[3]
-                            it["header_bbox_pct"] = [float(x), float(y), float(bw), float(bh)]
-                            anchors_local[hdr] = [float(x), float(y), float(bw), float(bh)]
-            except Exception:
-                pass
-        # Attach a top-level map for convenience as well
-        if anchors_local:
-            obj["header_anchors_pct"] = anchors_local
-    except Exception:
-        # Best-effort only; leave text_spans as provided (empty)
-        pass
-
-    # Write local full text to debug for inspection (not in raw_dir)
-    try:
-        if debug_dir:
-            stem = primary_page_pdf.stem
-            (debug_dir / f"{stem}.fulltext.txt").write_text(obj.get("full_text", ""), encoding="utf-8")
-    except Exception:
-        pass
-    return obj
+    # Return raw JSON only; postprocessing is handled in src/page_postprocess.py
+    return json_raw
 
 
-def _parse_strict_json(text: str) -> Dict[str, Any]:
-    """Parse model output into a single JSON object robustly.
-
-    Accepts:
-    - Pure JSON
-    - JSON inside ```json ... ``` anywhere in the text
-    - First balanced JSON object found in the text
-    """
-    s = (text or "").strip()
-    # 1) Try as-is
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict):
-            # minimal validation
-            for key in ("summary", "sections", "visuals", "visual_importance"):
-                if key not in obj:
-                    raise ValueError(f"Missing key: {key}")
-            return obj
-    except Exception:
-        pass
-    # 2) Try fenced block anywhere
-    try:
-        import re as _re
-        m = _re.search(r"```(?:json)?\s*([\s\S]*?)```", s, flags=_re.IGNORECASE)
-        if m:
-            js = (m.group(1) or "").strip()
-            obj = json.loads(js)
-            if isinstance(obj, dict):
-                for key in ("summary", "sections", "visuals", "visual_importance"):
-                    if key not in obj:
-                        raise ValueError(f"Missing key: {key}")
-                return obj
-    except Exception:
-        pass
-    # 3) Try first balanced JSON object in the text
-    try:
-        from .llm_outline_helpers import find_json_objects  # type: ignore
-        candidates = find_json_objects(s)
-        for js in candidates:
-            try:
-                obj = json.loads(js)
-                if isinstance(obj, dict):
-                    for key in ("summary", "sections", "visuals", "visual_importance"):
-                        if key not in obj:
-                            raise ValueError(f"Missing key: {key}")
-                    return obj
-            except Exception:
-                continue
-    except Exception:
-        pass
-    raise ValueError("Could not parse JSON from model output")
+# Parsing and enrichment moved to src/page_postprocess.py
 
 
 def _infer_1based(primary_page_pdf: Path) -> int:

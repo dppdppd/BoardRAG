@@ -14,6 +14,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, PlainTextResponse
 from pydantic import BaseModel
+import mimetypes
 
 from src.query import stream_query_rag, get_available_games
 from src.query import get_stored_game_names  # catalog-based
@@ -641,6 +642,58 @@ async def admin_fs_list(path: Optional[str] = None, token: Optional[str] = None,
             "parent": parent_rel,
             "entries": entries,
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
+
+
+@app.get("/admin/fs-download")
+async def admin_fs_download(path: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _ = _require_auth(authorization, token)
+    try:
+        from src import config as cfg  # type: ignore
+        base = Path(cfg.DATA_PATH).resolve()
+        rel = (path or "").strip().lstrip("/").replace("\\", "/")
+        target = (base / rel).resolve()
+        if not str(target).startswith(str(base)):
+            raise HTTPException(status_code=400, detail="invalid path")
+        if not target.exists() or not target.is_file():
+            raise HTTPException(status_code=404, detail="not found")
+        media_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        # Force download by providing filename
+        return FileResponse(path=str(target), media_type=media_type, filename=target.name)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
+
+
+class FsPathPayload(BaseModel):
+    path: str
+
+
+@app.post("/admin/fs-delete")
+async def admin_fs_delete(payload: FsPathPayload, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _ = _require_auth(authorization, token)
+    try:
+        from src import config as cfg  # type: ignore
+        base = Path(cfg.DATA_PATH).resolve()
+        rel = (payload.path or "").strip().lstrip("/").replace("\\", "/")
+        target = (base / rel).resolve()
+        if not str(target).startswith(str(base)):
+            raise HTTPException(status_code=400, detail="invalid path")
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="not found")
+        if target.is_dir():
+            raise HTTPException(status_code=400, detail="cannot delete directory")
+        try:
+            target.unlink()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"delete failed: {e}")
+        return {"message": f"Deleted {target.name}"}
     except HTTPException:
         raise
     except Exception as e:
@@ -1569,9 +1622,9 @@ def _run_step_script(step: str, pdf_path: str, force: bool, on_line = None, canc
     if step == "split":
         script = root / "scripts" / "split_pages.py"
     elif step == "eval":
-        script = root / "scripts" / "eval_pages.py"
+        script = root / "scripts" / "llm_eval.py"
     elif step == "compute":
-        script = root / "scripts" / "eval_pages.py"
+        script = root / "scripts" / "local_eval.py"
     elif step == "populate":
         script = root / "scripts" / "populate_from_processed.py"
     else:
@@ -1580,9 +1633,7 @@ def _run_step_script(step: str, pdf_path: str, force: bool, on_line = None, canc
     args = [_sys.executable, "-u", str(script), pdf_path]
     if force:
         args.append("--force")
-    # For compute-local, pass a flag to use cached raw only
-    if step == "compute":
-        args.append("--local-only")
+    # No flags required; scripts encode their own modes
     try:
         proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, bufsize=1)
     except Exception:

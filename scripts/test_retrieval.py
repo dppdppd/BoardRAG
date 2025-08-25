@@ -14,6 +14,7 @@ if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
 from src.vector_store import search_chunks  # type: ignore
+from src.query import dedupe_then_sort_results  # type: ignore
 from src import config as cfg  # type: ignore
 
 
@@ -63,45 +64,9 @@ def collect_result_info(doc: Any, score: float) -> Dict[str, Any]:
     }
 
 
-def dedupe_by_section(results: List[Tuple[Any, float]]) -> List[Dict[str, Any]]:
-    items = [collect_result_info(d, s) for d, s in results]
-    by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
-    for it in items:
-        src = it["source"]
-        sid = it.get("section_id") or ""
-        key = (src, sid)
-        if not sid:
-            # Keep non-identifiable entries as-is
-            by_key[(src, f"_raw_{id(it)}")] = it
-            continue
-        # Prefer chunk whose page equals section_pages[header]
-        desired_page = 0
-        try:
-            prim = it.get("primary_sections") or []
-            if prim:
-                h = str(prim[0])
-                desired_page = int((it.get("section_pages") or {}).get(h) or 0)
-        except Exception:
-            desired_page = 0
-        ok = (desired_page and it.get("page") == desired_page)
-        prev = by_key.get(key)
-        if prev is None:
-            it["_pref_ok"] = ok
-            by_key[key] = it
-        else:
-            prev_ok = bool(prev.get("_pref_ok"))
-            if ok and not prev_ok:
-                it["_pref_ok"] = True
-                by_key[key] = it
-            elif ok == prev_ok and it["score"] < prev["score"]:
-                it["_pref_ok"] = ok
-                by_key[key] = it
-    return list(by_key.values())
-
-
-def sort_by_score(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    items.sort(key=lambda x: float(x.get("score") or 0.0))
-    return items
+def dedupe_then_sort(results: List[Tuple[Any, float]]) -> List[Tuple[Any, float]]:
+    # Delegate to the canonical implementation used by the app
+    return dedupe_then_sort_results(results)
 
 
 def plan_route(item: Dict[str, Any]) -> str:
@@ -134,10 +99,10 @@ def main() -> int:
     for i, it in enumerate(items, 1):
         print(f"{i:>2}. score={it['score']:.4f} src={it['source']} page={it['page']} vis={it['visual_importance']} prim={it['primary_sections']}")
     print()
-    dedup = dedupe_by_section(results)
-    ranked = sort_by_score(dedup)
-    print(f"deduped={len(ranked)}")
-    for i, it in enumerate(ranked, 1):
+    dedup_sorted = dedupe_then_sort(results)
+    ranked_items = [collect_result_info(d, s) for d, s in dedup_sorted]
+    print(f"deduped={len(ranked_items)}")
+    for i, it in enumerate(ranked_items, 1):
         route = plan_route(it)
         print(f"{i:>2}. section_id={it.get('section_id') or '-'} src={it['source']} page={it['page']} score={it.get('score'):.4f} route={route}")
         print(f"    prim={it['primary_sections']} cont={it['continuation_sections']}")

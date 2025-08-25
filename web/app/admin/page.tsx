@@ -100,6 +100,46 @@ export default function AdminPage() {
     await fetchFs("");
   };
 
+  const buildFsPath = (name: string) => (fsCwd ? fsCwd + "/" : "") + name;
+  const downloadFs = async (name: string, ev?: React.MouseEvent) => {
+    try {
+      if (ev) ev.stopPropagation();
+    } catch {}
+    try {
+      const u = new URL(`${API_BASE}/admin/fs-download`);
+      u.searchParams.set("path", buildFsPath(name));
+      try {
+        const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+        if (t) u.searchParams.set("token", t);
+      } catch {}
+      window.open(u.toString(), "_blank");
+    } catch {}
+  };
+  const deleteFs = async (name: string, ev?: React.MouseEvent) => {
+    try { if (ev) ev.stopPropagation(); } catch {}
+    try {
+      if (!confirm(`Delete '${name}'? This cannot be undone.`)) return;
+      setFsLoading(true);
+      const headers: any = { "Content-Type": "application/json" };
+      try {
+        const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+        if (t) headers["Authorization"] = `Bearer ${t}`;
+      } catch {}
+      const resp = await fetch(`${API_BASE}/admin/fs-delete`, { method: "POST", headers, body: JSON.stringify({ path: buildFsPath(name) }) });
+      if (!resp.ok) {
+        let msg = "Delete failed";
+        try { const j = await resp.json(); msg = j?.detail || j?.message || msg; } catch {}
+        appendConsole(msg);
+      } else {
+        try { const j = await resp.json(); if (j?.message) appendConsole(j.message); } catch {}
+        await fetchFs(fsCwd);
+      }
+    } catch {
+    } finally {
+      setFsLoading(false);
+    }
+  };
+
   // Global model fixed to Sonnet 4; no selector
 
   // Catalog data and sorting — declared before any early returns so hooks are stable
@@ -698,33 +738,6 @@ export default function AdminPage() {
             disabled={renameSelection.length === 0 || !newName.trim()}
             style={{ padding: "6px 10px" }}
           >Assign</button>
-          <button
-            onClick={async () => {
-              if (renameSelection.length === 0) return;
-              appendConsole(`Clearing DB for: ${renameSelection.join(", ")}`);
-              try {
-                const headers: any = { "Content-Type": "application/json" };
-                try {
-                  const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
-                  if (t) headers["Authorization"] = `Bearer ${t}`;
-                } catch {}
-                const resp = await fetch(`${API_BASE}/admin/clear-selected`, {
-                  method: "POST",
-                  headers,
-                  body: JSON.stringify(renameSelection),
-                });
-                const data = await resp.json().catch(() => ({} as any));
-                if (!resp.ok) throw new Error(data?.detail || `HTTP ${resp.status}`);
-                appendConsole(data?.message || "Cleared.");
-                // Also refresh Admin log stream is already open and pdf-status
-                await Promise.all([refetchPdfStatus()]);
-              } catch (e: any) {
-                appendConsole(`Clear failed: ${e?.message || e || "error"}`);
-              }
-            }}
-            disabled={renameSelection.length === 0}
-            style={{ padding: "6px 10px" }}
-          >Clear Selected (DB)</button>
           {/* New pipeline controls: dropdown + Take Action */}
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
             <select
@@ -860,20 +873,25 @@ export default function AdminPage() {
               </div>
             </div>
             <div style={{ border: "1px solid #eee", borderRadius: 4, overflow: "hidden", flex: 1 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 180px", gap: 0, background: "#fafafa", fontSize: 14, fontWeight: 600, padding: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 180px 220px", gap: 0, background: "#fafafa", fontSize: 14, fontWeight: 600, padding: 8 }}>
                 <div>Name</div>
                 <div>Size</div>
                 <div>Modified</div>
+                <div>Actions</div>
               </div>
               <div style={{ height: "100%", overflow: "auto" }}>
                 {fsLoading ? (
                   <div style={{ padding: 10, fontSize: 15 }}>Loading…</div>
                 ) : (
                   fsEntries.map((e) => (
-                    <div key={e.name} style={{ display: "grid", gridTemplateColumns: "1fr 120px 180px", gap: 0, padding: 6, borderTop: "1px solid #f3f3f3", cursor: e.is_dir ? "pointer" : "default" }} onClick={() => { if (e.is_dir) fetchFs((fsCwd ? fsCwd + "/" : "") + e.name); }}>
+                    <div key={e.name} style={{ display: "grid", gridTemplateColumns: "1fr 120px 180px 220px", gap: 0, padding: 6, borderTop: "1px solid #f3f3f3", cursor: e.is_dir ? "pointer" : "default" }} onClick={() => { if (e.is_dir) fetchFs((fsCwd ? fsCwd + "/" : "") + e.name); }}>
                       <div>{e.is_dir ? "📁 " : "📄 "}{e.name}</div>
                       <div>{e.is_dir ? "—" : formatSize(e.size)}</div>
                       <div>{e.mtime ? new Date(e.mtime).toLocaleString() : ""}</div>
+                      <div>
+                        <button disabled={e.is_dir} onClick={(ev) => downloadFs(e.name, ev)} style={{ padding: "4px 8px", fontSize: 13, marginRight: 6 }}>Download</button>
+                        <button disabled={e.is_dir} onClick={(ev) => deleteFs(e.name, ev)} style={{ padding: "4px 8px", fontSize: 13 }}>Delete</button>
+                      </div>
                     </div>
                   ))
                 )}

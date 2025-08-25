@@ -689,3 +689,161 @@ def compute_normalized_header_bbox(
     return None
 
 
+def compute_normalized_section_code_bbox(
+    pdf_path: str | os.PathLike,
+    page_number_1_based: int,
+    section_id: str,
+    section_start: str,
+    *,
+    cal_margin_pct_h: float = 2.0,
+    cal_margin_pct_v: float = 2.0,
+) -> Tuple[float, float, float, float] | None:
+    """Compute a normalized bbox [x,y,w,h] (percent) for a section's code token only.
+
+    Strategy:
+    1) Tokenize page words (PyMuPDF "words") and normalize.
+    2) Find the first occurrence of the start of section_start within the page words
+       using a tolerant token match (first ~6 tokens with ≥60% match).
+    3) From that window start, accumulate tokens until the concatenated visible text
+       (no spaces) covers the exact section_id string (also normalized for NBSP).
+    4) Build bbox from the tokens used to cover the code area and normalize to a
+       2% inset frame.
+    """
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return None
+    try:
+        pg_idx = max(1, int(page_number_1_based)) - 1
+    except Exception:
+        return None
+    code = (section_id or "").strip()
+    start_text = (section_start or "").strip()
+    if not code or not start_text:
+        return None
+    def _norm(s: str) -> str:
+        import re as _re
+        return _re.sub(r"\s+", " ", (s or "").replace("\u00a0", " ")).strip()
+    def _norm_no_space(s: str) -> str:
+        return _norm(s).replace(" ", "")
+    code_ns = _norm_no_space(code)
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            if pg_idx < 0 or pg_idx >= len(doc):
+                return None
+            page = doc.load_page(pg_idx)
+            rect = page.rect
+            W = float(rect.width)
+            H = float(rect.height)
+            inset_x = (max(0.0, cal_margin_pct_h) / 100.0) * W
+            inset_y = (max(0.0, cal_margin_pct_v) / 100.0) * H
+            frame_left = rect.x0 + inset_x
+            frame_top = rect.y0 + inset_y
+            frame_w = max(1.0, W - 2 * inset_x)
+            frame_h = max(1.0, H - 2 * inset_y)
+
+            try:
+                words_raw = page.get_text("words")
+            except Exception:
+                words_raw = []
+            words: List[Tuple[float, float, float, float, str, int, int, int]] = []  # type: ignore
+            for wrec in words_raw or []:
+                try:
+                    x0, y0, x1, y1, t, b, l, wn = float(wrec[0]), float(wrec[1]), float(wrec[2]), float(wrec[3]), str(wrec[4]), int(wrec[5]), int(wrec[6]), int(wrec[7])
+                except Exception:
+                    try:
+                        x0 = float(wrec[0]); y0 = float(wrec[1]); x1 = float(wrec[2]); y1 = float(wrec[3]); t = str(wrec[4])
+                        b = int(wrec[5]) if len(wrec) > 5 else 0
+                        l = int(wrec[6]) if len(wrec) > 6 else 0
+                        wn = int(wrec[7]) if len(wrec) > 7 else 0
+                    except Exception:
+                        continue
+                if not t or not t.strip():
+                    continue
+                words.append((x0, y0, x1, y1, t, b, l, wn))
+            # Stable read order
+            words.sort(key=lambda ww: (ww[6], ww[7], ww[5], ww[1], ww[0]))
+
+            # Quick path: try direct search for the code or the full start line
+            try:
+                rects_code = page.search_for(code)
+            except Exception:
+                rects_code = []
+            if rects_code:
+                r = rects_code[0]
+                x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                nx = max(0.0, (y0 - frame_top) * 100.0 / frame_h)
+                ny = max(0.0, (x0 - frame_left) * 100.0 / frame_w)
+                nw = max(0.1, (x1 - x0) * 100.0 / frame_w)
+                nh = max(0.1, (y1 - y0) * 100.0 / frame_h)
+                return (nx, ny, nw, nh)
+            try:
+                rects_line = page.search_for(start_text)
+            except Exception:
+                rects_line = []
+            # Build normalized tokens for the page
+            import re as _re
+            def _norm_token(s: str) -> str:
+                s2 = _norm(s).lower()
+                return _re.sub(r"^[\s\-–—:;,.]+|[\s\-–—:;,.]+$", "", s2)
+            page_tokens = [_norm_token(w[4]) for w in words]
+            start_tokens = [_norm_token(t) for t in _re.split(r"\s+", _norm(start_text)) if t]
+            start_tokens = start_tokens[:6] if start_tokens else []
+            if not start_tokens:
+                return None
+
+            # Find approximate start window for section_start
+            start_idx = None
+            mlen = len(start_tokens)
+            for i in range(0, max(0, len(page_tokens) - mlen + 1)):
+                win = page_tokens[i:i+mlen]
+                if not win:
+                    continue
+                # Allow fuzzy first-token match: code token may be attached to next word via punctuation
+                first_ok = (win[0] == start_tokens[0]) or win[0].startswith(start_tokens[0]) or start_tokens[0].startswith(win[0])
+                if not first_ok:
+                    continue
+                eq = sum(1 for a, b in zip(win, start_tokens) if (a == b) or a.startswith(b) or b.startswith(a))
+                if eq >= max(2, mlen // 2):
+                    start_idx = i
+                    break
+            if start_idx is None:
+                return None
+
+            # Accumulate tokens from start_idx until we cover section_id text (no spaces)
+            acc = ""
+            used: List[int] = []
+            j = start_idx
+            while j < len(words) and len(acc) < len(code_ns) + 4 and len(used) < 6:
+                raw = str(words[j][4])
+                acc += _norm_no_space(raw)
+                used.append(j)
+                if acc.lower().startswith(code_ns.lower()):
+                    break
+                j += 1
+            # If we didn't reach a prefix, try single-token match by literal code
+            if not acc.lower().startswith(code_ns.lower()):
+                for k in range(max(0, start_idx - 3), min(len(words), start_idx + 6)):
+                    if _norm_no_space(words[k][4]).lower().startswith(code_ns.lower()):
+                        used = [k]
+                        break
+            if not used:
+                return None
+
+            # Build tight bbox around used tokens
+            x0 = min(words[k][0] for k in used)
+            y0 = min(words[k][1] for k in used)
+            x1 = max(words[k][2] for k in used)
+            y1 = max(words[k][3] for k in used)
+
+            # Normalize to inset frame percentages (x=top, y=left per existing convention)
+            nx = max(0.0, (y0 - frame_top) * 100.0 / frame_h)
+            ny = max(0.0, (x0 - frame_left) * 100.0 / frame_w)
+            nw = max(0.1, (x1 - x0) * 100.0 / frame_w)
+            nh = max(0.1, (y1 - y0) * 100.0 / frame_h)
+            return (nx, ny, nw, nh)
+    except Exception:
+        return None
+    return None
+
+

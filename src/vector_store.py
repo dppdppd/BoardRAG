@@ -159,7 +159,19 @@ def search_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[
                 "embedding_prefix_summary": 8.0,
                 "search_keywords": 7.0,
                 "search_synonyms": 5.0,
-                # Keep headers meaningful but secondary
+                # Human-readable headers and section names (from LLM extraction)
+                # These directly capture phrases like "INFILTRATION & CLOSE COMBAT"
+                "section_start_by_code": 9.0,
+                # New: per-section title/summary extracted by LLM
+                "section_titles": 9.5,
+                "section_summaries": 8.5,
+                # Namespaced, normalized header ids also include short slugs like
+                # "20-infiltration-close-xxxx" which are highly indicative
+                "primary_section_id2": 7.0,
+                "section_id2_by_code": 6.0,
+                # Raw structured sections JSON contains header lines as provided by the LLM
+                "sections_raw": 6.0,
+                # Keep numeric header codes meaningful but secondary
                 "embedding_prefix_headers": 2.0,
                 # Helpful, but lighter influence
                 "embedding_prefix_search_hints": 2.0,

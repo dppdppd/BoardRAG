@@ -339,6 +339,118 @@ def rewrite_search_query(raw_query: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def dedupe_then_sort_results(results: List[Tuple[Any, float]]) -> List[Tuple[Any, float]]:
+    """Canonical dedupe/sort policy shared by app and tools.
+
+    - Group by (metadata.source, section_id_2) if available; else by (source, first primary section id)
+    - Prefer chunks whose page equals section_pages[section_id] (when grouping by code)
+    - Break ties by lower score (lower is better)
+    - Sort ascending by score
+    """
+    deduped: List[Tuple[Any, float]] = []
+    seen: Dict[Tuple[str, str], Tuple[Any, float, bool]] = {}
+    for doc, score in results:
+        meta = getattr(doc, 'metadata', {}) or {}
+        src = str(meta.get('source') or '')
+
+        # Prefer new section_id_2 for grouping (no fallback in grouping key when present)
+        sec_id2_map = {}
+        try:
+            import json as _json
+            raw = meta.get('section_id2_by_code')
+            if isinstance(raw, str) and raw:
+                sec_id2_map = _json.loads(raw)
+            elif isinstance(raw, dict):
+                sec_id2_map = raw
+        except Exception:
+            sec_id2_map = {}
+
+        # Determine grouping key
+        group_id = ''
+        # If we have a primary code, use its id2
+        try:
+            primary_id2 = str(meta.get('primary_section_id2') or '').strip()
+            if primary_id2:
+                group_id = primary_id2
+        except Exception:
+            group_id = ''
+
+        # Fallback only if id2 is entirely unavailable: use first primary section id
+        if not group_id:
+            sec_ids: List[str] = []
+            try:
+                import json as _json
+                prim_raw = meta.get('primary_sections')
+                if isinstance(prim_raw, str) and prim_raw:
+                    sec_ids = _json.loads(prim_raw) or []
+                elif isinstance(prim_raw, list):
+                    sec_ids = prim_raw
+            except Exception:
+                pass
+            section_id = str(sec_ids[0]) if sec_ids else ''
+            group_id = section_id
+
+        key = (src, group_id)
+        if not group_id:
+            deduped.append((doc, score))
+            continue
+
+        # Preference by page match when grouping by canonical code (attempt via section_pages)
+        sp_raw = meta.get('section_pages')
+        section_page_map: Dict[str, Any] = {}
+        try:
+            import json as _json
+            if isinstance(sp_raw, str) and sp_raw:
+                section_page_map = _json.loads(sp_raw)
+            elif isinstance(sp_raw, dict):
+                section_page_map = sp_raw
+        except Exception:
+            section_page_map = {}
+
+        # Try to resolve desired page using the first primary section id if available
+        desired_page = 0
+        try:
+            import json as _json
+            prim_raw = meta.get('primary_sections')
+            prim_list: List[str] = []
+            if isinstance(prim_raw, str) and prim_raw:
+                prim_list = _json.loads(prim_raw) or []
+            elif isinstance(prim_raw, list):
+                prim_list = prim_raw
+            if prim_list:
+                h = str(prim_list[0])
+                desired_page = int((section_page_map or {}).get(h) or 0)
+        except Exception:
+            desired_page = 0
+
+        try:
+            doc_page = int(meta.get('page_1based') or (int(meta.get('page') or 0) + 1))
+        except Exception:
+            try:
+                doc_page = int(meta.get('page') or 0) + 1
+            except Exception:
+                doc_page = 0
+        ok = bool(desired_page and doc_page == desired_page)
+
+        prev = seen.get(key)
+        if not prev:
+            seen[key] = (doc, score, ok)
+        else:
+            _, prev_score, prev_ok = prev
+            if ok and not prev_ok:
+                seen[key] = (doc, score, ok)
+            elif ok == prev_ok and score < prev_score:
+                seen[key] = (doc, score, ok)
+
+    if seen:
+        deduped.extend((d, s) for (d, s, _ok) in seen.values())
+    try:
+        deduped.sort(key=lambda pair: float(pair[1]))
+    except Exception:
+        pass
+    return deduped
+
+
 def stream_query_rag(
     query_text: str,
     selected_game: Optional[str] = None,
@@ -401,59 +513,8 @@ def stream_query_rag(
                 results = []
             else:
                 results = search_chunks(query_text, pdf=None, k=k_results)
-        # Dedupe by section_id (header) using metadata.section_pages when available; prefer chunk whose page==section_page
-        deduped: list[tuple[Any, float]] = []
-        seen: dict[tuple[str, str], tuple[Any, float]] = {}
-        for doc, score in results:
-            meta = getattr(doc, 'metadata', {}) or {}
-            src = str(meta.get('source') or '')
-            # section_pages serialized as JSON
-            sp_raw = meta.get('section_pages')
-            section_page_map = {}
-            try:
-                import json as _json
-                if isinstance(sp_raw, str) and sp_raw:
-                    section_page_map = _json.loads(sp_raw)
-            except Exception:
-                section_page_map = {}
-            # Use first section as id when available
-            sec_ids = []
-            try:
-                prim_raw = meta.get('primary_sections')
-                if isinstance(prim_raw, str) and prim_raw:
-                    import json as _json
-                    sec_ids = _json.loads(prim_raw) or []
-            except Exception:
-                pass
-            section_id = str(sec_ids[0]) if sec_ids else ''
-            key = (src, section_id)
-            if not section_id:
-                deduped.append((doc, score))
-                continue
-            # Prefer page==section_page
-            try:
-                doc_page = int(meta.get('page_1based') or (int(meta.get('page') or 0) + 1))
-            except Exception:
-                doc_page = int(meta.get('page') or 0) + 1
-            desired_page = int(section_page_map.get(section_id) or 0)
-            prev = seen.get(key)
-            if not prev:
-                seen[key] = (doc, score, doc_page == desired_page)
-            else:
-                _, prev_score, prev_ok = prev
-                ok = (doc_page == desired_page)
-                if ok and not prev_ok:
-                    seen[key] = (doc, score, ok)
-                elif ok == prev_ok and score < prev_score:
-                    seen[key] = (doc, score, ok)
-        if seen:
-            deduped = [(d, s) for (d, s, _ok) in seen.values()]
-        results = deduped or results
-        # Ensure final results are sorted by score (lower is better)
-        try:
-            results.sort(key=lambda pair: float(pair[1]))
-        except Exception:
-            pass
+        # Apply canonical dedupe-then-sort policy
+        results = dedupe_then_sort_results(results)
 
         # Decision: for each chunk, if visual_importance >= 4 attach PDFs; else use text
         from pathlib import Path as _P
