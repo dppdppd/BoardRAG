@@ -273,7 +273,7 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
 
   const debugLog = (...args: any[]) => { try { if (typeof window !== 'undefined') console.debug('[PdfPreview]', ...args); } catch {} };
 
-  const performAnchorOnce = (retryCount = 0) => {
+  const performAnchorOnce = (retryCount = 0): boolean => {
     debugLog('performAnchorOnce enter', { retryCount, targetPageResolved, anchorPhase: anchorPhaseRef.current, isInitialGameLoad });
     if (anchoringRef.current && retryCount === 0) {
       debugLog('performAnchorOnce: already anchoring; bail');
