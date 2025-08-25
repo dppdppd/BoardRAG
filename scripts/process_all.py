@@ -25,9 +25,20 @@ def main() -> int:
         return 0
     for p in pdfs:
         print(f"==> {p.name}")
-        code = subprocess.call([sys.executable, str(repo_root / "scripts" / "process_pdf.py"), str(p)])
+        # 1) Split pages (missing)
+        code = subprocess.call([sys.executable, str(repo_root / "scripts" / "split_pages.py"), str(p)])
         if code != 0:
-            print(f"❌ Failed processing {p.name} (exit {code})")
+            print(f"❌ Split failed {p.name} (exit {code})")
+            return code
+        # 2) LLM eval (missing)
+        code = subprocess.call([sys.executable, str(repo_root / "scripts" / "eval_pages.py"), str(p)])
+        if code != 0:
+            print(f"❌ Eval failed {p.name} (exit {code})")
+            return code
+        # 3) Populate DB (missing)
+        code = subprocess.call([sys.executable, str(repo_root / "scripts" / "populate_from_processed.py"), str(p)])
+        if code != 0:
+            print(f"❌ Populate failed {p.name} (exit {code})")
             return code
     print("🎉 All PDFs processed")
     return 0

@@ -11,6 +11,8 @@ echo === BoardRAG Local Dev Launcher ===
 taskkill /F /IM python.exe
 taskkill /F /IM node.exe 
 
+call venv\Scripts\activate
+
 REM Ensure Python venv exists
 if not exist "venv\Scripts\activate.bat" (
   echo [ERROR] Python virtual environment not found at venv\

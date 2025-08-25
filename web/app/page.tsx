@@ -13,7 +13,123 @@ import BottomSheetMenu from "./components/BottomSheetMenu";
 import PdfPreview from "./components/PdfPreview";
 // TextLayer CSS removed; we do not render text layers
 
-type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; style?: "default" | "brief" | "detailed" };
+type CitationEntry = { file?: string; page?: number; header?: string; header_anchor_bbox_pct?: number[]; rects_norm?: number[][]; text_spans?: Array<{ page?: number; start_char?: number; end_char?: number }>|any[] };
+type MessageDev = { prompt?: string; context?: string; chunks?: any[]; allowed?: any[]; original_query?: string };
+type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; style?: "default" | "brief" | "detailed"; citations?: Record<string, CitationEntry>; dev?: MessageDev };
+
+  // --- Citation helpers (pure) ---
+  const extractUsedCitations = (answer: string): Set<string> => {
+    const used = new Set<string>();
+    try { const re = /\[([^\]]+)\]/g; let m; while ((m = re.exec(answer)) !== null) { const key = String(m[1] || '').trim(); if (key) used.add(key); } } catch {}
+    return used;
+  };
+  const normalizeAnchorFrom = (src: any, key: string): number[] | null => {
+    try {
+      let arr: any = src?.header_anchor_bbox_pct;
+      if (Array.isArray(arr) && arr.length >= 4) return [Number(arr[0])||0, Number(arr[1])||0, Number(arr[2])||0, Number(arr[3])||0];
+      let anchorsObj: any = (src as any)?.header_anchors_pct || (src as any)?.anchors;
+      try { if (typeof anchorsObj === 'string') anchorsObj = JSON.parse(anchorsObj); } catch {}
+      if (anchorsObj && typeof anchorsObj === 'object') {
+        const tryKeys = [key, (src as any)?.header, (src as any)?.section].filter(Boolean) as string[];
+        for (const k of tryKeys) {
+          const a = anchorsObj[k as any];
+          if (Array.isArray(a) && a.length >= 4) return [Number(a[0])||0, Number(a[1])||0, Number(a[2])||0, Number(a[3])||0];
+        }
+      }
+    } catch {}
+    return null;
+  };
+  const buildCitationLookup = (chunks: any[]): Map<string, CitationEntry> => {
+    const map = new Map<string, CitationEntry>();
+    try {
+      for (const c of chunks) {
+        const file = String(c?.source || c?.file || c?.filename || '');
+        const page1 = (typeof c?.page === 'number') ? (Number(c.page) + 1) : undefined;
+        const label = String(c?.section || '').trim();
+        const code = String(c?.section_number || '').trim();
+        const labelsList: string[] = Array.isArray((c as any).labels) ? (c as any).labels : [];
+        const keys = [] as string[];
+        if (code) keys.push(code);
+        if (label) keys.push(label);
+        for (const l of labelsList) { const lv = String(l || '').trim(); if (lv) keys.push(lv); }
+        if (!code && label) { const m = label.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/); if (m && m[1]) keys.push(m[1]); }
+        for (const k of keys) {
+          if (!k || map.has(k)) continue;
+          const entry: CitationEntry = { file, page: page1, header: label || code };
+          const an = normalizeAnchorFrom(c, k);
+          if (an) entry.header_anchor_bbox_pct = an;
+          // Store text spans for highlighting
+          try {
+            let rn: any = (c as any).rects_norm;
+            if (typeof rn === 'string') rn = JSON.parse(rn);
+            if (Array.isArray(rn)) entry.rects_norm = rn;
+          } catch {}
+          try {
+            let ts: any = (c as any).text_spans;
+            if (typeof ts === 'string') ts = JSON.parse(ts);
+            let selected: any = null;
+            if (Array.isArray(ts)) {
+              selected = ts;
+            } else if (ts && typeof ts === 'object') {
+              const tryKeys = [k, label, code].filter(Boolean) as string[];
+              for (const name of tryKeys) {
+                const arr = (ts as any)[name as any];
+                if (Array.isArray(arr)) { selected = arr; break; }
+              }
+            }
+            if (Array.isArray(selected)) (entry as any).text_spans = selected;
+          } catch {}
+          map.set(k, entry);
+        }
+      }
+    } catch {}
+    return map;
+  };
+  const buildCitationLookupFromAllowed = (citations: any[]): Map<string, CitationEntry> => {
+    const map = new Map<string, CitationEntry>();
+    try {
+      for (const c of citations) {
+        const file = String(c?.file || '');
+        const page1 = (typeof c?.page === 'number') ? Number(c.page) : undefined;
+        const label = String(c?.section || '').trim();
+        const code = String(c?.code || '').trim();
+        const keys = [] as string[];
+        if (code) keys.push(code);
+        if (label) keys.push(label);
+        if (!code && label) { const m = label.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/); if (m && m[1]) keys.push(m[1]); }
+        for (const k of keys) {
+          if (!k || map.has(k)) continue;
+          const entry: CitationEntry = { file, page: page1, header: label || code };
+          // Add header anchor if available
+          try {
+            const anchor = c?.header_anchor_bbox_pct;
+            if (Array.isArray(anchor) && anchor.length >= 4) {
+              entry.header_anchor_bbox_pct = [Number(anchor[0])||0, Number(anchor[1])||0, Number(anchor[2])||0, Number(anchor[3])||0];
+            }
+          } catch {}
+          // Add text spans if available
+          try {
+            const spans = c?.text_spans;
+            if (Array.isArray(spans)) (entry as any).text_spans = spans;
+          } catch {}
+          map.set(k, entry);
+        }
+      }
+    } catch {}
+    return map;
+  };
+  const buildMessageCitations = (used: Set<string>, lookup: Map<string, CitationEntry>): Record<string, CitationEntry> => {
+    const cit: Record<string, CitationEntry> = {};
+    for (const key of used) {
+      let v = lookup.get(key);
+      if (!v) {
+        const m = key.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/);
+        if (m && m[1]) v = lookup.get(m[1]);
+      }
+      if (v) cit[key] = { ...v, header: v.header || key };
+    }
+    return cit;
+  };
 
 import { API_BASE, isLocalhost } from "../lib/config";
 
@@ -66,14 +182,10 @@ export default function HomePage() {
   const decorateCitations = (input: string): string => {
     if (!input) return input;
     let out = input;
-    // Convert inline metadata citations like [<label>: {json}] -> [<label>](section:<label> '<json>')
-    // We keep this permissive because the presence of a JSON object after the colon
-    // is a strong signal that this is a citation block.
-    out = out.replace(/\[([^\]\n]+?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code, json) => {
+    // Legacy encoded citations like [<label>: {json}] → convert to plain section link without metadata
+    out = out.replace(/\[([^\]\n]+?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code) => {
       const encCode = encodeURIComponent(String(code));
-      // Put the literal JSON into the title so tooltip shows the human-readable metadata
-      const safe = String(json).replace(/'/g, "&#39;");
-      return `[${code}](section:${encCode} '${safe}')`;
+      return `[${code}](section:${encCode})`;
     });
     // Replace [3.5] with markdown link [3.5](section:3.5) only when not already a link
     out = out.replace(/\[(\d+(?:\.\d+)+)\](?!\()/g, "[$1](section:$1)");
@@ -93,7 +205,15 @@ export default function HomePage() {
   };
   // State
   const [sessionId, setSessionId] = useState<string>("");
-  const { data: gamesData, mutate: refetchGames, isLoading: loadingGames, error: gamesError } = useSWR<{ games: string[] }>(`${API_BASE}/games`, fetcher);
+  const gamesUrl = useMemo(() => {
+    try {
+      const t = (typeof window !== 'undefined') ? (sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token')) : null;
+      const u = new URL(`${API_BASE}/games`);
+      if (t) u.searchParams.set('token', t);
+      return u.toString();
+    } catch { return `${API_BASE}/games`; }
+  }, []);
+  const { data: gamesData, mutate: refetchGames, isLoading: loadingGames, error: gamesError } = useSWR<{ games: string[]; progress?: Record<string, { complete?: boolean; ratio?: number }> }>(gamesUrl, fetcher);
   const [selectedGame, setSelectedGame] = useState<string | "">("");
   const [includeWeb, setIncludeWeb] = useState<boolean>(false);
   const [pdfSmoothScroll, setPdfSmoothScroll] = useState<boolean>(() => {
@@ -106,6 +226,86 @@ export default function HomePage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState<string>("");
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const isAdmin = useMemo(() => {
+    try {
+      const r = sessionStorage.getItem('boardrag_role') || localStorage.getItem('boardrag_role');
+      return (r || '').toLowerCase() === 'admin';
+    } catch { return false; }
+  }, []);
+  const [inspectOpen, setInspectOpen] = useState<boolean>(false);
+  const [inspectTitle, setInspectTitle] = useState<string>("");
+  const [inspectBody, setInspectBody] = useState<React.ReactNode>(null);
+  const [showCitePanelFor, setShowCitePanelFor] = useState<Set<number>>(() => new Set());
+
+  // Save a complete debug bundle for a specific QA pair (assistant index and its preceding user index)
+  const saveDebugBundle = (assistantIdx: number, precedingUserIdx: number) => {
+    try {
+      const reg = (window as any).__boardrag_dev__ || { userMeta: {}, assistantRaw: {} };
+      const userMeta = reg.userMeta ? reg.userMeta[precedingUserIdx] : null;
+      let rawResponse = reg.assistantRaw ? reg.assistantRaw[precedingUserIdx] : null;
+      const allowedByUser = undefined as any;
+      const chunksMapByUser = undefined as any;
+      // Grab the assistant message object with citations
+      let assistantMessage: any = null;
+      try {
+        let seenAssistants = -1;
+        for (let i = 0; i < messages.length; i++) {
+          if (messages[i].role === 'assistant') {
+            seenAssistants += 1;
+            if (seenAssistants === assistantIdx) { assistantMessage = messages[i]; break; }
+          }
+        }
+      } catch {}
+      const toObj = (m?: Map<string, any>) => {
+        if (!m) return {} as any;
+        const obj: any = {};
+        try { for (const [k, v] of m.entries()) obj[k] = v; } catch {}
+        return obj;
+      };
+      // Build citation map from allowed citations and prune to used citations only
+      const citationsForBundle = Array.isArray((assistantMessage?.dev as any)?.citations) ? (assistantMessage?.dev as any)?.citations : (Array.isArray(userMeta?.citations) ? userMeta?.citations : []);
+      const usedCitations = extractUsedCitations(String((rawResponse || (assistantMessage ? assistantMessage.content : '')) || ''));
+      const lookup = buildCitationLookupFromAllowed(citationsForBundle);
+      const minimalMap: any[] = [];
+      for (const key of usedCitations) {
+        const normKey = (key.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/) || [])[1] || key;
+        const v = lookup.get(key) || lookup.get(normKey);
+        if (v && v.file && v.header && v.page) {
+          minimalMap.push({ file: v.file, section: v.header, page: v.page, header_anchor_bbox_pct: v.header_anchor_bbox_pct, text_spans: (v as any).text_spans });
+        }
+      }
+      const bundle = {
+        saved_at: new Date().toISOString(),
+        game: selectedGame || '',
+        session_id: sessionId || '',
+        assistant_index: assistantIdx,
+        user_index: precedingUserIdx,
+        prompt_with_context: {
+          prompt: String((assistantMessage?.dev as any)?.prompt || userMeta?.prompt || ''),
+          context: String((assistantMessage?.dev as any)?.context || userMeta?.context || ''),
+          original_query: String((assistantMessage?.dev as any)?.original_query || userMeta?.original_query || ''),
+        },
+        raw_response: String((rawResponse || (assistantMessage ? assistantMessage.content : '')) || ''),
+        retrieved_metadata: { citations: minimalMap },
+        saved_with_pair: {
+          assistant_message: assistantMessage ? { content: assistantMessage.content, citations: assistantMessage.citations || {} } : null,
+        },
+      } as any;
+      const json = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `boardrag_debug_${selectedGame || 'game'}_u${precedingUserIdx}_a${assistantIdx}_${ts}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { try { URL.revokeObjectURL(url); document.body.removeChild(a); } catch {} }, 0);
+      try { postLog(`[debug] saved bundle for userIdx=${precedingUserIdx} assistant=${assistantIdx}`); } catch {}
+    } catch (e: any) {
+      try { postLog(`[debug] save failed: ${String(e?.message || e)}`); } catch {}
+    }
+  };
   const [debugShowCitationMeta, setDebugShowCitationMeta] = useState<boolean>(() => {
     try { return localStorage.getItem('boardrag_debug_citation_meta') === '1'; } catch { return false; }
   });
@@ -139,6 +339,7 @@ export default function HomePage() {
   };
 
   const games = gamesData?.games || [];
+  const progress = (gamesData?.progress as any) || {} as Record<string, { complete?: boolean; ratio?: number }>;
 
   // Keep only valid QA pairs.
   // - Drop any user question that never received an assistant reply
@@ -331,30 +532,22 @@ export default function HomePage() {
     bar.scrollTo({ left: bar.scrollWidth, behavior: 'smooth' });
   }, [bookmarkLabels, selectedGame]);
 
-  // After loading a session, scroll to the last asked question (last user message)
+  // After loading a session, scroll to the bottom of the chat
   useEffect(() => {
-    if (!selectedGame || !messages || messages.length === 0) return;
+    if (!selectedGame) return;
     if (isStreaming) return; // avoid fighting live streaming scroll
     const key = `boardrag_conv:${sessionId}:${selectedGame}`;
     if (loadedKeyRef.current !== key) return; // ensure messages for this key are loaded
     if (initialScrollDoneRef.current === key) return; // already scrolled for this key
-
-    // Find the last user index
-    let lastUserIdx = -1;
-    let count = -1;
-    for (const msg of messages) {
-      if (msg.role === 'user') { count += 1; lastUserIdx = count; }
-    }
-    if (lastUserIdx < 0) return;
 
     const parent = chatScrollRef.current;
     if (!parent) return;
 
     let attempts = 0;
     const tryScroll = () => {
-      const target = parent.querySelector(`[data-user-index="${lastUserIdx}"]`) as HTMLElement | null;
-      if (target) {
-        const top = target.offsetTop - parent.offsetTop - 12;
+      const endEl = chatEndRef.current;
+      if (endEl) {
+        const top = endEl.offsetTop - parent.offsetTop;
         parent.scrollTo({ top: Math.max(0, top), behavior: 'auto' });
         initialScrollDoneRef.current = key;
       } else if (attempts < 6) {
@@ -636,11 +829,7 @@ export default function HomePage() {
     // Send stable browser session id for server-side blocking
     url.searchParams.set("sid", sessionId || "");
     url.searchParams.set("_", String(Date.now()));
-    // Debug flag: request server to not strip citation metadata from inline brackets
-    try {
-      const dbg = localStorage.getItem('boardrag_debug_citation_meta') === '1';
-      url.searchParams.set("debug_cite_meta", dbg ? "1" : "0");
-    } catch {}
+    // Inline citation metadata debug flag removed; no inline JSON metadata is used
     // Ensure we have a token; if missing, try to re-unlock with saved password once
     const ensureToken = async (): Promise<string | null> => {
       try {
@@ -719,6 +908,26 @@ export default function HomePage() {
           if (parsed.req && typeof parsed.req === 'string') {
             if (streamReqIdRef.current == null) {
               streamReqIdRef.current = parsed.req;
+              // Seed assistant.dev with original_query/prompt/context/chunks at first token
+              try {
+                const originalQuery = String(input || '');
+                const promptText = String(parsed?.meta?.prompt || '');
+                const contextText = String(parsed?.meta?.context || '');
+                const chunksSnap = Array.isArray(parsed?.meta?.chunks) ? parsed?.meta?.chunks : [];
+                setMessages((cur) => {
+                  const updated = [...cur];
+                  // Ensure there is an assistant message to attach dev info to
+                  const last = updated[updated.length - 1];
+                  if (!last || last.role !== 'assistant') {
+                    updated.push({ role: 'assistant', content: '', pinned: false, dev: { original_query: originalQuery, prompt: promptText, context: contextText, chunks: chunksSnap } as any } as any);
+                  } else {
+                    const devPrev: any = (last as any).dev || {};
+                    const devNext = { ...devPrev, original_query: originalQuery || devPrev.original_query, prompt: promptText || devPrev.prompt, context: contextText || devPrev.context, chunks: (Array.isArray(devPrev.chunks) && devPrev.chunks.length ? devPrev.chunks : chunksSnap) };
+                    updated[updated.length - 1] = { ...(last as any), dev: devNext } as any;
+                  }
+                  return updated;
+                });
+              } catch {}
             } else if (streamReqIdRef.current !== parsed.req) {
               return; // late or cross-stream chunk – ignore
             }
@@ -738,38 +947,35 @@ export default function HomePage() {
           setIsStreaming(false);
           removeRetryable(lastSubmittedUserIndexRef.current);
           streamReqIdRef.current = null;
-          // Seed section-chunks cache from SSE meta if present
+          // On stream completion, persist only the citations that were actually used in the last assistant message
           try {
             const meta = parsed.meta || {};
             const chunks = Array.isArray(meta.chunks) ? meta.chunks : [];
-            if (chunks && chunks.length > 0) {
-              const gameKey = String(selectedGame || "");
-              const groups = new Map<string, any[]>();
-              for (const c of chunks) {
-                const secNum = String(c.section_number || "").trim();
-                const secLbl = String(c.section || "").trim();
-                let keyNum = "";
-                if (secNum) keyNum = secNum;
-                else {
-                  const m = secLbl.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/);
-                  if (m) keyNum = m[1];
-                }
-                const keys: string[] = [];
-                if (keyNum) keys.push(keyNum);
-                if (secLbl) keys.push(secLbl);
-                // Always group full set under a generic key as well
-                if (keys.length === 0) keys.push("__all__");
-                for (const k of keys) {
-                  const ck = `${gameKey}::${k}`;
-                  if (!groups.has(ck)) groups.set(ck, []);
-                  groups.get(ck)!.push(c);
+            const citations = Array.isArray(meta.citations) ? meta.citations : [];
+            const lookup = buildCitationLookupFromAllowed(citations);
+            setMessages((cur) => {
+              const updated = [...cur];
+              for (let i = updated.length - 1; i >= 0; i--) {
+                if (updated[i].role === 'assistant') {
+                  const content = String((updated[i] as any).content || '');
+                  const used = extractUsedCitations(content);
+                  const cit = buildMessageCitations(used, lookup);
+                  // Also ensure assistant.dev carries prompt/context/original_query/chunks snapshot
+                  const devPrev: any = (updated[i] as any).dev || {};
+                  const devNext = {
+                    ...devPrev,
+                    original_query: devPrev.original_query || String(input || ''),
+                    prompt: devPrev.prompt || String(meta?.prompt || ''),
+                    context: devPrev.context || String(meta?.context || ''),
+                    chunks: (Array.isArray(devPrev.chunks) && devPrev.chunks.length ? devPrev.chunks : chunks),
+                    citations: (Array.isArray(devPrev.citations) && devPrev.citations.length ? devPrev.citations : citations),
+                  };
+                  updated[i] = { ...(updated[i] as any), citations: cit, dev: devNext } as any;
+                  break;
                 }
               }
-              // Write to cache
-              groups.forEach((arr, ck) => {
-                try { sectionCacheRef.current.set(ck, arr as any); } catch {}
-              });
-            }
+              return updated;
+            });
           } catch {}
         } else if (parsed.type === "error") {
           try { eventRef.current && (eventRef.current as any).close?.(); } catch {}
@@ -1014,6 +1220,8 @@ export default function HomePage() {
   const forcedOnceRef = useRef<boolean>(false);
   const postLog = (line: string) => {
     try {
+      const allow = (typeof window !== 'undefined') && (isLocalhost() || localStorage.getItem('boardrag_debug_log') === '1');
+      if (!allow) return;
       fetch(`${API_BASE}/admin/log`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1039,15 +1247,18 @@ export default function HomePage() {
   const [sectionLoading, setSectionLoading] = useState<boolean>(false);
   const [sectionError, setSectionError] = useState<string>("");
   const [sectionTitle, setSectionTitle] = useState<string>("");
-  const [sectionChunks, setSectionChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
+  const [sectionChunks, setSectionChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string; text_spans?: any; header_anchor_bbox_pct?: number[] }>>([]);
   const [pdfMeta, setPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
   // Desktop preview state
   const [previewOpen, setPreviewOpen] = useState<boolean>(false);
   const [previewTitle, setPreviewTitle] = useState<string>("");
-  const [previewChunks, setPreviewChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string }>>([]);
+  const [previewChunks, setPreviewChunks] = useState<Array<{ uid?: string; text: string; source: string; page?: number; section?: string; section_number?: string; text_spans?: any; header_anchor_bbox_pct?: number[] }>>([]);
   const [previewPdfMeta, setPreviewPdfMeta] = useState<{ filename?: string; pages?: number } | null>(null);
   const [previewTargetPage, setPreviewTargetPage] = useState<number | null>(null);
   const [anchorNonce, setAnchorNonce] = useState<number>(0);
+  const [previewAnchorRectPct, setPreviewAnchorRectPct] = useState<[number, number, number, number] | null>(null);
+  const [previewRectsNorm, setPreviewRectsNorm] = useState<number[][] | null>(null);
+  const [lastOpenedCitation, setLastOpenedCitation] = useState<string | null>(null);
   // Stable auth token to avoid rebuilding PDF URLs on every render
   const tokenRef = useRef<string | null>(null);
   // Portal root inside chat for mobile modal alignment
@@ -1076,6 +1287,15 @@ export default function HomePage() {
         if (meta && typeof meta === 'object') {
           const mfile = String((meta.file || meta.filename || '') as string);
           const mpage = Number(meta.page);
+          try { postLog(`[sectionModal] preselect sec=${sec} file=${mfile||'-'} page=${isFinite(mpage)?mpage:'-'} anchor=${JSON.stringify((meta as any)?.header_anchor_bbox_pct||null)}`); } catch {}
+          try {
+            const arr = (meta as any).header_anchor_bbox_pct;
+            if (Array.isArray(arr) && arr.length >= 4) {
+              setPreviewAnchorRectPct([Number(arr[0]) || 0, Number(arr[1]) || 0, Number(arr[2]) || 0, Number(arr[3]) || 0]);
+            } else {
+              setPreviewAnchorRectPct(null);
+            }
+          } catch { setPreviewAnchorRectPct(null); }
           if (mfile) {
             const norm = (s: string) => (s || '').trim();
             const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
@@ -1094,8 +1314,17 @@ export default function HomePage() {
       if (meta && (meta as any).file && preferredPage) {
         const mfile = String((meta as any).file || '');
         const headerText = String((meta as any).header || sec || '').trim();
+        const anchorsPct = (() => {
+          try {
+            const arr = (meta as any).header_anchor_bbox_pct;
+            if (Array.isArray(arr) && arr.length >= 4) {
+              return { [headerText || sec]: [Number(arr[0]) || 0, Number(arr[1]) || 0, Number(arr[2]) || 0, Number(arr[3]) || 0] } as any;
+            }
+          } catch {}
+          return undefined;
+        })();
         const syntheticChunks = [
-          { text: headerText, source: mfile, page: Number(preferredPage) - 1, section: sec, section_number: sec }
+          { text: headerText, source: mfile, page: Number(preferredPage) - 1, section: sec, section_number: sec, ...(anchorsPct ? { header_anchors_pct: anchorsPct } : {}) }
         ];
         // Cache under multiple keys
         try {
@@ -1112,6 +1341,7 @@ export default function HomePage() {
         } catch {}
         try { setSectionChunks(syntheticChunks as any); } catch {}
         try { setPreviewChunks(syntheticChunks as any); } catch {}
+        try { postLog(`[sectionModal] fast-path sec=${sec} file=${mfile} page=${preferredPage}`); console.log('[sectionModal] fast-path', { sec, file: mfile, page: preferredPage }); } catch {}
         // Update viewer metas
         const norm = (s: string) => (s || '').trim();
         const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
@@ -1119,6 +1349,11 @@ export default function HomePage() {
         if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
         if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
         try { setPreviewTargetPage(preferredPage as number); setAnchorNonce((n) => (n + 1) | 0); } catch {}
+        try {
+          const arr = (meta as any)?.header_anchor_bbox_pct;
+          if (Array.isArray(arr) && arr.length >= 4) setPreviewAnchorRectPct([Number(arr[0])||0, Number(arr[1])||0, Number(arr[2])||0, Number(arr[3])||0]);
+          else setPreviewAnchorRectPct(null);
+        } catch { setPreviewAnchorRectPct(null); }
         // PdfPreview now owns initial anchoring/scrolling
         setSectionLoading(false);
         return;
@@ -1140,6 +1375,7 @@ export default function HomePage() {
       if (cached && Array.isArray(cached) && cached.length > 0) {
         try { setSectionChunks(cached as any); } catch {}
         try { setPreviewChunks(cached as any); } catch {}
+        setPreviewAnchorRectPct(null);
         // PdfPreview now owns initial anchoring/scrolling
         const inferFromChunk = String(cached[0]?.source || '');
         const currentKnown = (isDesktop && canShowPreview) ? (previewPdfMeta?.filename || '') : (pdfMeta?.filename || '');
@@ -1150,24 +1386,19 @@ export default function HomePage() {
         if (!sameModal) setPdfMeta({ filename: fn, pages: undefined });
         if (!samePreview) setPreviewPdfMeta({ filename: fn, pages: undefined });
         // PdfPreview now owns initial anchoring/scrolling
+        try {
+          const pageSet = new Set<number>();
+          (cached as any).forEach((c: any) => { if (typeof c.page === 'number') pageSet.add(Number(c.page) + 1); });
+          const citedPages = Array.from(pageSet).sort((a,b) => a-b);
+          const targetPage = citedPages.length > 0 ? citedPages[0] : 1;
+          postLog(`[sectionModal] cache sec=${sec} file=${fn} targetPage=${targetPage} pages=${citedPages.join(',')}`);
+          console.log('[sectionModal] cache', { sec, file: fn, targetPage, pages: citedPages });
+        } catch {}
         setSectionLoading(false);
         return;
       }
-      // Ensure token
-      let t: string | null = null;
-      try { t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token"); } catch {}
-      const url = new URL(`${API_BASE}/section-chunks`);
-      url.searchParams.set("section", sec);
-      if (uid) url.searchParams.set("id", uid);
-      if (selectedGame) url.searchParams.set("game", selectedGame);
-      if (t) url.searchParams.set("token", t);
-      const resp = await fetch(url.toString(), { headers: t ? { Authorization: `Bearer ${t}` } as any : undefined });
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => "error");
-        throw new Error(`HTTP ${resp.status}: ${txt}`);
-      }
-      const data = await resp.json();
-      const chunks = Array.isArray(data?.chunks) ? data.chunks : [];
+      // No server fetch; if not in cache, we cannot resolve further under the no-backend rule
+      const chunks: any[] = [];
       // 2) Cache the result for this section under multiple keys (numeric and label)
       try {
         const keys: string[] = [sec];
@@ -1184,6 +1415,7 @@ export default function HomePage() {
       // Update modal and preview chunk lists so both viewers have content
       try { setSectionChunks(chunks as any); } catch {}
       try { setPreviewChunks(chunks as any); } catch {}
+      setPreviewAnchorRectPct(null);
       // Stash filename for viewer: prefer existing loaded filename, else infer from chunks
       const inferFromChunk = chunks && chunks.length > 0 ? String(chunks[0].source || '') : '';
       // Prefer the last known filename if it matches the inferred; otherwise use inferred
@@ -1209,9 +1441,11 @@ export default function HomePage() {
          const citedPages = Array.from(pageSet).sort((a,b) => a-b);
          const targetPage = (preferredPage && preferredPage > 0) ? preferredPage : (citedPages.length > 0 ? citedPages[0] : 1);
          try { setPreviewTargetPage(targetPage); setAnchorNonce((n) => (n + 1) | 0); } catch {}
+         try { postLog(`[sectionModal] fetched sec=${sec} file=${fn} targetPage=${targetPage} pages=${citedPages.join(',')}`); console.log('[sectionModal] fetched', { sec, file: fn, targetPage, pages: citedPages }); } catch {}
        } catch {}
     } catch (e: any) {
       setSectionError(String(e?.message || e || "Failed to load section"));
+      try { postLog(`[sectionModal] error sec=${sec} msg=${String(e?.message || e)}`); console.warn('[sectionModal] error', e); } catch {}
     } finally {
       setSectionLoading(false);
     }
@@ -1329,68 +1563,133 @@ export default function HomePage() {
 
 
 
-  const parseCitationMeta = (title?: string | null): any | undefined => {
-    if (!title) return undefined;
-    const decodeHtml = (s: string) => s
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
-      .replace(/&amp;/g, '&');
-    try {
-      // Prefer direct JSON (we now store literal JSON in the title)
-      return JSON.parse(decodeHtml(title));
-    } catch {}
-    try {
-      // Fallback: some older messages may still use base64
-      // Note: atob may throw on non-base64 strings
-      return JSON.parse(atob(title));
-    } catch {}
-    try {
-      return JSON.parse(decodeURIComponent(title));
-    } catch {}
-    return undefined;
-  };
+  // parseCitationMeta removed; we no longer parse inline JSON citation metadata
 
-  // Simplified citation opener: first click snaps to page; if already on that page, centers on the section name
-  const openCitation = (sec: string, meta: any | undefined) => {
+  // Open a citation by resolving exclusively from stored per-answer citations on the assistant message for the given user index
+  const openCitation = (sec: string, _meta: any | undefined, userIndexHint?: number | null) => {
     try {
+      try {
+        postLog(`[click] citation sec=${sec}${userIndexHint!=null?` userIdx=${userIndexHint}`:''}`);
+        console.log('[click] citation', { sec, userIndexHint });
+    } catch {}
+      // Resolve from stored citations on assistant message after this user index
+      const mapKey = (typeof userIndexHint === 'number' && userIndexHint >= 0) ? userIndexHint : lastSubmittedUserIndexRef.current;
+      let userSeen = -1;
+      let targetAssistant: any = null;
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        if (msg.role === 'user') { userSeen += 1; continue; }
+        if (msg.role === 'assistant' && userSeen === mapKey) { targetAssistant = msg; break; }
+      }
+      if (!targetAssistant || !targetAssistant.citations) {
+        try { postLog(`[openCitation] no stored citations userIdx=${String(mapKey)} sec=${sec}`); } catch {}
+        return;
+      }
+      const citeMap: Record<string, any> = targetAssistant.citations as any;
+      const codeMatch = sec.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\s*(?:\b.*)?$/);
+      const keys = [sec];
+      if (codeMatch && codeMatch[1]) keys.unshift(codeMatch[1]);
+      let hit: any = null;
+      for (const k of keys) { if (citeMap[k]) { hit = citeMap[k]; break; } }
+      if (!hit || !hit.file || !hit.page) {
+        try { postLog(`[openCitation] no match in stored citations userIdx=${String(mapKey)} sec=${sec}`); } catch {}
+        return;
+      }
+      console.log(`[openCitation] found citation data for ${sec}:`, {
+        hasTextSpans: !!hit.text_spans,
+        textSpansType: typeof hit.text_spans,
+        textSpansValue: hit.text_spans,
+        hasAnchors: !!hit.header_anchor_bbox_pct,
+        anchorsValue: hit.header_anchor_bbox_pct,
+        hasText: !!hit.text,
+        textLength: hit.text?.length || 0,
+        textSpansDetailed: hit.text_spans
+      });
+      
+      // Check if we can get full page text from dev chunks
+      const devChunks = (targetAssistant?.dev as any)?.chunks || [];
+      console.log(`[openCitation] available dev chunks:`, devChunks.length, devChunks.map((c: any) => ({
+        page: c.page,
+        textLength: c.text?.length || 0,
+        hasLabels: !!c.labels,
+        labels: c.labels
+      })));
+      const resolved = { ...hit, header: sec };
+      const mfile = String(resolved.file || resolved.filename || '');
+      const mpage = Number(resolved.page);
+      const sectionText = String(resolved.header || sec || '');
+      
+      // Check if this is the same citation as the last one opened
+      const citationKey = `${sec}:${mfile}:${mpage}`;
+      const isSameCitation = lastOpenedCitation === citationKey;
+      
+      if (isSameCitation) {
+        // Same citation clicked again - just increment anchor nonce to trigger phase progression
+        console.log(`[openCitation] repeated click on same citation ${sec}, triggering phase progression`);
+        setAnchorNonce((n) => (n + 1) | 0);
+        return;
+      }
+      
+      // New citation - do full setup
+      console.log(`[openCitation] new citation ${sec}, setting up chunks and state`);
+      setLastOpenedCitation(citationKey);
+      
+      // Try to find full page text from dev chunks that match this page
+      let fullPageText = resolved.text || '';
+      const matchingChunk = devChunks.find((c: any) => 
+        Number(c.page) === (mpage - 1) && // chunks use 0-based page numbers
+        String(c.source || '').includes(mfile.replace('.pdf', ''))
+      );
+      if (matchingChunk && matchingChunk.text && matchingChunk.text.length > fullPageText.length) {
+        fullPageText = matchingChunk.text;
+        console.log(`[openCitation] found matching chunk with text length:`, fullPageText.length);
+      }
       setPreviewOpen(true);
-      const mfile = (() => { try { return String(meta?.file || meta?.filename || '').toLowerCase(); } catch { return ''; } })();
-      const mpage = (() => { try { const n = Number(meta?.page); return isFinite(n) && n > 0 ? n : 1; } catch { return 1; } })();
-      const sectionText = (() => { try { return String(meta?.snippet || meta?.header || sec || '').trim(); } catch { return String(sec || ''); } })();
-      // Set target PDF and page
-      if (mfile) {
-        const norm = (s: string) => (s || '').trim().toLowerCase();
+      try {
+        const arr: any = (resolved as any)?.header_anchor_bbox_pct;
+        if (Array.isArray(arr) && arr.length >= 4) setPreviewAnchorRectPct([Number(arr[0])||0, Number(arr[1])||0, Number(arr[2])||0, Number(arr[3])||0]);
+        else setPreviewAnchorRectPct(null);
+      } catch { setPreviewAnchorRectPct(null); }
+      try {
+        const norm = (s: string) => (s || '').trim();
         const samePreview = !!(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
         const sameModal = !!(pdfMeta && norm(pdfMeta.filename || '') === norm(mfile));
         if (!sameModal) setPdfMeta({ filename: mfile, pages: undefined });
         if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
         try { if (selectedGame) localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, mfile); } catch {}
-      }
+      } catch {}
       try { 
+        console.log(`[openCitation] setting target page ${mpage} and incrementing anchor nonce`);
         setPreviewTargetPage(mpage); 
-        setAnchorNonce((n) => (n + 1) | 0);
+        setAnchorNonce((n) => (n + 1) | 0); 
       } catch {}
-
-      // Synthesize minimal chunks so the unified preview panel can render/highlight the target
       try {
-        const syntheticChunks = [
-          { text: sectionText || sec, source: mfile, page: Number(mpage) - 1, section: sec, section_number: sec } as any,
-        ];
+        const arr: any = (resolved as any)?.header_anchor_bbox_pct;
+        const anchorsPct = (Array.isArray(arr) && arr.length >= 4) ? { [sectionText]: [Number(arr[0])||0, Number(arr[1])||0, Number(arr[2])||0, Number(arr[3])||0] } : undefined;
+        const textSpans: any = (resolved as any)?.text_spans;
+        const syntheticChunks = [ {
+          text: fullPageText || sectionText,
+          source: mfile,
+          page: Number(mpage) - 1,
+          section: sec,
+          section_number: sec,
+          ...(anchorsPct ? { header_anchors_pct: anchorsPct } : {}),
+          ...(textSpans ? { text_spans: textSpans } : {})
+        } as any ];
+        console.log(`[openCitation] synthetic chunk created for ${sec}:`, {
+          hasTextSpans: !!textSpans,
+          textSpansType: typeof textSpans,
+          textSpansValue: textSpans,
+          hasAnchors: !!anchorsPct,
+          anchorsValue: anchorsPct,
+          finalTextLength: (fullPageText || sectionText).length,
+          usedFullPageText: !!fullPageText,
+          usedResolvedText: !!resolved.text
+        });
         setPreviewChunks(syntheticChunks as any);
-        // Also seed cache under common keys to enable quick reopening
-        const keys: string[] = [sec];
-        try {
-          const m = sec.match(/^[A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*/);
-          if (m && m[0] && m[0] !== sec) keys.push(m[0]);
-          const up = sec.toUpperCase(); if (up !== sec) keys.push(up);
         } catch {}
-        const gameKey = String(selectedGame || '');
-        for (const k of keys) {
-          const ck = `${gameKey}::${k}`;
-          try { sectionCacheRef.current.set(ck, syntheticChunks as any); } catch {}
-        }
-      } catch {}
-      
+      try { postLog(`[openCitation] target-from-stored userIdx=${String(mapKey)} sec=${sec} file=${mfile} page=${mpage}`); } catch {}
+      return;
     } catch {}
   };
 
@@ -1460,6 +1759,7 @@ export default function HomePage() {
                         targetPage={previewTargetPage || undefined}
                         adjacentPageWindow={1}
                         anchorNonce={anchorNonce}
+                        anchorRectPct={previewAnchorRectPct}
                       />
                     );
                   })()}
@@ -1532,6 +1832,8 @@ export default function HomePage() {
                             setPdfMeta={(m) => setPreviewPdfMeta(m as any)}
                             targetPage={previewTargetPage || undefined}
                             adjacentPageWindow={1}
+                            anchorNonce={anchorNonce}
+                            anchorRectPct={previewAnchorRectPct}
                           />
                         );
                       })()}
@@ -1561,9 +1863,17 @@ export default function HomePage() {
                 aria-label="Game"
               >
                 <option value="">Select game…</option>
-                {games.map((g) => (
-                  <option key={g} value={g}>{g}</option>
-                ))}
+                {games.map((g) => {
+                  const info = (progress as any)?.[g] || {} as any;
+                  const ratio = Math.max(0, Math.min(1, Number(info?.ratio || 0)));
+                  const pct = Math.round(ratio * 100);
+                  const complete = !!info?.complete || ratio >= 1;
+                  const disabled = !complete && !isAdmin;
+                  const label = complete ? g : `${g} (${pct}%)`;
+                  return (
+                    <option key={g} value={g} disabled={disabled}>{label}</option>
+                  );
+                })}
               </select>
             </div>
           </div>
@@ -1622,11 +1932,11 @@ export default function HomePage() {
                                       className="btn link"
                                       onClick={(e) => {
                                         e.preventDefault();
-                                        const meta = parseCitationMeta(title);
-                                        // Always handle citations client-side (no server calls)
-                                        openCitation(sec, meta);
+                                        // Always handle citations client-side (no server calls).
+                                        // Provide the preceding user index so we resolve against the correct assistant reply.
+                                        openCitation(sec, undefined, userCounter as any);
                                       }}
-                                      title={title}
+                                      title={undefined}
                                       style={{
                                         padding: 0,
                                         background: 'none',
@@ -1646,8 +1956,78 @@ export default function HomePage() {
                           >
                             {decorateCitations(m.content)}
                           </ReactMarkdown>
+                          {(() => {
+                            // Render developer panel mapping citations -> destinations for this assistant (toggle by button)
+                            if (!isAdmin) return null;
+                            if (!showCitePanelFor.has(acForHandlers as number)) return null;
+                            try {
+                              // Use preceding user index for mapping
+                              const precedingUserIdx = userCounter as number;
+                              const chunksMapReg = (window as any).__boardrag_cite_from_chunks_by_user__ || {};
+                              const allowedMapReg = (window as any).__boardrag_allowed_answers_by_user__ || {};
+                              const cm: Map<string, any> | undefined = chunksMapReg[precedingUserIdx];
+                              const am: Map<string, any> | undefined = allowedMapReg[precedingUserIdx];
+                              const rows: Array<{ key: string; file?: string; page?: number }> = [];
+                              if (cm && cm.size > 0) {
+                                for (const [k, v] of cm.entries()) rows.push({ key: k, file: v?.file, page: v?.page });
+                              }
+                              if (am && am.size > 0) {
+                                for (const [k, v] of am.entries()) rows.push({ key: k, file: v?.file, page: v?.page });
+                              }
+                              if (rows.length === 0) return null;
+                              rows.sort((a, b) => a.key.localeCompare(b.key));
+                              return (
+                                <div className="surface" style={{ marginTop: 8, padding: 8, border: '1px dashed var(--control-border)', fontSize: 12 }}>
+                                  <div style={{ fontWeight: 600, marginBottom: 4 }}>Citations (dev)</div>
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'minmax(160px,1fr) minmax(160px,1fr) 60px', gap: 6, alignItems: 'center' }}>
+                                    <div style={{ fontWeight: 600 }}>Key</div>
+                                    <div style={{ fontWeight: 600 }}>File</div>
+                                    <div style={{ fontWeight: 600 }}>Page</div>
+                                    {rows.map((r, i) => (
+                                      <React.Fragment key={i}>
+                                        <div>{r.key}</div>
+                                        <div>{r.file || '-'}</div>
+                                        <div>{(typeof r.page === 'number') ? r.page : '-'}</div>
+                                      </React.Fragment>
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            } catch { return null; }
+                          })()}
                         </div>
                         <div className="assistant-actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignSelf: 'end' }}>
+                          {isAdmin && (
+                            <button
+                              className="btn"
+                              title="Save debug bundle"
+                              aria-label="Save debug bundle"
+                              onClick={() => {
+                                const aIdx = acForHandlers as number;
+                                const precedingUserIdx = userCounter as number;
+                                saveDebugBundle(aIdx, precedingUserIdx);
+                              }}
+                              style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center', background: 'var(--control-bg)', borderColor: 'var(--control-border)' }}
+                            >🔗</button>
+                          )}
+                          {isAdmin && (
+                            <button
+                              className="btn"
+                              title="Inspect model response"
+                              aria-label="Inspect model response"
+                              onClick={() => {
+                                try {
+                                  const idx = acForHandlers as number;
+                                  const reg = (window as any).__boardrag_dev__ || {};
+                                  const raw = reg.assistantRaw ? reg.assistantRaw[idx] : null;
+                                  setInspectTitle('Developer: Model Response');
+                                  setInspectBody(<pre style={{ whiteSpace: 'pre-wrap' }}>{String(raw || m.content || '')}</pre>);
+                                  setInspectOpen(true);
+                                } catch {}
+                              }}
+                              style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center', background: 'var(--control-bg)', borderColor: 'var(--control-border)' }}
+                            >🧪</button>
+                          )}
                           <button
                             className="btn"
                             title={m.pinned ? "Remove bookmark" : "Add bookmark"}
@@ -1694,14 +2074,8 @@ export default function HomePage() {
                                       try {
                                         if (selectedGame) localStorage.setItem(`boardrag_last_section:${selectedGame}`, sec);
                                       } catch {}
-                                      const meta = parseCitationMeta(title);
-                                      try {
-                                        const mfile = String(meta?.file || '').toLowerCase();
-                                        if (mfile && !mfile.endsWith('.pdf')) { meta.file = undefined; }
-                                        if (mfile === '1.pdf' || mfile === '0.pdf') { meta.file = undefined; }
-                                      } catch {}
-                                      // Always handle citations client-side
-                                      openCitation(sec, meta);
+                                      // Always handle citations client-side; use preceding user index for mapping
+                                      openCitation(sec, undefined, ucForHandlers as any);
                                     }}
                                     style={{
                                       padding: 0,
@@ -1722,6 +2096,34 @@ export default function HomePage() {
                         >
                           {decorateCitations(m.content)}
                         </ReactMarkdown>
+                        {isAdmin && (
+                          <div style={{ display: 'flex', gap: 6, marginTop: 6, justifyContent: 'flex-end' }}>
+                            <button
+                              className="btn"
+                              title="View retrieval & prompt"
+                              aria-label="View retrieval & prompt"
+                              onClick={() => {
+                                try {
+                                  const idx = ucForHandlers as number;
+                                  const reg = (window as any).__boardrag_dev__ || {};
+                                  const meta: any = reg.userMeta ? reg.userMeta[idx] : null;
+                                  setInspectTitle('Developer: Retrieval & Prompt');
+                                  const promptBlock = (
+                                    <div>
+                                      <div style={{ fontWeight: 600, marginBottom: 4 }}>Prompt</div>
+                                      <pre style={{ whiteSpace: 'pre-wrap' }}>{String(meta?.prompt || '')}</pre>
+                                      <div style={{ fontWeight: 600, margin: '8px 0 4px' }}>Retrieved Chunks ({Array.isArray(meta?.chunks) ? meta.chunks.length : 0})</div>
+                                      <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto' }}>{(() => { try { return JSON.stringify(meta?.chunks || [], null, 2); } catch { return '[]'; } })()}</pre>
+                                    </div>
+                                  );
+                                  setInspectBody(promptBlock);
+                                  setInspectOpen(true);
+                                } catch {}
+                              }}
+                              style={{ width: 36, height: 36, minHeight: 36, padding: 0, display: 'inline-grid', placeItems: 'center', background: 'var(--control-bg)', borderColor: 'var(--control-border)' }}
+                            >🔍</button>
+                          </div>
+                        )}
                       </div>
                     )}
                     {showActions && (
@@ -1803,12 +2205,35 @@ export default function HomePage() {
             uploadInputRef={uploadInputRef}
             uploading={uploading}
             uploadMsg={uploadMsg}
+            isAdmin={isAdmin}
+            onSignOut={() => {
+              try {
+                sessionStorage.removeItem('boardrag_role');
+                sessionStorage.removeItem('boardrag_token');
+                sessionStorage.removeItem('boardrag_blocked');
+                localStorage.removeItem('boardrag_role');
+                localStorage.removeItem('boardrag_token');
+                localStorage.removeItem('boardrag_saved_pw');
+              } catch {}
+              try { window.location.reload(); } catch {}
+            }}
           />
         </div>
 
 
       </div>
-      {/* Modal removed; preview panel reused for all screens */}
+      {/* Developer inspection modal */}
+      {isAdmin && inspectOpen && (
+        <div className="modal" role="dialog" aria-modal="true" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'grid', placeItems: 'center', zIndex: 1000 }} onClick={() => setInspectOpen(false)}>
+          <div className="surface" style={{ width: 'min(900px, 92vw)', maxHeight: '80vh', overflow: 'auto', padding: 12 }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontWeight: 700 }}>{inspectTitle || 'Developer Inspection'}</div>
+              <button className="btn" onClick={() => setInspectOpen(false)} aria-label="Close">✕</button>
+            </div>
+            <div>{inspectBody}</div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

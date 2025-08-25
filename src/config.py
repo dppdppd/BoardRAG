@@ -102,19 +102,10 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 # ---------------------------------------------------------------------------
 CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma")
 
-# Primary switch: RAG_MODE = "vector" or "db-less"
-_env_mode = (os.getenv("RAG_MODE") or "").strip().lower()
-if _env_mode not in {"vector", "db-less", ""}:
-    _env_mode = ""
-
-# Back-compat: if RAG_MODE not set, infer from legacy envs
-if not _env_mode:
-    _use_vec = os.getenv("USE_VECTOR_DB", "0").lower() in {"1", "true", "yes"}
-    _env_mode = "vector" if _use_vec else "db-less"
-
-RAG_MODE = _env_mode
-IS_VECTOR_MODE = RAG_MODE == "vector"
-IS_DB_LESS_MODE = RAG_MODE == "db-less"
+# Retrieval mode (db-less removed) – force vector mode
+RAG_MODE = "vector"
+IS_VECTOR_MODE = True
+IS_DB_LESS_MODE = False
 
 # Chunking parameters optimized by model context window
 CHUNKING_CONFIGS = {
@@ -142,6 +133,20 @@ _chunking = CHUNKING_CONFIGS.get(
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", _chunking["chunk_size"]))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", _chunking["chunk_overlap"]))
+
+# ---------------------------------------------------------------------------
+# Context Filtering Configuration
+# ---------------------------------------------------------------------------
+# Whether to filter chunks by visual importance when building context blocks
+# Set to False to include all retrieved chunks regardless of visual importance
+IGNORE_VISUAL_IMPORTANCE = os.getenv("IGNORE_VISUAL_IMPORTANCE", "True").lower() in {
+    "1",
+    "true", 
+    "yes",
+}
+
+# Debug print so users can see what the setting resolved to at import time
+print(f"[config] IGNORE_VISUAL_IMPORTANCE = {IGNORE_VISUAL_IMPORTANCE}")
 
 # ---------------------------------------------------------------------------
 # Data and Template Paths
@@ -228,8 +233,8 @@ if not AUTH_SECRET:
 # Token time-to-live in seconds
 AUTH_TOKEN_TTL_SECS = int(os.getenv("AUTH_TOKEN_TTL_SECS", "43200"))  # 12 hours
 
-# Back-compat shim: expose DB_LESS for older code paths (do not print separate flags)
-DB_LESS = IS_DB_LESS_MODE
+# Back-compat shim: expose DB_LESS (always False; db-less removed)
+DB_LESS = False
 
 print(f"[config] RAG_MODE = {RAG_MODE}")
 

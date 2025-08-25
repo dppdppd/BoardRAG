@@ -149,6 +149,7 @@ def anthropic_pdf_messages(api_key: str, model: str, system_prompt: str, user_pr
     body = {
         "model": model,
         "max_tokens": 8192,
+        "temperature": 0,
         "system": system_prompt,
         "messages": [
             {
@@ -173,7 +174,7 @@ def anthropic_pdf_messages(api_key: str, model: str, system_prompt: str, user_pr
     last_err: Exception | None = None
     for attempt in range(3):
         try:
-            resp = requests.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=120)
+            resp = requests.post(url, headers=headers, json=body, timeout=120)
             if resp.status_code in (429,) or resp.status_code >= 500:
                 # Overloaded/Rate limited/Server errors → retry
                 last_err = RuntimeError(f"messages (base64) {resp.status_code}: {resp.text[:1000]}")
@@ -254,6 +255,7 @@ def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: st
     body = {
         "model": model,
         "max_tokens": 8192,
+        "temperature": 0,
         "system": system_prompt,
         "messages": [
             {
@@ -277,7 +279,7 @@ def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: st
     last_err: Exception | None = None
     for attempt in range(3):
         try:
-            resp = requests.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
+            resp = requests.post(url, headers=headers, json=body, timeout=180)
             if resp.status_code in (429,) or resp.status_code >= 500:
                 last_err = RuntimeError(f"messages (file_id) {resp.status_code}: {resp.text[:1000]}")
                 if attempt < 2:
@@ -321,6 +323,7 @@ def anthropic_pdf_messages_with_files(api_key: str, model: str, system_prompt: s
     body = {
         "model": model,
         "max_tokens": 4096,
+        "temperature": 0,
         "system": system_prompt,
         "messages": [{"role": "user", "content": content}],
     }
@@ -328,7 +331,7 @@ def anthropic_pdf_messages_with_files(api_key: str, model: str, system_prompt: s
     last_err: Exception | None = None
     for attempt in range(3):
         try:
-            resp = requests.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
+            resp = requests.post(url, headers=headers, json=body, timeout=180)
             if resp.status_code in (429,) or resp.status_code >= 500:
                 last_err = RuntimeError(f"messages (files) {resp.status_code}: {resp.text[:1000]}")
                 if attempt < 2:
@@ -371,6 +374,7 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
     body = {
         "model": model,
         "max_tokens": 8192,
+        "temperature": 0,
         "system": system_prompt,
         "stream": True,
         "messages": [
@@ -387,77 +391,16 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
             }
         ],
     }
-    # Debug: show request summary (without secrets)
-    try:
-        print("\n=== ANTHROPIC STREAM DEBUG (REQUEST) ===")
-        print(f"model={model}")
-        print(f"system_len={len(system_prompt or '')} user_len={len(user_prompt or '')}")
-        print(f"file_id={file_id}")
-    except Exception:
-        pass
+    # Debug logging removed; function now only yields raw text chunks
 
     max_attempts = 3
     for attempt in range(max_attempts):
         should_retry = False
-        with requests.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), stream=True, timeout=300) as resp:
-            try:
-                print("=== ANTHROPIC STREAM DEBUG (RESPONSE) ===")
-                print(f"status={resp.status_code}")
-                try:
-                    # Print a few important headers
-                    hdrs = {k.lower(): v for k, v in resp.headers.items()}
-                    keys = [
-                        "content-type",
-                        "transfer-encoding",
-                        "cache-control",
-                        "anthropic-request-id",
-                        "request-id",
-                        "x-request-id",
-                        "retry-after",
-                        "x-ratelimit-remaining-requests",
-                        "x-ratelimit-remaining-tokens",
-                        "x-ratelimit-reset-requests",
-                        "x-ratelimit-reset-tokens",
-                    ]
-                    print("headers:", {k: hdrs.get(k) for k in keys})
-                except Exception:
-                    pass
-                if resp.status_code >= 400:
-                    try:
-                        body_text = resp.text
-                        print("=== ANTHROPIC STREAM DEBUG (ERROR BODY) ===")
-                        # Log up to 4000 chars to avoid flooding
-                        print(body_text[:4000])
-                        # Attempt to parse and show structured fields
-                        try:
-                            js_err = resp.json()
-                            err = (js_err.get("error") if isinstance(js_err, dict) else None) or js_err
-                            if isinstance(err, dict):
-                                etype = str(err.get("type") or err.get("code") or "")
-                                emsg = str(err.get("message") or err.get("detail") or "")
-                                edet = err.get("details")
-                                if etype:
-                                    print("error.type:", etype)
-                                if emsg:
-                                    print("error.message:", emsg)
-                                if edet is not None:
-                                    try:
-                                        print("error.details:", str(edet)[:1000])
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-                    # Transient HTTP errors: retry without raising
-                    if resp.status_code in (429,) or resp.status_code >= 500:
-                        should_retry = True
-                        # Skip processing this response body
-                        # Exit the 'with' block and perform backoff below
-                        # Use a labeled break via a flag
-                        pass
-            except Exception:
-                pass
+        with requests.post(url, headers=headers, json=body, stream=True, timeout=300) as resp:
+            if resp.status_code >= 400:
+                # Transient HTTP errors: retry without raising on 429/5xx
+                if resp.status_code in (429,) or resp.status_code >= 500:
+                    should_retry = True
             if not should_retry:
                 resp.raise_for_status()
             event_data_lines: list[str] = []
@@ -468,10 +411,6 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                         return "__DONE__"
                     js = _json.loads(payload)
                 except Exception:
-                    try:
-                        print("[stream] Non-JSON payload:", payload[:500])
-                    except Exception:
-                        pass
                     return None
                 delta_text = None
                 if isinstance(js, dict):
@@ -490,17 +429,12 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                     if event_data_lines:
                         payload = "\n".join(event_data_lines)
                         event_data_lines = []
-                        try:
-                            print("[stream] data payload:", payload[:500])
-                        except Exception:
-                            pass
                         # Handle explicit error events from Anthropic SSE
                         if (current_event or "").lower() == "error":
                             try:
                                 js = _json.loads(payload)
                                 etype = str(((js or {}).get("error") or {}).get("type") or js.get("type") or "").lower()
                                 emsg = str(((js or {}).get("error") or {}).get("message") or js.get("message") or "")
-                                print(f"[stream] error event: type={etype} message={emsg}")
                                 if etype in {"overloaded_error", "rate_limit_error", "request_timeout_error"}:
                                     should_retry = True
                                     # break out to retry loop
@@ -514,17 +448,9 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                         # Normal delta handling
                         out = _process_event(payload)
                         if out == "__DONE__":
-                            try:
-                                print("[stream] DONE event received")
-                            except Exception:
-                                pass
                             # Finished successfully
                             return
                         if out:
-                            try:
-                                print("[stream] delta:", out[:200])
-                            except Exception:
-                                pass
                             yield out
                     # reset event type at end of event
                     current_event = None
@@ -534,11 +460,6 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                         line = line.decode("utf-8", errors="ignore")
                     except Exception:
                         continue
-                try:
-                    # Log raw SSE line for diagnosis
-                    print("[stream] line:", (line if isinstance(line, str) else str(line))[:200])
-                except Exception:
-                    pass
                 if line.startswith(":"):
                     continue
                 if line.startswith("event:"):
@@ -552,15 +473,136 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
         if should_retry:
             if attempt < max_attempts - 1:
                 backoff = float(attempt + 1)
-                try:
-                    print(f"[stream] transient error; retrying in {backoff:.1f}s (attempt {attempt+2}/{max_attempts})")
-                except Exception:
-                    pass
                 _time.sleep(backoff)
                 continue
             raise RuntimeError("Anthropic overloaded or rate-limited; please retry later")
         # Normal completion (no retry requested)
         return
+
+def anthropic_pdf_messages_with_pages_stream(api_key: str, model: str, system_prompt: str, user_prompt: str, attach_paths: List[str]):
+    """Yield text chunks by streaming Messages API with inline base64 PDF page attachments.
+
+    Sends small page-PDFs as base64 document blocks instead of referencing Files API ids.
+    """
+    import json as _json
+    import time as _time
+    import base64 as _b64
+    url = f"{_get_anthropic_base_url().rstrip('/')}/v1/messages"
+    headers = {
+        "content-type": "application/json",
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "accept": "text/event-stream",
+    }
+
+    # Build content with a small number of base64 page attachments, then the text prompt
+    content_blocks: List[Dict[str, Any]] = []
+    for p in attach_paths or []:
+        try:
+            with open(p, "rb") as f:
+                data_b64 = _b64.b64encode(f.read()).decode("ascii")
+            content_blocks.append({
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": data_b64},
+                "citations": {"enabled": True},
+            })
+        except Exception:
+            continue
+    content_blocks.append({"type": "text", "text": user_prompt})
+
+    body = {
+        "model": model,
+        "max_tokens": 8192,
+        "temperature": 0,
+        "system": system_prompt,
+        "stream": True,
+        "messages": [
+            {
+                "role": "user",
+                "content": content_blocks,
+            }
+        ],
+    }
+
+    # Debug logging removed; function now only yields raw text chunks
+
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        should_retry = False
+        with requests.post(url, headers=headers, json=body, stream=True, timeout=300) as resp:
+            if resp.status_code >= 400:
+                if resp.status_code in (429,) or resp.status_code >= 500:
+                    should_retry = True
+            if not should_retry:
+                resp.raise_for_status()
+
+            event_data_lines: list[str] = []
+            current_event: str | None = None
+
+            def _process_event(payload: str):
+                try:
+                    if payload.strip() == "[DONE]":
+                        return "__DONE__"
+                    js = _json.loads(payload)
+                except Exception:
+                    return None
+                delta_text = None
+                if isinstance(js, dict):
+                    d = js.get("delta") or js.get("content_block_delta") or js
+                    if isinstance(d, dict):
+                        delta_text = d.get("text") or (d.get("delta") or {}).get("text")
+                    if not delta_text and isinstance(js.get("text"), str):
+                        delta_text = js.get("text")
+                return str(delta_text) if delta_text else None
+
+            for raw in resp.iter_lines(decode_unicode=True):
+                line = raw
+                if not line:
+                    if event_data_lines:
+                        payload = "\n".join(event_data_lines)
+                        event_data_lines = []
+                        # Handle explicit error events
+                        if (current_event or "").lower() == "error":
+                            try:
+                                js = _json.loads(payload)
+                                etype = str(((js or {}).get("error") or {}).get("type") or js.get("type") or "").lower()
+                                emsg = str(((js or {}).get("error") or {}).get("message") or js.get("message") or "")
+                                if etype in {"overloaded_error", "rate_limit_error", "request_timeout_error"}:
+                                    should_retry = True
+                                    break
+                                raise RuntimeError(f"Anthropic stream error: {etype}: {emsg}")
+                            except RuntimeError:
+                                raise
+                            except Exception as _e:
+                                raise RuntimeError(f"Anthropic stream error (invalid payload): {str(_e)}")
+                        out = _process_event(payload)
+                        if out == "__DONE__":
+                            return
+                        if out:
+                            yield out
+                    current_event = None
+                    continue
+                if isinstance(line, bytes):
+                    try:
+                        line = line.decode("utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                if str(line).startswith(":"):
+                    continue
+                if str(line).startswith("event:"):
+                    current_event = str(line)[len("event:"):].strip()
+                    continue
+                if str(line).startswith("data:"):
+                    event_data_lines.append(str(line)[5:].lstrip())
+                    continue
+        if should_retry:
+            if attempt < max_attempts - 1:
+                backoff = float(attempt + 1)
+                _time.sleep(backoff)
+                continue
+            raise RuntimeError("Anthropic overloaded or rate-limited; please retry later")
+        return
+
 
 def validate_anthropic_file(api_key: str, file_id: str) -> bool:
     """Return True if the file_id exists in Anthropic Files API, else False.

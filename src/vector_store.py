@@ -68,6 +68,21 @@ def _get_chroma(path: Optional[str] = None):
     except Exception:
         client = chromadb.PersistentClient(path=chroma_path)
 
+    # Ensure HNSW search_ef is high enough to support larger k queries
+    try:
+        coll = client.get_or_create_collection(name="boardrag_pages")
+        try:
+            _ef = int(os.getenv("CHROMA_SEARCH_EF", "64"))
+        except Exception:
+            _ef = 64
+        try:
+            coll.modify(metadata={"hnsw:search_ef": _ef})
+        except Exception:
+            # Some versions may not allow modifying ef at runtime; ignore
+            pass
+    except Exception:
+        pass
+
     # Minimal adapter to LangChain Chroma: provide embedding_function with proper interface
     class _EmbeddingFn:
         def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -122,10 +137,105 @@ def get_chunk_by_page(pdf_basename: str, page_1based: int) -> Optional[Tuple[Any
 
 def search_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[Tuple[Any, float]]:
     db = _get_chroma()
-    if pdf:
-        results = db.similarity_search_with_score(query, k=k, filter={"source": pdf})
-    else:
+    # Try to bias server-side by filtering on search hints if possible; fall back to plain search
+    filt = {"source": pdf} if pdf else None
+    try:
+        # Lightweight keyword OR over search hint fields by duplicating the query as filter-ready tokens
+        # Note: Chroma's filter supports exact matches on scalar fields; our fields are JSON strings, so
+        # server-side filtering is limited. We rely on client-side rerank below regardless.
+        results = db.similarity_search_with_score(query, k=k, filter=filt) if filt else db.similarity_search_with_score(query, k=k)
+    except Exception:
         results = db.similarity_search_with_score(query, k=k)
+    # Client-side re-rank: boost chunks whose metadata search hints contain query terms
+    try:
+        import re as _re
+        q = (query or "").lower()
+        tokens = [t for t in _re.split(r"[^a-z0-9]+", q) if t]
+        def _boost(doc, score):
+            meta = getattr(doc, 'metadata', {}) or {}
+            # Field-specific weights (summary and headers strongest)
+            field_weights = {
+                # Strongly prioritize dense summary and curated vocab
+                "embedding_prefix_summary": 8.0,
+                "search_keywords": 7.0,
+                "search_synonyms": 5.0,
+                # Keep headers meaningful but secondary
+                "embedding_prefix_headers": 2.0,
+                # Helpful, but lighter influence
+                "embedding_prefix_search_hints": 2.0,
+                "search_rules": 1.5,
+                "search_questions": 0.5,
+            }
+            # Build lowercase blobs per field
+            blobs: dict[str, str] = {}
+            for key in field_weights.keys():
+                v = meta.get(key)
+                if isinstance(v, str) and v:
+                    blobs[key] = v.lower()
+            # Stopwords to ignore in token matches
+            stop = {
+                "the","a","an","and","or","of","to","in","on","for","with",
+                "what","how","when","where","why","who","explain","tell","me","about","please",
+                # Additional function words and auxiliaries to reduce noise
+                "is","are","was","were","be","been","being","do","does","did",
+                "can","could","should","would","may","might","must","will","shall",
+                # Frequently unhelpful in intent questions
+                "use","uses","using"
+            }
+            toks = [t for t in tokens if t and (t not in stop)]
+            # Build simple bigram/trigram phrases from filtered tokens for phrase-level boosting
+            phrases: set[str] = set()
+            for i in range(len(toks) - 1):
+                p = f"{toks[i]} {toks[i+1]}".strip()
+                if len(p) >= 5:
+                    phrases.add(p)
+            for i in range(len(toks) - 2):
+                p = f"{toks[i]} {toks[i+1]} {toks[i+2]}".strip()
+                if len(p) >= 7:
+                    phrases.add(p)
+            # Basic plural/singular normalization: test token as-is and common variants
+            def _variants(tok: str):
+                t = tok
+                out = {t}
+                # plural → singular
+                if t.endswith("ies") and len(t) > 3:
+                    out.add(t[:-3] + "y")
+                if t.endswith("es") and len(t) > 2:
+                    out.add(t[:-2])
+                if t.endswith("s") and len(t) > 1:
+                    out.add(t[:-1])
+                # singular → plural
+                if t.endswith("y") and len(t) > 1 and t[-2] not in "aeiou":
+                    out.add(t[:-1] + "ies")
+                elif t.endswith(("s","x","z","ch","sh")):
+                    out.add(t + "es")
+                else:
+                    out.add(t + "s")
+                return out
+            weighted_hits = 0.0
+            for key, blob in blobs.items():
+                w = field_weights.get(key, 1.0)
+                matched_any = False
+                for t in toks:
+                    vars = _variants(t)
+                    if any(v in blob for v in vars):
+                        matched_any = True
+                phrase_hits = 0
+                if phrases:
+                    for ph in phrases:
+                        if ph in blob:
+                            phrase_hits += 1
+                if matched_any:
+                    weighted_hits += w
+                if phrase_hits:
+                    # Give additional credit for phrase matches in stronger fields
+                    weighted_hits += min(phrase_hits, 3) * (w * 0.6)
+            # Lower score is better in LC-Chroma; apply a stronger negative offset per field hit
+            return score - (0.20 * weighted_hits)
+        results = [(d, _boost(d, s)) for (d, s) in results]
+        results.sort(key=lambda pair: pair[1])
+    except Exception:
+        pass
     return results
 
 
@@ -177,7 +287,17 @@ def _get_native_collection(path: Optional[str] = None):
         chroma_path = path or getattr(cfg, "CHROMA_PATH", "chroma")
         client = chromadb.PersistentClient(path=chroma_path)
     # Use fixed collection name
-    return client.get_or_create_collection(name="boardrag_pages")
+    coll = client.get_or_create_collection(name="boardrag_pages")
+    # Attempt to raise search_ef for better recall and to support larger k
+    try:
+        try:
+            _ef = int(os.getenv("CHROMA_SEARCH_EF", "64"))
+        except Exception:
+            _ef = 64
+        coll.modify(metadata={"hnsw:search_ef": _ef})
+    except Exception:
+        pass
+    return coll
 
 
 def clear_pdf_chunks(pdf_filename: str) -> int:

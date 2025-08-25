@@ -23,7 +23,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional, Union, Tuple, Any
 
 import os
 from langchain_anthropic import ChatAnthropic
@@ -306,40 +306,12 @@ def improve_fallback_name(filename: str) -> str:
 
 
 def get_available_games() -> List[str]:
-    # Prefer catalog when DB-less
-    try:
-        from . import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            try:
-                from .catalog import list_games_from_catalog  # type: ignore
-                return list_games_from_catalog()
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # Vector-only mode: use stored game names
     from .retrieval.game_names import get_available_games as _impl
     return _impl()
 
 
 def store_game_name(filename: str, game_name: str):
-    # In DB-less mode, store in catalog; otherwise delegate to legacy DB
-    try:
-        from . import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            try:
-                from .catalog import load_catalog, save_catalog  # type: ignore
-                from pathlib import Path as _P
-                cat = load_catalog()
-                key = _P(filename).name
-                entry = cat.get(key) or {}
-                entry["game_name"] = game_name
-                cat[key] = entry
-                save_catalog(cat)
-                return None
-            except Exception:
-                pass
-    except Exception:
-        pass
     from .retrieval.game_names import store_game_name as _impl
     return _impl(filename, game_name)
 
@@ -350,26 +322,6 @@ def get_stored_game_names() -> Dict[str, str]:
 
 
 def extract_and_store_game_name(filename: str) -> str:
-    # When DB-less, try to update catalog directly for name extraction
-    try:
-        from . import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "DB_LESS", True)):
-            from .retrieval.game_names import extract_game_name_from_filename  # type: ignore
-            name = extract_game_name_from_filename(filename)
-            try:
-                from .catalog import load_catalog, save_catalog  # type: ignore
-                from pathlib import Path as _P
-                cat = load_catalog()
-                key = _P(filename).name
-                entry = cat.get(key) or {}
-                entry["game_name"] = name
-                cat[key] = entry
-                save_catalog(cat)
-            except Exception:
-                pass
-            return name
-    except Exception:
-        pass
     from .retrieval.game_names import extract_and_store_game_name as _impl
     return _impl(filename)
 
@@ -379,633 +331,7 @@ def rewrite_search_query(raw_query: str) -> str:
     return _impl(raw_query)
 
 
-def query_rag(
-    query_text: str,
-    selected_game: Optional[str] = None,
-    chat_history: Optional[str] = None,
-    game_names: Optional[List[str]] = None,
-    enable_web: Optional[bool] = None,
-) -> Dict[str, Union[str, Dict]]:
-    """
-    Queries the RAG model with the given query and returns the response.
-
-    Args:
-        query_text (str): The user's latest question.
-        selected_game (Optional[str]): Game to filter results by (e.g., 'monopoly', 'catan').
-        chat_history (Optional[str]): Conversation history formatted as a string, where each prior turn is included to provide conversational context. If None, the question is treated as standalone.
-
-    Returns:
-        Dict: The response from the RAG model.
-    """
-    # Deprecated: non-streaming path removed. Do not use.
-    raise NotImplementedError("query_rag (non-streaming) has been removed. Use stream_query_rag instead.")
-    
-    # DB-less mode: use Anthropic Sonnet 4 Files API with citations, no vector DB
-    # Prefer cfg.DB_LESS defaulting to True when env is absent
-    try:
-        from . import config as _cfg  # type: ignore
-        _db_less_enabled = bool(getattr(_cfg, "DB_LESS", True))
-    except Exception:
-        _db_less_enabled = os.getenv("DB_LESS", "1").lower() in {"1", "true", "yes"}
-    if _db_less_enabled:
-        api_key = os.getenv("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return {
-                "response_text": "ANTHROPIC_API_KEY missing for DB-less mode.",
-                "sources": [],
-                "original_query": query_text,
-                "context": "",
-                "chunks": [],
-                "prompt": "",
-            }
-        # Resolve files from catalog (preferred)
-        from pathlib import Path as _P
-        try:
-            from .catalog import resolve_file_ids_for_game  # type: ignore
-            pairs = resolve_file_ids_for_game(selected_game)
-        except Exception:
-            pairs = []
-        # Fallback to scanning data/ if catalog unavailable
-        if not pairs:
-            data_dir = _P(getattr(cfg, "DATA_PATH", "data"))
-            pdfs = sorted([p for p in data_dir.glob("*.pdf")])
-            if selected_game:
-                key = str(selected_game).strip().lower()
-                pdfs = [p for p in pdfs if key in p.name.lower()]
-            # Upload and cache file_ids if needed
-            # Persist cache under data/catalog alongside catalog.json so Railway keeps it
-            from .config import DATA_PATH as _DATA_PATH  # type: ignore
-            cache_path = _P(_DATA_PATH) / "catalog" / "anthropic_files.json"
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                import json as _json
-                cache = _json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
-            except Exception:
-                cache = {}
-            for p in pdfs:
-                fp = str(p.resolve())
-                fid = cache.get(fp)
-                if not fid:
-                    try:
-                        fid = upload_pdf_to_anthropic_files(api_key, fp)
-                        cache[fp] = fid
-                    except Exception:
-                        continue
-                pairs.append((fp, fid))
-            try:
-                cache_path.write_text(_json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-        if not pairs:
-            return {
-                "response_text": "No PDFs available to query.",
-                "sources": [],
-                "original_query": query_text,
-                "context": "",
-                "chunks": [],
-                "prompt": "",
-            }
-        # Use at most 2 PDFs per request to stay within size limits
-        file_ids = pairs[:2]
-        if not file_ids:
-            return {
-                "response_text": "Failed to upload PDFs to Files API.",
-                "sources": [],
-                "original_query": query_text,
-                "context": "",
-                "chunks": [],
-                "prompt": "",
-            }
-        # Build user instruction: answer plus spans for spotlight
-        instruction = (
-            "Answer the user's question based ONLY on the attached PDF(s).\n"
-            "Give the answer a brief title that is a succinct form of the question/ A few words, no more than 5.\n"
-            "Include INLINE citations in square brackets immediately after claims, using the exact section code and title from the rule headers, e.g., [6.2 FIREPOWER], [6.4 FIRE STRENGTH].\n"
-            "After the prose, return STRICT JSON as the last block with keys: answer (string), spans (array).\n"
-            "Each span: {page:int, header:string}.\n"
-            "- header must be the exact header line text used in the justification (code + title).\n"
-            "- Page numbers are 1-based.\n"
-            "- If no specific headers were used, return spans: [].\n\n"
-            f"Question: {query_text}"
-        )
-        system_prompt = (
-            "You are an expert assistant for boardgame rulebooks. "
-            "Follow the user's inline citation format and provide concise, accurate answers."
-        )
-        # Send one message per file_id, then merge answers (first non-empty preferred)
-        import os as _os
-        model_name = _os.getenv("OUTLINE_LLM_MODEL", "claude-sonnet-4-20250514")
-        aggregated_answer = None
-        aggregated_spans: List[Dict[str, Union[int, str]]] = []
-        sources = []
-        for fp, fid in file_ids:
-            try:
-                raw = anthropic_pdf_messages_with_file(api_key, model_name, system_prompt, instruction, fid)
-                # Try parse JSON
-                import json as _json
-                js_obj = None
-                # Extract last JSON object
-                import re as _re
-                cands = [_m.group(0) for _m in _re.finditer(r"\{[\s\S]*?\}", raw)]
-                for _js in cands[::-1]:
-                    try:
-                        js_obj = _json.loads(_js)
-                        break
-                    except Exception:
-                        continue
-                if isinstance(js_obj, dict):
-                    ans = str(js_obj.get("answer") or "").strip()
-                    spans = js_obj.get("spans") or []
-                    if ans and aggregated_answer is None:
-                        aggregated_answer = ans
-                    # Attach anchors
-                    for sp in spans:
-                        try:
-                            pg = int(sp.get("page"))
-                            hdr = str(sp.get("header") or "").strip()
-                            pt = find_header_anchor(fp, pg, hdr)
-                            x, y = (pt or (None, None))
-                            aggregated_spans.append({
-                                "file": _P(fp).name,
-                                "page": pg,
-                                "header": hdr,
-                                "x": x,
-                                "y": y,
-                            })
-                        except Exception:
-                            continue
-                    sources.append({"filepath": fp})
-            except Exception:
-                continue
-        if not aggregated_answer:
-            aggregated_answer = "No answer found in the provided PDFs."
-        return {
-            "response_text": aggregated_answer,
-            "sources": sources,
-            "original_query": query_text,
-            "context": "",
-            "chunks": [],
-            "prompt": instruction,
-            "spans": aggregated_spans,
-        }
-
-    # Legacy DB-backed mode has been removed; only DB-less is supported.
-    return {
-        "response_text": "DB-backed mode has been removed. Please enable DB-less mode.",
-        "sources": [],
-        "original_query": query_text,
-        "context": "",
-        "chunks": [],
-        "prompt": "",
-    }
-
-    # Prepare search query – include chat history to give the retriever more context for follow-up questions
-    search_query = (
-        f"{chat_history}\n\n{query_text}" if chat_history else query_text
-    )
-
-    print("🔍 Searching in the database…")
-    print(f"  Search query: '{search_query[:1000]}'")  # truncate long prints
-    if selected_game:
-        print(f"  Filtering by game: '{selected_game}'")
-
-
-
-    # Get results from database (more if filtering is needed)
-    # Fewer retrievals yield faster prompts; keep small but sufficient
-    k_results = 40 if selected_game else 20
-            # Try server-side metadata filtering first (if supported)
-    metadata_filter = None
-    target_files = None  # set of lowercase PDF filenames used for filtering, when available
-    if selected_game:
-        # Debug: normalize selected_game input
-        def _normalize_game_input(game_input):
-            """Convert game input to normalized string."""
-            import os  # Import needed for basename function
-            if isinstance(game_input, list):
-                # Handle list of filenames - find the game they map to
-                if game_input:
-                    # Look up what game these filenames belong to
-                    stored_map = get_stored_game_names()
-                    for fname, gname in stored_map.items():
-                        # Check if any of the input filenames match this stored file
-                        fname_base = os.path.basename(fname).replace(".pdf", "").lower()
-                        if any(fname_base == item.strip().lower() for item in game_input):
-                            normalized = gname  # Use the mapped game name
-                            break
-                    else:
-                        # Fallback: use first item if no mapping found
-                        normalized = game_input[0].strip()
-                else:
-                    normalized = ""
-            elif isinstance(game_input, str):
-                normalized = game_input.strip()
-            else:
-                normalized = str(game_input).strip()
-            print(f"🎮 Game input normalization: {game_input!r} → {normalized!r}")
-            return normalized.lower()
-        
-        game_key = _normalize_game_input(selected_game)
-        stored_map = get_stored_game_names()
-        
-        # Debug: show what's in the mapping
-        print(f"📚 Current game mappings ({len(stored_map)} entries):")
-        for fname, gname in sorted(stored_map.items()):
-            print(f"  '{fname}' → '{gname}'")
-        
-        import os
-        # Try matching by game name first, then by filename if that fails
-        target_files = {os.path.basename(fname).lower() for fname, gname in stored_map.items() if gname.lower() == game_key}
-        
-        if not target_files:
-            # Fallback: try matching by filename (for UI compatibility)
-            target_files = {os.path.basename(fname).lower() for fname in stored_map.keys() if os.path.basename(fname).replace(".pdf", "").replace(" ", "_").lower() == game_key}
-        
-        print(f"🔍 Looking for game: '{game_key}'")
-        print(f"📂 Found {len(target_files)} matching PDFs: {sorted(target_files)}")
-        
-        if not target_files:
-            available_games = sorted(set(gname.lower() for gname in stored_map.values()))
-            raise ValueError(f"No PDFs are mapped to the game '{selected_game}'. Available games: {available_games}")
-        metadata_filter = {"pdf_filename": {"$in": list(target_files)}}
-
-    # Numeric section targeting: if query asks to quote a specific section number,
-    # pull exact section chunks for the selected game and prioritize them.
-    requested_section = None
-    try:
-        m_sec = re.search(r"\bquote\s+((?:\d+(?:\.\d+)*))\b", query_text, re.IGNORECASE)
-        if m_sec:
-            requested_section = m_sec.group(1)
-            print(f"🔎 Requested explicit section: {requested_section}")
-    except Exception:
-        requested_section = None
-
-    prioritized_results = []
-    if requested_section:
-        try:
-            all_docs = db.get()
-            docs = all_docs.get("documents", [])
-            metas = all_docs.get("metadatas", [])
-            ids = all_docs.get("ids", [])
-            for doc_text, meta, _id in zip(docs, metas, ids):
-                if not isinstance(meta, dict):
-                    continue
-                if target_files:
-                    pdf_fn = (meta.get("pdf_filename") or "").lower()
-                    if pdf_fn not in target_files:
-                        continue
-                sec_num = (meta.get("section_number") or "").strip()
-                sec_label = (meta.get("section") or "").strip()
-                if sec_num and (sec_num == requested_section or sec_num.startswith(requested_section + ".")):
-                    from langchain.schema.document import Document as _Doc
-                    prioritized_results.append((_Doc(page_content=doc_text, metadata=meta), 0.0))
-                    continue
-                # Fallback: label prefix match
-                if sec_label.startswith(requested_section):
-                    from langchain.schema.document import Document as _Doc
-                    prioritized_results.append((_Doc(page_content=doc_text, metadata=meta), 0.0))
-        except Exception as e:
-            print(f"⚠️ Section prioritization failed: {e}")
-    # Multi-query retrieval with plural/synonym expansion
-    vq_extra = []
-    try:
-        if re.search(r"\bTicket to Ride\b", query_text, re.IGNORECASE):
-            vq_extra.append("how many train cards does each player start with")
-            vq_extra.append("setup each player starts with train cards")
-    except Exception:
-        pass
-    variant_queries = (generate_query_variants(query_text, game_names) or []) + vq_extra
-    if not variant_queries:
-        variant_queries = [query_text]
-    # Build variant search strings including chat history when present
-    search_variants = [
-        (f"{chat_history}\n\n{v}" if chat_history else v) for v in variant_queries
-    ]
-    # Allocate per-variant k to avoid over-fetching
-    per_variant_k = max(12, k_results // max(1, len(search_variants)))
-    all_results = []
-    for vq in search_variants:
-        try:
-            batch = (
-                db.similarity_search_with_score(vq, k=per_variant_k, filter=metadata_filter)
-                if metadata_filter
-                else db.similarity_search_with_score(vq, k=per_variant_k)
-            )
-        except TypeError:
-            batch = (
-                db.similarity_search_with_score(vq, k=per_variant_k, filter=metadata_filter)
-                if metadata_filter
-                else db.similarity_search_with_score(vq, k=per_variant_k)
-            )
-        # Extend combined list; we'll dedupe below
-        all_results.extend(batch)
-
-    # Merge similarity hits with simple dedupe
-    results = []
-    seen_keys = set()
-    def _key_for(d):
-        m = getattr(d, "metadata", {}) or {}
-        return (m.get("source"), m.get("page"), (m.get("section") or "").strip())
-
-    # Prepend prioritized section hits (if any), then similarity hits
-    for d, s in (prioritized_results or []):
-        k = _key_for(d)
-        if k not in seen_keys:
-            results.append((d, s))
-            seen_keys.add(k)
-
-    for d, s in all_results:
-        k = _key_for(d)
-        if k not in seen_keys:
-            results.append((d, s))
-            seen_keys.add(k)
-
-    # Keep only the top-N results for prompt building
-    results = results[: RAG_MAX_DOCS]
-
-    # Heuristic re-rank: for phase-related queries, prefer chunks with numeric section headers
-    try:
-        if re.search(r"\bphase(s)?\b", query_text, re.IGNORECASE):
-            def _is_numeric_section(doc):
-                sec = (getattr(doc, 'metadata', {}) or {}).get('section') or ''
-                return bool(re.match(r"^\s*\d+(?:\.\d+)*\b", str(sec)))
-            results.sort(key=lambda pair: (not _is_numeric_section(pair[0]), pair[1]))
-    except Exception:
-        pass
-    # Heuristic re-rank for specific query intents
-    try:
-        if re.search(r"train\s*cards?", query_text, re.IGNORECASE):
-            def _pref_train_cards(doc):
-                text = (getattr(doc, 'page_content', '') or '').lower()
-                hints = 0
-                for pat in ("each player", "start", "starting", "initial", "setup", "begin"):
-                    if pat in text:
-                        hints += 1
-                for pat in ("train car", "train cards"):
-                    if pat in text:
-                        hints += 2
-                return -hints  # higher hints → smaller key → earlier
-            results.sort(key=lambda pair: (_pref_train_cards(pair[0]), pair[1]))
-    except Exception:
-        pass
-
-    print(f"  Found {len(results)} results")
-    if results:
-        print(f"  Best match score: {results[0][1]:.4f}")
-        # Show which games the results come from
-        sources = [doc.metadata.get("source", "unknown") for doc, _ in results[:3]]
-        unique_sources = list(set([Path(s).name for s in sources if s != "unknown"]))
-        print(f"  Top sources: {', '.join(unique_sources[:3])}")
-    else:
-        print("  ⚠️ No results found - check if database contains relevant documents")
-
-    # Supplement with live web search results (optional)
-    effective_web_search = ENABLE_WEB_SEARCH if enable_web is None else enable_web
-
-    web_docs: List[Document] = []
-    if effective_web_search:
-        # Incorporate game name(s) into web search for better relevance
-        quoted_game = ""
-        if game_names:
-            # Use first game name to keep query concise; wrap in quotes
-            quoted_game = f'"{game_names[0]}" '
-        pre_query = f"{quoted_game}{query_text}"
-        web_query = rewrite_search_query(pre_query)
-
-        print(
-            f"🌐 Web search enabled – fetching top {WEB_SEARCH_RESULTS} snippets with query: {web_query!r}…"
-        )
-        web_docs = perform_web_search(web_query, k=WEB_SEARCH_RESULTS)
-        print(f"🌐 Retrieved {len(web_docs)} web snippets")
-        # Treat them as zero-score items but include for context.
-        if web_docs:
-            results.extend([(doc, 0.0) for doc in web_docs])
-
-    # Build the prompt
-    print("🔮 Building the prompt …")
-    # Build context with a hard character cap
-    # Sanitizer to remove TOC-like lines and bare page numbers that can mislead citation generation
-    def _sanitize_for_context(text: str) -> str:
-        try:
-            lines = text.splitlines()
-            cleaned = []
-            toc_re = re.compile(r"^\s*\d+(?:\.\d+)+\s+.+?\.{2,}\s*\d+\s*$")
-            page_num_re = re.compile(r"^\s*\d+\s*$")
-            for ln in lines:
-                if toc_re.match(ln):
-                    continue
-                if page_num_re.match(ln):
-                    continue
-                cleaned.append(ln)
-            return "\n".join(cleaned)
-        except Exception:
-            return text
-
-    parts = []
-    included_chunks_debug = []  # Collect details for logs
-    included_chunks_payload = []  # Collect structured chunks for client
-    used = 0
-    for doc, _score in results:
-        t = _sanitize_for_context(doc.page_content or "")
-        if not t:
-            continue
-        if used + len(t) + 8 > RAG_CONTEXT_CHAR_LIMIT:
-            t = t[: max(0, RAG_CONTEXT_CHAR_LIMIT - used)]
-        parts.append(t)
-        try:
-            meta = getattr(doc, 'metadata', {}) or {}
-            # Debug entry for logs
-            included_chunks_debug.append({
-                "source": (meta.get("source") or "unknown"),
-                "page": meta.get("page"),
-                "section": (meta.get("section") or "").strip(),
-                "section_number": (meta.get("section_number") or "").strip(),
-                "length": len(t),
-                "preview": t.replace("\n", " ")[:160],
-            })
-            # Client payload (deliver essential info so the UI can render without refetch)
-            from pathlib import Path as _Path
-            src_name = _Path((meta.get("source") or "")).name or (meta.get("source") or "unknown")
-            payload_item = {
-                "text": t,
-                "source": src_name,
-                "page": meta.get("page"),
-                "section": (meta.get("section") or "").strip(),
-                "section_number": (meta.get("section_number") or "").strip(),
-            }
-            # Pass through any normalized rects if present
-            rects_norm = meta.get("rects_norm")
-            if rects_norm is not None:
-                payload_item["rects_norm"] = rects_norm
-            included_chunks_payload.append(payload_item)
-        except Exception:
-            pass
-        used += len(t) + 8
-        if used >= RAG_CONTEXT_CHAR_LIMIT:
-            break
-    context_text = "\n\n---\n\n".join(parts)
-
-    # Provide an explicit allowlist of section identifiers derived from retrieved sources
-    try:
-        allowed_sections = []
-        seen_allow = set()
-        for doc, _ in results:
-            meta = getattr(doc, 'metadata', {}) or {}
-            sec = (meta.get('section_number') or '').strip()
-            if not sec:
-                # Support numeric dotted (3.5, 3.5.1), alphanumeric letter-first (F4, F4.a, A10.2b), and digit-first (1B6, 1B6b)
-                label = (meta.get('section') or '').strip()
-                m = re.match(r"^\s*(([A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?))\b", label)  # letter-first
-                if not m:
-                    m = re.match(r"^\s*((\d+[A-Za-z]\d+(?:\.[A-Za-z0-9]+)*[a-z]?))\b", label)  # digit-first
-                if not m:
-                    m = re.match(r"^\s*((\d+(?:\.[A-Za-z0-9]+)+))\b", label)  # numeric dotted
-                if m:
-                    sec = m.group(1)
-            if sec and sec not in seen_allow:
-                allowed_sections.append(sec)
-                seen_allow.add(sec)
-        if allowed_sections:
-            allowline = ''.join(f'[{s}]' for s in allowed_sections[:24])
-            context_text = f"ALLOWED_SECTIONS: {allowline}\n\n" + context_text
-        else:
-            context_text = "ALLOWED_SECTIONS: \n\n" + context_text
-    except Exception:
-        pass
-
-    # Combine chat history with the latest question so the LLM has conversational context
-    if chat_history:
-        composite_question = (
-            f"Previous conversation (for context):\n{chat_history}\n\nUser's latest question: {query_text}"
-        )
-    else:
-        composite_question = query_text
-
-    # Try improved template first, fallback to original
-    try:
-        prompt = load_jinja2_prompt(
-            context=context_text,
-            question=composite_question,
-            template_name="rag_query_improved.txt",
-        )
-    except Exception:
-        prompt = load_jinja2_prompt(context=context_text, question=composite_question)
-    # Debug: spew full prompt and list included chunks
-    try:
-        print("\n===== FULL PROMPT (BEGIN) =====")
-        print(prompt)
-        print("===== FULL PROMPT (END) =====\n")
-        print("Included chunks (in order):")
-        for idx, info in enumerate(included_chunks_debug, 1):
-            try:
-                from pathlib import Path as _Path
-                src_name = _Path(info.get("source") or "").name
-            except Exception:
-                src_name = info.get("source") or "unknown"
-            print(f"  {idx:02d}. src={src_name} page={info.get('page')} section='{info.get('section')}' num='{info.get('section_number')}' len={info.get('length')}")
-            print(f"      {info.get('preview')}")
-    except Exception:
-        pass
-
-
-    print("🍳 Generating the response (streaming)…")
-
-    # Prepare streaming callback to flush tokens to stdout immediately.
-    try:
-        from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
-
-        callbacks = [StreamingStdOutCallbackHandler()]
-    except Exception:
-        # Fallback: no streaming callback available
-        callbacks = None
-
-    # Temperature is fixed to 0 for deterministic answers that are easier to test.
-    model_kwargs = {
-        "callbacks": callbacks,
-        "streaming": True,
-    }
-
-    if cfg.LLM_PROVIDER.lower() == "ollama":
-        # Import here to avoid requiring Ollama for OpenAI users.
-        from langchain_community.llms.ollama import Ollama  # pylint: disable=import-error
-
-        model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL, num_predict=LLM_MAX_TOKENS, **model_kwargs)
-    elif cfg.LLM_PROVIDER.lower() == "anthropic":
-        model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS, **model_kwargs)
-    elif cfg.LLM_PROVIDER.lower() == "openai":
-        if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
-            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, max_tokens=LLM_MAX_TOKENS, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
-        else:
-            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, max_tokens=LLM_MAX_TOKENS, timeout=REQUEST_TIMEOUT_S, **model_kwargs)
-    else:
-        raise ValueError(
-            f"Unsupported LLM_PROVIDER: {cfg.LLM_PROVIDER}. Must be 'openai', 'anthropic', or 'ollama'"
-        )
-
-    # If the user requested a specific numeric section but none were found in results,
-    # avoid generating with misleading content.
-    if requested_section:
-        has_requested = False
-        for doc, _ in results:
-            sec_num = ((doc.metadata or {}).get("section_number") or "").strip()
-            sec_label = ((doc.metadata or {}).get("section") or "").strip()
-            if sec_num.startswith(requested_section) or sec_label.startswith(requested_section):
-                has_requested = True
-                break
-        if not has_requested:
-            return {
-                "response_text": f"Section {requested_section} not found in the selected game.",
-                "sources": [],
-                "original_query": query_text,
-                "context": context_text,
-                "prompt": prompt,
-            }
-
-    response_raw = model.invoke(prompt)
-    # Convert LangChain message objects to string content when necessary.
-    if hasattr(response_raw, "content"):
-        response_text = response_raw.content
-    else:
-        response_text = response_raw
-
-    # If user asked for number-only, normalize first numeric token
-    try:
-        if re.search(r"number\s+only", query_text, re.IGNORECASE):
-            m_num = re.search(r"\$?\s*(\d[\d,]*)", str(response_text))
-            if m_num:
-                digits_only = re.sub(r"\D", "", m_num.group(1))
-                if digits_only:
-                    response_text = digits_only
-    except Exception:
-        pass
-
-    # Remove trailing auto-appended numeric citations; do not modify model output here
-
-    # Build structured source metadata for citations without thresholding
-    sources = []
-    for doc, score in results:
-        meta_doc = doc.metadata
-        src_path = meta_doc.get("source", "")
-        # Always include web results as URLs
-        if isinstance(src_path, str) and src_path.startswith("http"):
-            sources.append(src_path)
-            continue
-        # Include all PDF sources with page/section
-        sources.append({
-            "filepath": src_path,
-            "page": meta_doc.get("page"),
-            "section": meta_doc.get("section"),
-        })
-    response = {
-        "response_text": response_text,
-        "sources": sources,
-        "original_query": query_text,
-        "context": context_text,
-        "chunks": included_chunks_payload,
-        "prompt": prompt,
-    }
-
-    return response
+## query_rag was deprecated in favor of stream_query_rag and has been removed.
 
 
 # ---------------------------------------------------------------------------
@@ -1035,12 +361,8 @@ def stream_query_rag(
     print(f"💬 Chat history length: {len(chat_history) if chat_history else 0}")
     print(f"🌐 Web search enabled: {enable_web}")
 
-    # ---- Optional Vector-DB branch: per-page retrieval + routing ----
-    try:
-        from . import config as _cfg  # type: ignore
-        use_vector = bool(getattr(_cfg, "IS_VECTOR_MODE", False))
-    except Exception:
-        use_vector = False
+    # ---- Vector-DB mode (exclusive) ----
+    use_vector = True
     if use_vector:
         try:
             from .vector_store import search_chunks, count_processed_pages  # type: ignore
@@ -1066,28 +388,13 @@ def stream_query_rag(
                     pdf_filenames = list(get_pdf_filenames_for_game(norm_game) or [])
             except Exception:
                 pdf_filenames = []
-        # Determine a sensible k based on how many pages are processed for this PDF
-        k_results = 6
+        # Keep retrieval lightweight and predictable per request
+        # Increase k to reduce sensitivity to small rank shifts during reranking
+        k_results = 12
         results: list[tuple[Any, float]] = []
         if pdf_filenames:
-            try:
-                from .pdf_pages import get_page_count  # type: ignore
-                for fn in pdf_filenames:
-                    per_k = k_results
-                    try:
-                        pdf_path = data_dir / fn
-                        total_pages = get_page_count(pdf_path) if pdf_path.exists() else 0
-                        processed_pages = count_processed_pages(_P(fn).stem, total_pages) if total_pages > 0 else 0
-                        if processed_pages > 0:
-                            per_k = max(1, min(6, processed_pages))
-                        elif total_pages > 0:
-                            per_k = max(1, min(6, total_pages))
-                    except Exception:
-                        per_k = k_results
-                    results.extend(search_chunks(query_text, pdf=fn, k=per_k))
-            except Exception:
-                for fn in pdf_filenames:
-                    results.extend(search_chunks(query_text, pdf=fn, k=k_results))
+            for fn in pdf_filenames:
+                results.extend(search_chunks(query_text, pdf=fn, k=k_results))
         else:
             # If a game was specified but we couldn't resolve any filenames, avoid cross-game leakage
             if selected_game:
@@ -1142,297 +449,511 @@ def stream_query_rag(
         if seen:
             deduped = [(d, s) for (d, s, _ok) in seen.values()]
         results = deduped or results
+        # Ensure final results are sorted by score (lower is better)
+        try:
+            results.sort(key=lambda pair: float(pair[1]))
+        except Exception:
+            pass
 
         # Decision: for each chunk, if visual_importance >= 4 attach PDFs; else use text
         from pathlib import Path as _P
         from . import config as _cfg2  # type: ignore
         data_dir = _P(getattr(_cfg2, "DATA_PATH", "data"))
 
+        # Precompute the exact instruction text (the same text block we send to the LLM)
+        # Strip retrieval-only prefixes and summaries from stored chunk text
+        def _strip_embed_prefixes(text: str) -> str:
+            try:
+                import re as _re
+                lines = (text or "").splitlines()
+                filtered: list[str] = []
+                for ln in lines:
+                    s = ln.lstrip()
+                    if s.startswith("Search hints:"):
+                        continue
+                    if s.startswith("Headers:"):
+                        continue
+                    ls = s.lower()
+                    if ls.startswith("summary:"):
+                        continue
+                    if ls.startswith("page summary:"):
+                        continue
+                    if ls.startswith("overview:"):
+                        continue
+                    if ls.startswith("key points:"):
+                        continue
+                    filtered.append(ln)
+                return "\n".join(filtered).strip()
+            except Exception:
+                return text
+
+        context_blocks: list[str] = []
+        top_n = results[:6]
+        for doc, score in top_n:
+            meta = getattr(doc, 'metadata', {}) or {}
+            source = str(meta.get('source') or '')
+            page0 = int(meta.get('page') or 0)
+            vi = int(meta.get('visual_importance') or 1)
+            base = _P(source).name
+            from . import config
+            if config.IGNORE_VISUAL_IMPORTANCE or vi < 4:
+                ctx_raw = str(getattr(doc, 'page_content', '') or '')
+                ctx = _strip_embed_prefixes(ctx_raw)
+                context_blocks.append(f"[Context from {base} p{page0+1}]\n{ctx}")
+
+        # Build Allowed citations block from selected chunks (list only file and section labels; no pages)
+        allowed_lines = []
+        grouped: dict[str, set[str]] = {}
+        for doc, _score in top_n:
+            meta = getattr(doc, 'metadata', {}) or {}
+            src = str(meta.get('source') or '')
+            sects = []
+            try:
+                import json as _json
+                prim = _json.loads(meta.get('primary_sections') or '[]')
+                sects.extend([str(s) for s in (prim or [])])
+            except Exception:
+                pass
+            try:
+                import json as _json
+                cont = _json.loads(meta.get('continuation_sections') or '[]')
+                sects.extend([str(s) for s in (cont or [])])
+            except Exception:
+                pass
+            s = grouped.get(src)
+            if s is None:
+                grouped[src] = set(sects)
+            else:
+                s.update(sects)
+        for src, sects in grouped.items():
+            def _sanitize_section_name(name: str) -> str:
+                s = str(name or "")
+                s = s.replace("“", '"').replace("”", '"')
+                s = s.replace('"', "'")
+                return s
+            sect_list = ", ".join([f"\"{_sanitize_section_name(x)}\"" for x in sorted(sects) if x])
+            allowed_lines.append(f"- file={_P(src).name}, sections=[{sect_list}]")
+
+        allowed_block = "\n".join(["Allowed citations:"] + allowed_lines) if allowed_lines else ""
+
+        # Build structured allowed citations list for client-side resolution
+        allowed_struct: list[dict[str, Any]] = []
+        try:
+            seen_pairs: set[tuple[str, str]] = set()
+            for doc, _score in top_n:
+                meta = getattr(doc, 'metadata', {}) or {}
+                src = str(meta.get('source') or '')
+                base_name = _P(src).name
+                import json as _json
+                try:
+                    sp = _json.loads(meta.get('section_pages') or '{}') or {}
+                except Exception:
+                    sp = {}
+                try:
+                    sid_map = _json.loads(meta.get('section_ids') or '{}') or {}
+                except Exception:
+                    sid_map = {}
+                try:
+                    anchors = _json.loads(meta.get('header_anchors_pct') or '{}') or {}
+                except Exception:
+                    anchors = {}
+                try:
+                    text_spans_data = _json.loads(meta.get('text_spans') or '{}') or {}
+                except Exception:
+                    text_spans_data = {}
+                try:
+                    prim = _json.loads(meta.get('primary_sections') or '[]') or []
+                except Exception:
+                    prim = []
+                try:
+                    p1_chunk = int(meta.get('page_1based') or (int(meta.get('page') or 0) + 1))
+                except Exception:
+                    p1_chunk = int(meta.get('page') or 0) + 1
+                labels: set[str] = set()
+                try:
+                    labels.update([str(k) for k in (sp.keys() if isinstance(sp, dict) else [])])
+                except Exception:
+                    pass
+                try:
+                    labels.update([str(x) for x in (prim or [])])
+                except Exception:
+                    pass
+                for hdr in sorted(labels):
+                    if not hdr:
+                        continue
+                    key = (base_name, hdr)
+                    if key in seen_pairs:
+                        continue
+                    page_val = None
+                    try:
+                        page_val = int(sp.get(hdr)) if isinstance(sp, dict) and hdr in sp else None
+                    except Exception:
+                        page_val = None
+                    if not page_val and hdr in prim:
+                        page_val = p1_chunk
+                    entry: dict[str, Any] = {
+                        "file": base_name,
+                        "section": hdr,
+                        "page": int(page_val) if isinstance(page_val, int) else None,
+                        "code": str(sid_map.get(hdr) or ""),
+                    }
+                    try:
+                        arr = anchors.get(hdr)
+                        if isinstance(arr, list) and len(arr) >= 4:
+                            entry["header_anchor_bbox_pct"] = [float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])]
+                    except Exception:
+                        pass
+                    # Add text spans if available
+                    try:
+                        spans = text_spans_data.get(hdr)
+                        if spans:
+                            entry["text_spans"] = spans
+                    except Exception:
+                        pass
+                    allowed_struct.append(entry)
+                    seen_pairs.add(key)
+        except Exception:
+            allowed_struct = []
+        instruction = (
+            "INSTRUCTIONS:\n"
+            "Answer the user's question based ONLY on the attached material.\n"
+            "Do NOT include any preamble or meta phrases anywhere (forbidden: 'Based on the rulebook', 'According to', 'As per', 'From the rulebook', 'Looking at the rulebook', 'Per the rules', 'Looking at your question').\n"
+            "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the following format:\n"
+            "[<section>]. Place it immediately after the paragraph with no trailing text.\n"
+            "Do not combine multiple sections into a single bracketed citation.\n"
+            "Do not enclose a citation with parentheses or unnecessary text, such as \"(see [13.1])\".\n"
+            "Use ONLY section labels from the Allowed citations list below; do not invent or paraphrase labels.\n"
+            "Combining the first letter of every paragraph should add up to a word in the theme of the question.\n"
+            "Example (format only; replace with an allowed citation):\n"
+            "Wire cards can only be placed as a discard. [13.1]\n"
+            f"{allowed_block}\n\n"
+            f"Question: {query_text}\n\n"
+        )
+        if context_blocks:
+            instruction += "\n\n" + "\n\n".join(context_blocks)
+
+        # Note: Do not sanitize or post-process model output; enforce formatting via prompt only.
+
+        # No server-side injection anymore; client will use allowed_struct to resolve pages
+        def _inject_pages(text: str) -> str:
+            return text
+
         def _gen():
-            # Build a single Anthropic request with attached PDFs and a plain-text context
+            # If provider is not Anthropic, run a single completion and stream slices
+            try:
+                from . import config as _cfg2  # type: ignore
+            except Exception:
+                class _Cfg2:
+                    LLM_PROVIDER = "anthropic"
+                    GENERATOR_MODEL = "claude-sonnet-4-20250514"
+                    OLLAMA_URL = "http://localhost:11434"
+                _cfg2 = _Cfg2()  # type: ignore
+            provider = str(getattr(_cfg2, "LLM_PROVIDER", "anthropic")).lower()
+            if provider != "anthropic":
+                try:
+                    if provider == "openai":
+                        if _openai_requires_default_temperature(getattr(_cfg2, "GENERATOR_MODEL", "")):
+                            model = ChatOpenAI(model=_cfg2.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S)
+                        else:
+                            model = ChatOpenAI(model=_cfg2.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S)
+                    else:
+                        from langchain_community.llms.ollama import Ollama  # type: ignore
+                        model = Ollama(model=_cfg2.GENERATOR_MODEL, base_url=getattr(_cfg2, "OLLAMA_URL", "http://localhost:11434"))
+                    resp = model.invoke(instruction)
+                    text = str(getattr(resp, "content", resp) or "")
+                    text = _inject_pages(text)
+                    slice_size = 64
+                    for i in range(0, len(text), slice_size):
+                        piece = text[i:i+slice_size]
+                        if piece:
+                            yield piece
+                except Exception as e:
+                    yield f"Model error: {e}"
+                return
+            # Build a streaming Anthropic request, preferring Files API page file_ids for visual pages
             attach_paths: list[_P] = []
-            context_blocks: list[str] = []
+            attach_meta: list[tuple[str, int]] = []  # (pdf filename base, 1-based page)
             seen_attach = set()
+            seen_meta = set()
             for doc, score in results:
                 meta = getattr(doc, 'metadata', {}) or {}
                 source = str(meta.get('source') or '')
                 page0 = int(meta.get('page') or 0)
                 vi = int(meta.get('visual_importance') or 1)
-                base = _P(source).name
                 pages_dir = data_dir / "pages" / _P(source).stem
+                base_name = _P(source).name
                 # Resolve 1-based filenames
-                p1 = pages_dir / f"p{(page0 if page0 > 0 else page0+1):04}.pdf"
+                p1_num = (page0 if page0 > 0 else page0 + 1)
+                p1 = pages_dir / f"p{p1_num:04}.pdf"
                 if not p1.exists():
-                    p1 = pages_dir / f"p{page0+1:04}.pdf"
-                p2 = pages_dir / f"p{(page0+1 if page0 > 0 else page0+2):04}.pdf"
+                    p1_num = page0 + 1
+                    p1 = pages_dir / f"p{p1_num:04}.pdf"
+                p2_num = (page0 + 1 if page0 > 0 else page0 + 2)
+                p2 = pages_dir / f"p{p2_num:04}.pdf"
                 if not p2.exists():
-                    p2 = pages_dir / f"p{page0+2:04}.pdf"
-                # Attach for high-visual chunks
+                    p2_num = page0 + 2
+                    p2 = pages_dir / f"p{p2_num:04}.pdf"
                 if vi >= 4 and p1.exists():
                     if str(p1) not in seen_attach:
                         attach_paths.append(p1)
                         seen_attach.add(str(p1))
+                    key1 = (base_name, int(p1_num))
+                    if key1 not in seen_meta:
+                        attach_meta.append(key1)
+                        seen_meta.add(key1)
                     if p2.exists() and str(p2) not in seen_attach:
                         attach_paths.append(p2)
                         seen_attach.add(str(p2))
-                else:
-                    ctx = str(getattr(doc, 'page_content', '') or '')
-                    context_blocks.append(f"[Context from {base} p{page0+1}]\n{ctx}")
+                        key2 = (base_name, int(p2_num))
+                        if key2 not in seen_meta:
+                            attach_meta.append(key2)
+                            seen_meta.add(key2)
 
             if not attach_paths and not context_blocks:
                 yield "No relevant chunks found."
                 return
 
-            # Compose Anthropic request with multiple document blocks and a single context text block
-            from base64 import b64encode as _b64
-            import requests as _req
-            import json as _json
+            # Stream tokens using Files API page file_ids when available; otherwise fall back to base64 page attachments
             api_key = _cfg2.ANTHROPIC_API_KEY
             model = _cfg2.GENERATOR_MODEL
-            url = "https://api.anthropic.com/v1/messages"
-            headers = {
-                "content-type": "application/json",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            }
-            content = []
-            for p in attach_paths:
+            system_prompt = (
+                "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations. "
+                "Start directly (lead with Yes/No for yes/no questions). Do not use any preambles or meta phrases such as 'Based on the rulebook' or 'According to'."
+            )
+            # Resolve page file_ids from catalog
+            page_file_ids: list[str] = []
+            try:
+                from .catalog import get_page_file_id as _get_page_fid  # type: ignore
+            except Exception:
+                def _get_page_fid(_fname: str, _p: int):  # type: ignore
+                    return None
+            for base_name, p1 in attach_meta:
                 try:
-                    with open(p, "rb") as f:
-                        data_b64 = _b64(f.read()).decode("ascii")
-                    content.append({
-                        "type": "document",
-                        "source": {"type": "base64", "media_type": "application/pdf", "data": data_b64},
-                        "citations": {"enabled": True},
-                    })
+                    fid = _get_page_fid(base_name, int(p1))
+                except Exception:
+                    fid = None
+                if fid:
+                    page_file_ids.append(fid)
+            if page_file_ids:
+                try:
+                    from .llm_outline_helpers import anthropic_pdf_messages_with_file_stream as _file_stream  # type: ignore
+                except Exception:
+                    def _file_stream(*args, **kwargs):
+                        return []  # type: ignore
+                # Stream only once to avoid duplicate full answers from multiple page file_ids
+                for fid in page_file_ids[:1]:
+                    carry = ""
+                    import re as _re
+                    _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
+                    for delta in _file_stream(api_key, model, system_prompt, instruction, fid):
+                        txt = str(delta or "")
+                        if not txt:
+                            continue
+                        combined = carry + txt
+                        replaced = _inject_pages(combined)
+                        m = _incomplete.search(replaced)
+                        if m:
+                            cut = m.start()
+                            out = replaced[:cut]
+                            carry = replaced[cut:]
+                        else:
+                            out = replaced
+                            carry = ""
+                        if out:
+                            yield out
+                    if carry:
+                        yield carry
+            else:
+                # No page file_ids available; attempt to upload page PDFs now and persist
+                new_fids: list[str] = []
+                try:
+                    from .llm_outline_helpers import upload_pdf_to_anthropic_files as _upload_page  # type: ignore
+                except Exception:
+                    def _upload_page(*args, **kwargs):  # type: ignore
+                        return None
+                try:
+                    from .catalog import set_page_file_id as _set_page_fid, get_page_file_id as _get_page_fid  # type: ignore
+                except Exception:
+                    def _set_page_fid(*args, **kwargs):  # type: ignore
+                        return None
+                    def _get_page_fid(*args, **kwargs):  # type: ignore
+                        return None
+                try:
+                    from .pdf_pages import compute_sha256 as _sha256  # type: ignore
+                except Exception:
+                    def _sha256(_p):  # type: ignore
+                        return ""
+
+                for p in attach_paths:
+                    try:
+                        base_pdf_name = p.parent.name + ".pdf"
+                        stem = p.stem  # pNNNN
+                        p1 = int(stem[1:]) if stem.startswith("p") else 1
+                        fid = _get_page_fid(base_pdf_name, p1)
+                        if not fid:
+                            fid = _upload_page(api_key, str(p))
+                            if fid:
+                                _set_page_fid(base_pdf_name, p1, fid, _sha256(p))
+                        if fid:
+                            new_fids.append(str(fid))
+                    except Exception:
+                        continue
+
+                if new_fids:
+                    try:
+                        from .llm_outline_helpers import anthropic_pdf_messages_with_file_stream as _file_stream  # type: ignore
+                    except Exception:
+                        def _file_stream(*args, **kwargs):
+                            return []  # type: ignore
+                    # Stream only the first uploaded page file to avoid duplicate answers
+                    for fid in new_fids[:1]:
+                        carry = ""
+                        import re as _re
+                        _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
+                        for delta in _file_stream(api_key, model, system_prompt, instruction, fid):
+                            txt = str(delta or "")
+                            if not txt:
+                                continue
+                            combined = carry + txt
+                            replaced = _inject_pages(combined)
+                            m = _incomplete.search(replaced)
+                            if m:
+                                cut = m.start()
+                                out = replaced[:cut]
+                                carry = replaced[cut:]
+                            else:
+                                out = replaced
+                                carry = ""
+                            if out:
+                                yield out
+                        if carry:
+                            yield carry
+                else:
+                    # Final fallback: stream with base64 page attachments
+                    try:
+                        from .llm_outline_helpers import anthropic_pdf_messages_with_pages_stream as _pages_stream  # type: ignore
+                    except Exception:
+                        def _pages_stream(*args, **kwargs):
+                            return []  # type: ignore
+                    carry = ""
+                    import re as _re
+                    _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
+                    for delta in _pages_stream(api_key, model, system_prompt, instruction, [str(p) for p in attach_paths]):
+                        if not delta:
+                            continue
+                        combined = carry + str(delta)
+                        replaced = _inject_pages(combined)
+                        m = _incomplete.search(replaced)
+                        if m:
+                            cut = m.start()
+                            out = replaced[:cut]
+                            carry = replaced[cut:]
+                        else:
+                            out = replaced
+                            carry = ""
+                        if out:
+                            yield out
+                    if carry:
+                        yield carry
+
+        # Build metadata for developer inspection
+        try:
+            # Construct a compact sources list from retrieved results
+            srcs = []
+            top_n = results[:6]
+            for doc, _s in top_n:
+                try:
+                    m = getattr(doc, 'metadata', {}) or {}
+                    srcs.append({"filepath": m.get("source", "")})
                 except Exception:
                     continue
-            # Build Allowed citations block from selected chunks (consistent format for both PDF and text-only cases)
-            allowed_lines = []
-            # Gather by (file,page) and merge section names
-            grouped: dict[tuple[str, int], set[str]] = {}
-            for doc, _score in results:
-                meta = getattr(doc, 'metadata', {}) or {}
-                src = str(meta.get('source') or '')
+            # Include the exact text context we appended to the instruction
+            ctx_text = "\n\n".join(context_blocks) if context_blocks else ""
+            # Include retrieved chunks payload for inspection
+            included_chunks_payload = []
+            for doc, _score in top_n:
                 try:
-                    p1 = int(meta.get('page_1based') or (int(meta.get('page') or 0) + 1))
+                    meta_doc = getattr(doc, 'metadata', {}) or {}
+                    from pathlib import Path as _Path
+                    src_name = _Path((meta_doc.get("source") or "")).name or (meta_doc.get("source") or "")
+                    # Extract labels from primary/continuation sections on this chunk
+                    try:
+                        import json as _json
+                        prim = _json.loads(meta_doc.get("primary_sections") or '[]') or []
+                    except Exception:
+                        prim = []
+                    try:
+                        import json as _json
+                        cont = _json.loads(meta_doc.get("continuation_sections") or '[]') or []
+                    except Exception:
+                        cont = []
+                    # Include ALL section headers that resolve to this chunk's page
+                    labels = [str(x).strip() for x in list(dict.fromkeys(list(prim) + list(cont))) if str(x).strip()]
+                    try:
+                        import json as _json
+                        sp_map = _json.loads(meta_doc.get('section_pages') or '{}') or {}
+                    except Exception:
+                        sp_map = {}
+                    try:
+                        p0 = int(meta_doc.get('page') or 0)
+                    except Exception:
+                        p0 = 0
+                    p1_num = p0 + 1
+                    try:
+                        for hdr, pg in (sp_map.items() if isinstance(sp_map, dict) else []):
+                            try:
+                                if int(pg) == int(p1_num):
+                                    s = str(hdr or '').strip()
+                                    if s and s not in labels:
+                                        labels.append(s)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    # text_spans is stored per-header map in metadata; pass it forward
+                    text_spans_map = None
+                    try:
+                        import json as _json
+                        ts_raw = meta_doc.get('text_spans')
+                        if isinstance(ts_raw, str) and ts_raw:
+                            text_spans_map = _json.loads(ts_raw)
+                        elif isinstance(ts_raw, dict):
+                            text_spans_map = ts_raw
+                    except Exception:
+                        text_spans_map = None
+                    # header_anchors_pct per-header map
+                    header_anchors_pct = None
+                    try:
+                        import json as _json
+                        ha_raw = meta_doc.get('header_anchors_pct')
+                        if isinstance(ha_raw, str) and ha_raw:
+                            header_anchors_pct = _json.loads(ha_raw)
+                        elif isinstance(ha_raw, dict):
+                            header_anchors_pct = ha_raw
+                    except Exception:
+                        header_anchors_pct = None
+                    payload = {
+                        "text": str(getattr(doc, 'page_content', '') or ''),
+                        "source": src_name,
+                        "page": meta_doc.get("page"),
+                        "section": (meta_doc.get("section") or "").strip(),
+                        "section_number": (meta_doc.get("section_number") or "").strip(),
+                        "labels": labels,
+                    }
+                    if text_spans_map is not None:
+                        payload["text_spans"] = text_spans_map
+                    if header_anchors_pct is not None:
+                        payload["header_anchors_pct"] = header_anchors_pct
+                    included_chunks_payload.append(payload)
                 except Exception:
-                    p1 = int(meta.get('page') or 0) + 1
-                # Merge primary and continuation sections
-                sects = []
-                try:
-                    import json as _json
-                    prim = _json.loads(meta.get('primary_sections') or '[]')
-                    sects.extend([str(s) for s in (prim or [])])
-                except Exception:
-                    pass
-                try:
-                    import json as _json
-                    cont = _json.loads(meta.get('continuation_sections') or '[]')
-                    sects.extend([str(s) for s in (cont or [])])
-                except Exception:
-                    pass
-                key = (src, p1)
-                s = grouped.get(key)
-                if s is None:
-                    grouped[key] = set(sects)
-                else:
-                    s.update(sects)
-            for (src, p1), sects in grouped.items():
-                def _sanitize_section_name(name: str) -> str:
-                    # Normalize smart quotes to straight, then replace straight double quotes with single quotes
-                    s = str(name or "")
-                    s = s.replace("“", '"').replace("”", '"')
-                    s = s.replace('"', "'")
-                    return s
-                sect_list = ", ".join([f"\"{_sanitize_section_name(x)}\"" for x in sorted(sects) if x])
-                allowed_lines.append(f"- file={Path(src).name}, page={p1}, sections=[{sect_list}]")
-
-            allowed_block = "\n".join(["Allowed citations:"] + allowed_lines) if allowed_lines else ""
-
-            # Build instruction with strict inline citation requirements
-            instruction = (
-                "Answer the user's question based ONLY on the attached material.\n"
-                "At the end of each paragraph, add exactly one inline citation in this identical format: "
-                "[<section>: {\"file\": \"<filename.pdf>\", \"page\": <1-based>, \"section\": \"<section>\"}].\n"
-                "Do NOT wrap the JSON in backticks or code spans.\n"
-                "Strict JSON rules for the citation object: keys must be double-quoted (\"file\", \"page\", \"section\"); string values must be double-quoted; page is an integer. Do NOT use bare keys or single quotes.\n"
-                "Use ONLY file/page values from the Allowed citations list below. Do not invent files or pages. The human-readable section title (the text before ': {') should exactly match the source (copy verbatim; do not misspell or paraphrase).\n"
-                "Do not include code blocks.\n\n"
-                f"{allowed_block}\n\n"
-                f"Question: {query_text}\n\n"
-            )
-            if context_blocks:
-                instruction += "\n\n" + "\n\n".join(context_blocks)
-            content.append({"type": "text", "text": instruction})
-            system_prompt = "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations."
-            body = {"model": model, "max_tokens": 4096, "system": system_prompt, "messages": [{"role": "user", "content": content}]}
-
-            try:
-                resp = _req.post(url, headers=headers, data=_json.dumps(body, ensure_ascii=False).encode("utf-8"), timeout=180)
-                resp.raise_for_status()
-                js = resp.json()
-                parts = js.get("content") or []
-                texts = []
-                for p in parts:
-                    if isinstance(p, dict) and p.get("type") == "text":
-                        texts.append(str(p.get("text") or ""))
-                out = "\n".join(texts).strip()
-                yield out if out else "No answer."
-            except Exception as e:
-                yield f"[anthropic error: {e}]"
-
-        meta = {"sources": [], "context": "", "prompt": query_text, "original_query": query_text, "spans": []}
+                    continue
+            meta = {"sources": srcs, "context": ctx_text, "prompt": instruction, "original_query": query_text, "chunks": included_chunks_payload, "spans": [], "citations": allowed_struct}
+        except Exception:
+            meta = {"sources": [], "context": "", "prompt": query_text, "original_query": query_text, "spans": [], "citations": []}
         print("="*80)
         print("🔍 STREAM_QUERY_RAG DEBUG END (VECTOR)")
         print("="*80 + "\n")
         return _gen(), meta
-
-    # ---- DB-less branch: use Anthropic Files API on original PDFs ----
-    # When DB_LESS is enabled, do NOT fall back to DB. Stream a clear error instead.
-    db_less_enabled = True
-    try:
-        from . import config as _cfg  # type: ignore
-        db_less_enabled = bool(getattr(_cfg, "IS_DB_LESS_MODE", True))
-    except Exception:
-        db_less_enabled = True
-    if db_less_enabled:
-        import os as _os
-        api_key = _os.getenv("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            def _err_gen():
-                yield "ANTHROPIC_API_KEY missing for DB-less mode."
-            meta = {"sources": [], "context": "", "prompt": "", "original_query": query_text, "spans": []}
-            return _err_gen(), meta
-
-        def _normalize_game_input(game_input):
-            if isinstance(game_input, list):
-                return (game_input[0] if game_input else "").strip()
-            if isinstance(game_input, str):
-                return game_input.strip()
-            return str(game_input or "").strip()
-
-        norm_game = _normalize_game_input(selected_game)
-
-        from pathlib import Path as _P
-        try:
-            from .catalog import resolve_file_ids_for_game  # type: ignore
-            pairs = resolve_file_ids_for_game(norm_game or None)
-        except Exception:
-            pairs = []
-
-        if not pairs:
-            def _no_pdf_gen():
-                yield f"No PDFs available for game '{norm_game or 'All'}' in catalog."
-            meta = {"sources": [], "context": "", "prompt": "", "original_query": query_text, "spans": []}
-            return _no_pdf_gen(), meta
-
-        file_ids = pairs[:2]
-
-        # Build allowed filenames list to force exact matching in citations
-        try:
-            allowed_filenames = ", ".join([_P(fp).name for fp, _ in file_ids])
-        except Exception:
-            allowed_filenames = ""
-        instruction = (
-            "Answer the user's question based ONLY on the attached PDF(s).\n"
-            "Do NOT include any preamble or meta commentary. Start directly with the answer.\n"
-            "Give the answer a brief title that is a succinct form of the question/ A few words, no more than 5.\n"
-            "For EVERY factual claim, make a separate short paragraph and include one inline citation at the end of the paragraph exactly in this form: [<section>: {\"file\":\"<filename.pdf>\", \"page\": <1-based>, \"section\": \"<name of the section>\"}].\n"
-            "- <section> is the rule code or range (e.g., 6.2, 6.4.1, 6.41-6.43).\n"
-            "- The JSON must include: file (pdf filename), page (1-based), and section (the section number or designation).\n"
-            + (f"- Allowed PDF filenames for the file field (use EXACTLY one of these, verbatim): {allowed_filenames}\n" if allowed_filenames else "") +
-            "Do NOT include any code blocks; provide prose only with inline citations.\n\n"
-            f"Question: {query_text}"
-        )
-        system_prompt = (
-            "You are an expert assistant for boardgame rulebooks. "
-            "Provide concise answers with inline citations; do not return JSON blocks."
-        )
-        import os as _os
-        model_name = _os.getenv("OUTLINE_LLM_MODEL", "claude-sonnet-4-20250514")
-
-        aggregated_answer: Optional[str] = None
-        aggregated_spans: List[Dict[str, Union[int, str]]] = []  # type: ignore[name-defined]
-        sources: List[Dict[str, str]] = []
-        last_raw_text: str = ""
-        # Spew what we are about to send (system + instruction + files)
-        try:
-            print("\n===== DB-LESS REQUEST (BEGIN) =====")
-            print("-- System Prompt --\n" + system_prompt)
-            print("\n-- User Instruction --\n" + instruction)
-            try:
-                from pathlib import Path as __P
-                attached_names = ", ".join([__P(fp).name for fp, _ in file_ids])
-            except Exception:
-                attached_names = "(unknown files)"
-            print(f"\n-- Attached PDFs --\n{attached_names}")
-            print("===== DB-LESS REQUEST (END) =====\n")
-        except Exception:
-            pass
-
-        # Stream each file's response; emit raw tokens only (no server-side parsing of citations)
-        from .llm_outline_helpers import anthropic_pdf_messages_with_file_stream  # type: ignore
-
-        def _token_gen():
-            for fp, fid in file_ids:
-                sources.append({"filepath": fp})
-                buffer = ""
-                had_text = False
-                try:
-                    for delta in anthropic_pdf_messages_with_file_stream(api_key, model_name, system_prompt, instruction, fid):
-                        txt = str(delta or "")
-                        if not txt:
-                            continue
-                        # Accumulate raw for debug spew; do not parse citations on server
-                        buffer += txt
-                        # Spew the literal model output chunk as-is
-                        had_text = True
-                        yield txt
-                except Exception as e:
-                    # If we hit rate limits or usage caps, surface a clear chat message
-                    try:
-                        status = getattr(getattr(e, 'response', None), 'status_code', None)
-                        body = ''
-                        try:
-                            body = (getattr(e, 'response', None).text or '') if getattr(e, 'response', None) is not None else ''
-                        except Exception:
-                            body = ''
-                        lower = (str(body) or '').lower()
-                        if status == 429 or 'rate limit' in lower or 'usage' in lower or 'quota' in lower:
-                            yield "API USAGE LIMIT HIT"
-                            # stop processing this file
-                            continue
-                        # Anthropic overloaded / transient error surfaced by stream helper
-                        if 'overloaded' in (str(e).lower() + lower):
-                            yield "API OVERLOADED — please retry"
-                            continue
-                    except Exception:
-                        pass
-                # After streaming finishes for this file, spew the raw accumulated answer for debug
-                try:
-                    print("\n===== RAW MODEL RESPONSE (BEGIN) =====")
-                    try:
-                        from pathlib import Path as __P
-                        print(f"-- File --\n{__P(fp).name}")
-                    except Exception:
-                        pass
-                    print("-- Raw Text --\n" + buffer)
-                    print("===== RAW MODEL RESPONSE (END) =====\n")
-                except Exception:
-                    pass
-
-        meta = {"sources": sources, "context": "", "prompt": instruction, "original_query": query_text, "spans": []}
-        print("="*80)
-        print("🔍 STREAM_QUERY_RAG DEBUG END")
-        print("="*80 + "\n")
-        return _token_gen(), meta
-
-    # Legacy DB-backed mode removed
-    def _err_gen():
-        yield "DB-backed mode has been removed. Please enable DB-less mode."
-    meta = {"sources": [], "context": "", "prompt": "", "original_query": query_text, "chunks": [], "spans": []}
-    return _err_gen(), meta
 
 
 def main():

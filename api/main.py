@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import time
 from datetime import datetime
-from typing import AsyncIterator, Dict, List, Optional, Set
+from typing import AsyncIterator, Dict, List, Optional, Set, Callable
 import uuid
 import time
 import re
@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from src.query import stream_query_rag, get_available_games
 from src.query import get_stored_game_names  # catalog-based
 from src.services.game_service import delete_games, rename_pdfs, get_pdf_dropdown_choices, delete_pdfs
+from src.services.library_service import refresh_games, rechunk_library, rechunk_selected_pdfs
 from src.services.auth_service import unlock, issue_token, verify_token
 from src.storage_utils import format_storage_info
 
@@ -314,18 +315,98 @@ async def _print_routes_on_startup():
 
 
 @app.get("/games")
-async def list_games():
-    # DB-less: return catalog names only; do not touch DB or trigger refresh
+async def list_games(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Determine role (optional); unauthenticated treated as user
+    role = "user"
+    try:
+        role = _require_auth(authorization, token)
+    except Exception:
+        role = "user"
+    # DB-less: return catalog names only; do not touch DB or trigger refresh, and include per-game progress
     try:
         from src import config as _cfg  # type: ignore
         if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
             try:
                 from src.catalog import list_games_from_catalog  # type: ignore
-                return {"games": list_games_from_catalog()}
+                games = list_games_from_catalog() or []
+                # Build per-PDF status, then aggregate to game progress
+                progress: Dict[str, Dict[str, object]] = {}
+                try:
+                    from pathlib import Path as _P
+                    data = _P(getattr(_cfg, "DATA_PATH", "data"))
+                    try:
+                        from src.pdf_pages import get_page_count  # type: ignore
+                        from src.vector_store import count_processed_pages  # type: ignore
+                    except Exception:
+                        get_page_count = None  # type: ignore
+                        count_processed_pages = None  # type: ignore
+                    # Pre-scan PDFs for status
+                    pdf_status: Dict[str, Dict[str, int]] = {}
+                    for p in sorted([p for p in data.glob("*.pdf") if p.is_file()]):
+                        total = 0
+                        try:
+                            if get_page_count:
+                                total = get_page_count(p)
+                        except Exception:
+                            total = 0
+                        pages_dir = data / p.stem / "1_pdf_pages"
+                        pages_exported = 0
+                        try:
+                            if pages_dir.exists():
+                                pages_exported = sum(1 for x in pages_dir.glob("p*.pdf") if x.is_file() and (x.stat().st_size > 0))
+                        except Exception:
+                            pages_exported = 0
+                        processed_dir = data / p.stem / "3_eval_jsons"
+                        evals_present = 0
+                        try:
+                            if processed_dir.exists():
+                                evals_present = sum(1 for x in processed_dir.glob("p*.json") if x.is_file())
+                        except Exception:
+                            evals_present = 0
+                        chunks_present = 0
+                        try:
+                            if count_processed_pages and total > 0:
+                                chunks_present = count_processed_pages(p.stem, total)
+                        except Exception:
+                            chunks_present = 0
+                        pdf_status[p.name] = {
+                            "total": int(total or 0),
+                            "pages": int(pages_exported or 0),
+                            "evals": int(evals_present or 0),
+                            "chunks": int(chunks_present or 0),
+                        }
+                    # Aggregate per game using catalog mapping
+                    try:
+                        from src.catalog import get_pdf_filenames_for_game  # type: ignore
+                        for g in games:
+                            pdfs = list(get_pdf_filenames_for_game(g) or [])
+                            best_ratio = 0.0
+                            complete_flag = False
+                            for fn in pdfs:
+                                st = pdf_status.get(fn)
+                                if not st:
+                                    continue
+                                tot = max(0, int(st.get("total", 0)))
+                                if tot <= 0:
+                                    continue
+                                r_pages = (st.get("pages", 0) or 0) / float(tot)
+                                r_evals = (st.get("evals", 0) or 0) / float(tot)
+                                r_chunks = (st.get("chunks", 0) or 0) / float(tot)
+                                ratio = max(0.0, min(1.0, min(r_pages, r_evals, r_chunks)))
+                                if ratio > best_ratio:
+                                    best_ratio = ratio
+                                if ratio >= 1.0:
+                                    complete_flag = True
+                            progress[g] = {"complete": bool(complete_flag), "ratio": float(best_ratio)}
+                    except Exception:
+                        pass
+                except Exception:
+                    progress = {}
+                return {"games": games, "progress": progress}
             except Exception:
-                return {"games": []}
+                return {"games": [], "progress": {}}
     except Exception:
-        return {"games": []}
+        return {"games": [], "progress": {}}
 
     # Legacy DB-backed behavior
     try:
@@ -344,7 +425,116 @@ async def list_games():
                     games = games2
         except Exception:
             pass
-    return {"games": games}
+    # Legacy path: also provide progress (same computation as above), do not filter by role
+    try:
+        from src import config as _cfg  # type: ignore
+        from pathlib import Path as _P
+        data = _P(getattr(_cfg, "DATA_PATH", "data"))
+        try:
+            from src.pdf_pages import get_page_count  # type: ignore
+            from src.vector_store import count_processed_pages  # type: ignore
+        except Exception:
+            get_page_count = None  # type: ignore
+            count_processed_pages = None  # type: ignore
+        pdf_status: Dict[str, Dict[str, int]] = {}
+        for p in sorted([p for p in data.glob("*.pdf") if p.is_file()]):
+            total = 0
+            try:
+                if get_page_count:
+                    total = get_page_count(p)
+            except Exception:
+                total = 0
+            pages_dir = data / p.stem / "1_pdf_pages"
+            pages_exported = 0
+            try:
+                if pages_dir.exists():
+                    pages_exported = sum(1 for x in pages_dir.glob("p*.pdf") if x.is_file() and (x.stat().st_size > 0))
+            except Exception:
+                pages_exported = 0
+            processed_dir = data / p.stem / "3_eval_jsons"
+            evals_present = 0
+            try:
+                if processed_dir.exists():
+                    evals_present = sum(1 for x in processed_dir.glob("p*.json") if x.is_file())
+            except Exception:
+                evals_present = 0
+            chunks_present = 0
+            try:
+                if count_processed_pages and total > 0:
+                    chunks_present = count_processed_pages(p.stem, total)
+            except Exception:
+                chunks_present = 0
+            pdf_status[p.name] = {
+                "total": int(total or 0),
+                "pages": int(pages_exported or 0),
+                "evals": int(evals_present or 0),
+                "chunks": int(chunks_present or 0),
+            }
+        progress: Dict[str, Dict[str, object]] = {}
+        # Prefer catalog mapping to associate filenames with games; fall back to stored mapping
+        mapping_ok = False
+        try:
+            from src.catalog import get_pdf_filenames_for_game  # type: ignore
+            for g in games or []:
+                pdfs = list(get_pdf_filenames_for_game(g) or [])
+                best_ratio = 0.0
+                complete_flag = False
+                for fn in pdfs:
+                    st = pdf_status.get(fn)
+                    if not st:
+                        continue
+                    tot = max(0, int(st.get("total", 0)))
+                    if tot <= 0:
+                        continue
+                    r_pages = (st.get("pages", 0) or 0) / float(tot)
+                    r_evals = (st.get("evals", 0) or 0) / float(tot)
+                    r_chunks = (st.get("chunks", 0) or 0) / float(tot)
+                    ratio = max(0.0, min(1.0, min(r_pages, r_evals, r_chunks)))
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                    if ratio >= 1.0:
+                        complete_flag = True
+                progress[g] = {"complete": bool(complete_flag), "ratio": float(best_ratio)}
+            mapping_ok = True
+        except Exception:
+            mapping_ok = False
+        if not mapping_ok:
+            try:
+                from src.query import get_stored_game_names  # type: ignore
+                stored = get_stored_game_names()
+                by_game: Dict[str, list[str]] = {}
+                for fname, gname in (stored or {}).items():
+                    key = str(gname or "").strip()
+                    if not key:
+                        continue
+                    import os as _os
+                    base = _os.path.basename(fname)
+                    by_game.setdefault(key, []).append(base)
+                for g in games or []:
+                    pdfs = by_game.get(g, [])
+                    best_ratio = 0.0
+                    complete_flag = False
+                    for fn in pdfs:
+                        st = pdf_status.get(fn)
+                        if not st:
+                            continue
+                        tot = max(0, int(st.get("total", 0)))
+                        if tot <= 0:
+                            continue
+                        r_pages = (st.get("pages", 0) or 0) / float(tot)
+                        r_evals = (st.get("evals", 0) or 0) / float(tot)
+                        r_chunks = (st.get("chunks", 0) or 0) / float(tot)
+                        ratio = max(0.0, min(1.0, min(r_pages, r_evals, r_chunks)))
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                        if ratio >= 1.0:
+                            complete_flag = True
+                    progress[g] = {"complete": bool(complete_flag), "ratio": float(best_ratio)}
+            except Exception:
+                progress = {}
+        return {"games": games, "progress": progress}
+    except Exception:
+        return {"games": games, "progress": {}}
 
 
 @app.get("/pdf-choices")
@@ -465,6 +655,94 @@ async def section_chunks(section: Optional[str] = None, game: Optional[str] = No
     return {"chunks": []}
 
 
+@app.get("/section-meta")
+async def section_meta(section: Optional[str] = None, game: Optional[str] = None, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth (accept Authorization header or token query param)
+    _ = _require_auth(authorization, token)
+    label = (section or "").strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="missing section label")
+    try:
+        from src import config as _cfg  # type: ignore
+    except Exception:
+        _cfg = None  # type: ignore
+    try:
+        if _cfg and bool(getattr(_cfg, "IS_VECTOR_MODE", False)):
+            from src.vector_store import search_chunks  # type: ignore
+            pdf_filter: Optional[str] = None
+            if game:
+                try:
+                    from src.catalog import get_pdf_filenames_for_game  # type: ignore
+                    files = get_pdf_filenames_for_game(game)
+                    pdf_filter = files[0] if files else None
+                except Exception:
+                    pdf_filter = None
+            # Query a few candidates by the exact section label
+            results = search_chunks(label, pdf=pdf_filter, k=8)
+            best = None  # (file, page_1, anchor_bbox)
+            best_page = None
+            for doc, _score in results:
+                try:
+                    meta = getattr(doc, "metadata", {}) or {}
+                    src = str(meta.get("source") or "")
+                    # Parse per-page section mapping and anchors
+                    import json as _json
+                    sp = {}
+                    try:
+                        sp = _json.loads(meta.get("section_pages") or "{}") or {}
+                    except Exception:
+                        sp = {}
+                    anchors = {}
+                    try:
+                        anchors = _json.loads(meta.get("header_anchors_pct") or "{}") or {}
+                    except Exception:
+                        anchors = {}
+                    # Resolve page by exact section label match
+                    page_1 = None
+                    try:
+                        if label in sp:
+                            page_1 = int(sp.get(label))
+                    except Exception:
+                        page_1 = None
+                    # Fallback: if section appears as a primary section, use this chunk's page_1based
+                    if page_1 is None:
+                        try:
+                            prim = _json.loads(meta.get("primary_sections") or "[]") or []
+                            if label in prim:
+                                try:
+                                    page_1 = int(meta.get("page_1based") or (int(meta.get("page") or 0) + 1))
+                                except Exception:
+                                    page_1 = int(meta.get("page") or 0) + 1
+                        except Exception:
+                            pass
+                    if page_1 is None:
+                        continue
+                    # Choose earliest page across candidates
+                    if best_page is None or (isinstance(page_1, int) and page_1 < best_page):
+                        bbox = None
+                        try:
+                            if isinstance(anchors, dict) and label in anchors:
+                                arr = anchors.get(label)
+                                if isinstance(arr, list) and len(arr) >= 4:
+                                    bbox = [float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])]
+                        except Exception:
+                            bbox = None
+                        best = (src, int(page_1), bbox)
+                        best_page = int(page_1)
+                except Exception:
+                    continue
+            if best:
+                from pathlib import Path as _P
+                src, p1, bbox = best
+                return {"file": _P(src).name, "page": int(p1), "header_anchor_bbox_pct": bbox, "header": label}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # On any server error, do not leak details; treat as not found
+        raise HTTPException(status_code=500, detail=f"error: {e}")
+    # Not found
+    raise HTTPException(status_code=404, detail="section not found")
+
 @app.post("/auth/unlock")
 async def auth_unlock(password: str = Form(...)):
     role = unlock(password)
@@ -562,6 +840,14 @@ async def upload(files: List[UploadFile] = File(...)):
                 choices = get_pdf_choices_from_catalog()
             except Exception:
                 choices = []
+            # After catalog update (extraction/assignment), start a background Pipeline (missing) for the uploaded PDFs
+            try:
+                from pathlib import Path as _P
+                base = _P(getattr(_cfg, "DATA_PATH", "data"))
+                pdfs_abs = [str((base / name).resolve()) for name in saved]
+                _start_pipeline_job_for_pdfs(pdfs_abs, mode="missing")
+            except Exception:
+                pass
             summary = f"✅ Uploaded {len(saved)} PDF(s) successfully" if saved else "Upload complete."
             return {"message": summary, "games": games, "pdf_choices": choices}
     except Exception:
@@ -586,6 +872,16 @@ async def upload(files: List[UploadFile] = File(...)):
             summary = "Upload complete."
     except Exception:
         summary = "Upload complete."
+
+    # After legacy refresh and name extraction, also start a background Pipeline (missing) for the uploaded PDFs
+    try:
+        from pathlib import Path as _P
+        from src import config as _cfg  # type: ignore
+        base = _P(getattr(_cfg, "DATA_PATH", "data"))
+        pdfs_abs = [str((base / name).resolve()) for name in saved]
+        _start_pipeline_job_for_pdfs(pdfs_abs, mode="missing")
+    except Exception:
+        pass
 
     return {"message": summary, "games": games, "pdf_choices": pdf_choices}
 
@@ -834,6 +1130,171 @@ async def admin_rechunk_selected_stream(entries: str):
 # ----------------------------------------------------------------------------
 
 
+_JOBS_REGISTRY: dict[str, dict] = {}
+_JOBS_CLIENTS: list[asyncio.Queue] = []
+# Track running asyncio.Tasks per job and cancellation flags
+_JOBS_TASKS: Dict[str, asyncio.Task] = {}
+_JOBS_CANCEL: Set[str] = set()
+
+
+def _jobs_event(payload: dict) -> bytes:
+    import json as _json
+    return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+async def _jobs_publish(evt: dict) -> None:
+    stale: list[asyncio.Queue] = []
+    data = _jobs_event(evt)
+    for q in list(_JOBS_CLIENTS):
+        try:
+            await q.put(data)
+        except Exception:
+            stale.append(q)
+    for q in stale:
+        try:
+            _JOBS_CLIENTS.remove(q)
+        except Exception:
+            pass
+
+
+def _job_create(step: str, entries: list[str], mode: str) -> str:
+    import uuid, datetime as _dt
+    job_id = uuid.uuid4().hex[:12]
+    _JOBS_REGISTRY[job_id] = {
+        "id": job_id,
+        "step": step,
+        "mode": mode,
+        "entries": entries,
+        "status": "running",
+        "started_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "updated_at": _dt.datetime.utcnow().isoformat() + "Z",
+        "progress": {e: {"state": "pending", "message": ""} for e in entries},
+    }
+    return job_id
+
+
+def _job_update(job_id: str, *, entry: str | None = None, state: str | None = None, message: str | None = None, done: bool = False) -> dict | None:
+    import datetime as _dt
+    job = _JOBS_REGISTRY.get(job_id)
+    if not job:
+        return None
+    job["updated_at"] = _dt.datetime.utcnow().isoformat() + "Z"
+    if entry:
+        prog = job.get("progress", {})
+        cur = prog.get(entry) or {}
+        if state is not None:
+            cur["state"] = state
+        if message is not None:
+            cur["message"] = message
+        prog[entry] = cur
+        job["progress"] = prog
+    if done:
+        job["status"] = "done"
+    return job
+
+
+def _find_running_job(step: str, entries: list[str], mode: str) -> str | None:
+    """Return an existing running job id if the same job (step+mode+entries) is already running.
+    Entries comparison is order-insensitive and based on string equality.
+    """
+    try:
+        normalized = sorted(str(e) for e in (entries or []))
+        for jid, job in list(_JOBS_REGISTRY.items()):
+            try:
+                if not job or job.get("status") == "done":
+                    continue
+                if job.get("step") != step or job.get("mode") != mode:
+                    continue
+                existing_entries = sorted(str(e) for e in (job.get("entries") or []))
+                if existing_entries == normalized:
+                    return jid
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/admin/jobs")
+async def admin_jobs(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    import copy as _copy
+    return {"jobs": list(_copy.deepcopy(_JOBS_REGISTRY).values())}
+
+
+@app.get("/admin/jobs-stream")
+async def admin_jobs_stream(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    queue: asyncio.Queue = asyncio.Queue()
+    _JOBS_CLIENTS.append(queue)
+
+    async def stream():
+        try:
+            # On connect, send a snapshot
+            try:
+                await queue.put(_jobs_event({"type": "snapshot", "jobs": list(_JOBS_REGISTRY.values())}))
+            except Exception:
+                pass
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+                yield data
+        finally:
+            try:
+                _JOBS_CLIENTS.remove(queue)
+            except Exception:
+                pass
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
+
+
+@app.post("/admin/jobs/clear")
+async def admin_jobs_clear(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    # Best-effort: signal cancellation for all running jobs and cancel tasks
+    try:
+        for job_id in list(_JOBS_REGISTRY.keys()):
+            try:
+                _JOBS_CANCEL.add(job_id)
+            except Exception:
+                pass
+        # Cancel any tracked asyncio tasks
+        for job_id, task in list(_JOBS_TASKS.items()):
+            try:
+                if not task.done():
+                    task.cancel()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Clear registries
+    try:
+        _JOBS_TASKS.clear()
+    except Exception:
+        pass
+    try:
+        _JOBS_CANCEL.clear()
+    except Exception:
+        pass
+    try:
+        _JOBS_REGISTRY.clear()
+    except Exception:
+        pass
+    # Broadcast an empty snapshot so clients refresh
+    try:
+        await _jobs_publish({"type": "snapshot", "jobs": []})
+    except Exception:
+        pass
+    return {"message": "Jobs registry cleared"}
+
 @app.get("/admin/pdf-status")
 async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
     _ = _require_auth(authorization, token)
@@ -851,12 +1312,47 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             total = get_page_count(p)
         except Exception:
             pass
-        processed = 0
+        # Count exported page PDFs
+        pages_dir = data / p.stem / "1_pdf_pages"
+        pages_exported = 0
         try:
-            processed = count_processed_pages(p.stem, total)
+            if pages_dir.exists():
+                # Count only valid page files that are non-empty
+                pages_exported = sum(1 for x in pages_dir.glob("p*.pdf") if x.is_file() and (x.stat().st_size > 0))
         except Exception:
-            processed = 0
-        items.append({"filename": p.name, "total_pages": total, "processed_pages": processed})
+            pages_exported = 0
+        # Count analyzed raw outputs
+        analyzed_dir = data / p.stem / "2_llm_analyzed"
+        analyzed_present = 0
+        try:
+            if analyzed_dir.exists():
+                analyzed_present = sum(1 for x in analyzed_dir.glob("p*.raw.txt") if x.is_file() and (x.stat().st_size > 0))
+        except Exception:
+            analyzed_present = 0
+        # Count eval artifacts
+        processed_dir = data / p.stem / "3_eval_jsons"
+        evals_present = 0
+        try:
+            if processed_dir.exists():
+                evals_present = sum(1 for x in processed_dir.glob("p*.json") if x.is_file())
+        except Exception:
+            evals_present = 0
+        # Count chunks in DB
+        chunks_present = 0
+        try:
+            chunks_present = count_processed_pages(p.stem, total)
+        except Exception:
+            chunks_present = 0
+        complete = (pages_exported >= total) and (evals_present >= total) and (chunks_present >= total) and (total > 0)
+        items.append({
+            "filename": p.name,
+            "total_pages": total,
+            "pages_exported": pages_exported,
+            "analyzed_present": analyzed_present,
+            "evals_present": evals_present,
+            "chunks_present": chunks_present,
+            "complete": complete,
+        })
     return {"items": items}
 
 
@@ -864,57 +1360,103 @@ class ProcessSelectedPayload(BaseModel):
     entries: List[str]
 
 
-@app.get("/admin/process-selected-stream")
-async def admin_process_selected_stream(entries: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
-    _ = _require_auth(authorization, token)
-    from src import config as cfg  # type: ignore
+def _parse_entries_list(raw: str) -> List[str]:
     import json as _json
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, list):
+            return [str(x) for x in data]
+    except Exception:
+        pass
+    return [s.strip() for s in (raw or "").split(",") if s.strip()]
+
+
+def _sse_stream_for_scripts(entries: List[str], step: str, mode: str) -> StreamingResponse:
     from pathlib import Path as _P
-
-    def _parse_entries(raw: str) -> List[str]:
-        try:
-            data = _json.loads(raw)
-            if isinstance(data, list):
-                return [str(x) for x in data]
-        except Exception:
-            pass
-        return [s.strip() for s in (raw or "").split(",") if s.strip()]
-
-    selected = _parse_entries(entries)
-    data_dir = _P(cfg.DATA_PATH)
-    pdfs = [str((data_dir / _P(name).name)) for name in selected]
-
-    queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    entry_names = [str(_P(e).name) for e in entries]
+    # Deduplicate: if an identical job is already running, don't start a second one
+    existing = _find_running_job(step, entry_names, mode)
+    if existing:
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        async def already_stream():
+            try:
+                yield _sse_event({"type": "log", "line": f"Job already running: {existing}"}).encode("utf-8")
+            except Exception:
+                pass
+            try:
+                yield _sse_event({"type": "done", "message": "already running"}).encode("utf-8")
+            except Exception:
+                return
+        return StreamingResponse(already_stream(), media_type="text/event-stream", headers=headers)
 
-    async def run_job():
+    job_id = _job_create(step, entry_names, mode)
+    asyncio.create_task(_jobs_publish({"type": "start", "job": _JOBS_REGISTRY.get(job_id)}))
+    async def run_job(queue: asyncio.Queue):
         try:
-            await _admin_log_publish("Processing selected PDFs (per-page)...")
-            for pdf in pdfs:
-                await _admin_log_publish(f"Processing { _P(pdf).name }")
-                # Synchronously run the script in a worker thread to keep SSE responsive
-                code = await asyncio.to_thread(_run_process_pdf_incremental, pdf)
+            await _admin_log_publish(f"{step}: {mode} …")
+            for pdf in entries:
+                p = _P(pdf)
+                # Check cancellation before starting each entry
+                if job_id in _JOBS_CANCEL:
+                    await queue.put(("log", f"⚠️ Job {job_id} cancelled"))
+                    await queue.put(("done", "cancelled"))
+                    await queue.put(("close", ""))
+                    _job_update(job_id, done=True)
+                    await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                    return
+                await _admin_log_publish(f"{step}: {p.name}")
+                def _on_line(ln: str):
+                    try:
+                        loop.call_soon_threadsafe(queue.put_nowait, ("log", ln))
+                        _job_update(job_id, entry=p.name, state="running", message=ln)
+                        loop.call_soon_threadsafe(lambda: asyncio.create_task(_jobs_publish({"type": "progress", "job_id": job_id, "entry": p.name, "line": ln})))
+                    except Exception:
+                        pass
+                # Pass a cancellation checker into the worker thread
+                def _cancel_checker() -> bool:
+                    return job_id in _JOBS_CANCEL
+                code = await asyncio.to_thread(_run_step_script, step, str(pdf), (mode == "all"), _on_line, _cancel_checker)
                 if code != 0:
-                    await queue.put(("log", f"ERROR: { _P(pdf).name } failed (exit {code})"))
-                    break
-                await queue.put(("log", f"{ _P(pdf).name } done"))
+                    await queue.put(("log", f"ERROR: {p.name} failed (exit {code})"))
+                    _job_update(job_id, entry=p.name, state="error", message=f"exit {code}")
+                    await _jobs_publish({"type": "error", "job_id": job_id, "entry": p.name, "exit": code})
+                    await queue.put(("done", "error"))
+                    await queue.put(("close", ""))
+                    _job_update(job_id, done=True)
+                    await _jobs_publish({"type": "done", "job_id": job_id})
+                    return
+                await queue.put(("log", f"{p.name} done"))
+                _job_update(job_id, entry=p.name, state="done", message="done")
+                await _jobs_publish({"type": "progress", "job_id": job_id, "entry": p.name, "state": "done"})
             await queue.put(("done", "ok"))
             await queue.put(("close", ""))
+            _job_update(job_id, done=True)
+            await _jobs_publish({"type": "done", "job_id": job_id})
         except Exception as e:
             await queue.put(("log", f"error: {e}"))
-            await queue.put(("done", "error"))
-            await queue.put(("close", ""))
-
-    def _run_process_pdf_incremental(pdf_path: str) -> int:
-        import subprocess as _sp
-        import sys as _sys
-        from pathlib import Path as __P
-        root = __P(__file__).resolve().parent.parent
-        script = root / "scripts" / "process_pdf_incremental.py"
-        return _sp.call([_sys.executable, str(script), pdf_path])
+            try:
+                await queue.put(("done", "error"))
+                await queue.put(("close", ""))
+            finally:
+                _job_update(job_id, done=True)
+                try:
+                    await _jobs_publish({"type": "done", "job_id": job_id, "error": str(e)})
+                except Exception:
+                    pass
 
     async def event_stream() -> AsyncIterator[bytes]:
-        task = asyncio.create_task(run_job())
+        queue: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(run_job(queue))
+        # Track task for external cancellation
+        try:
+            _JOBS_TASKS[job_id] = task
+        except Exception:
+            pass
         try:
             while True:
                 try:
@@ -931,6 +1473,23 @@ async def admin_process_selected_stream(entries: str, token: Optional[str] = Non
         finally:
             if not task.done():
                 task.cancel()
+                try:
+                    _job_update(job_id, done=True)
+                except Exception:
+                    pass
+                try:
+                    await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                except Exception:
+                    pass
+            # Cleanup
+            try:
+                _JOBS_TASKS.pop(job_id, None)
+            except Exception:
+                pass
+            try:
+                _JOBS_CANCEL.discard(job_id)
+            except Exception:
+                pass
 
     headers = {
         "Cache-Control": "no-cache",
@@ -944,6 +1503,320 @@ async def admin_process_selected_stream(entries: str, token: Optional[str] = Non
         except asyncio.CancelledError:
             return
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
+
+def _run_step_script(step: str, pdf_path: str, force: bool, on_line = None, cancel_checker: Optional[Callable[[], bool]] = None) -> int:
+    import subprocess as _sp
+    import sys as _sys
+    from pathlib import Path as __P
+    root = __P(__file__).resolve().parent.parent
+    if step == "split":
+        script = root / "scripts" / "split_pages.py"
+    elif step == "eval":
+        script = root / "scripts" / "eval_pages.py"
+    elif step == "compute":
+        script = root / "scripts" / "eval_pages.py"
+    elif step == "populate":
+        script = root / "scripts" / "populate_from_processed.py"
+    else:
+        return 1
+    # Run Python in unbuffered mode to stream output lines immediately
+    args = [_sys.executable, "-u", str(script), pdf_path]
+    if force:
+        args.append("--force")
+    # For compute-local, pass a flag to use cached raw only
+    if step == "compute":
+        args.append("--local-only")
+    try:
+        proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, bufsize=1)
+    except Exception:
+        return _sp.call(args)
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if on_line:
+                try:
+                    on_line(line.rstrip())
+                except Exception:
+                    pass
+            # Check for cancellation after each output line and terminate process if requested
+            try:
+                if cancel_checker and cancel_checker():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        return_code = proc.wait(timeout=5)
+                    except Exception:
+                        return_code = 130
+                    return 130 if return_code is None else return_code
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return proc.wait()
+
+
+@app.get("/admin/split-pages-stream")
+async def admin_split_pages_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+    return _sse_stream_for_scripts(pdfs, step="split", mode=("all" if mode == "all" else "missing"))
+
+
+@app.get("/admin/eval-pages-stream")
+async def admin_eval_pages_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+    return _sse_stream_for_scripts(pdfs, step="eval", mode=("all" if mode == "all" else "missing"))
+@app.get("/admin/compute-local-stream")
+async def admin_compute_local_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+    return _sse_stream_for_scripts(pdfs, step="compute", mode=("all" if mode == "all" else "missing"))
+
+
+@app.get("/admin/populate-db-stream")
+async def admin_populate_db_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+    return _sse_stream_for_scripts(pdfs, step="populate", mode=("all" if mode == "all" else "missing"))
+
+
+@app.get("/admin/pipeline-stream")
+async def admin_pipeline_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+
+    loop = asyncio.get_running_loop()
+    entry_names = [str(_P(e).name) for e in pdfs]
+    # Deduplicate: if an identical pipeline job is already running, don't start a second one
+    existing = _find_running_job("pipeline", entry_names, mode)
+    if existing:
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        async def already_stream():
+            try:
+                yield _sse_event({"type": "log", "line": f"Job already running: {existing}"}).encode("utf-8")
+            except Exception:
+                pass
+            try:
+                yield _sse_event({"type": "done", "message": "already running"}).encode("utf-8")
+            except Exception:
+                return
+        return StreamingResponse(already_stream(), media_type="text/event-stream", headers=headers)
+
+    job_id = _job_create("pipeline", entry_names, mode)
+    asyncio.create_task(_jobs_publish({"type": "start", "job": _JOBS_REGISTRY.get(job_id)}))
+    async def run_job(queue: asyncio.Queue):
+        try:
+            for step in ("split", "eval", "populate"):
+                await _admin_log_publish(f"Pipeline step: {step} ({mode})")
+                for pdf in pdfs:
+                    p = _P(pdf)
+                    # Check cancellation before starting each entry
+                    if job_id in _JOBS_CANCEL:
+                        await queue.put(("log", f"⚠️ Job {job_id} cancelled"))
+                        await queue.put(("done", "cancelled"))
+                        await queue.put(("close", ""))
+                        _job_update(job_id, done=True)
+                        await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                        return
+                    await _admin_log_publish(f"{step}: {p.name}")
+                    def _on_line(ln: str):
+                        try:
+                            loop.call_soon_threadsafe(queue.put_nowait, ("log", ln))
+                            _job_update(job_id, entry=f"{step}:{p.name}", state="running", message=ln)
+                            loop.call_soon_threadsafe(lambda: asyncio.create_task(_jobs_publish({"type": "progress", "job_id": job_id, "entry": f"{step}:{p.name}", "line": ln})))
+                        except Exception:
+                            pass
+                    def _cancel_checker() -> bool:
+                        return job_id in _JOBS_CANCEL
+                    code = await asyncio.to_thread(_run_step_script, step, str(pdf), (mode == "all"), _on_line, _cancel_checker)
+                    if code != 0:
+                        await queue.put(("log", f"ERROR: {step} {p.name} failed (exit {code})"))
+                        await queue.put(("done", "error"))
+                        await queue.put(("close", ""))
+                        _job_update(job_id, done=True)
+                        await _jobs_publish({"type": "done", "job_id": job_id, "exit": code})
+                        return
+                    await queue.put(("log", f"{step} {p.name} done"))
+                    _job_update(job_id, entry=f"{step}:{p.name}", state="done", message="done")
+            await queue.put(("done", "ok"))
+            await queue.put(("close", ""))
+            _job_update(job_id, done=True)
+            await _jobs_publish({"type": "done", "job_id": job_id})
+        except Exception as e:
+            await queue.put(("log", f"error: {e}"))
+            try:
+                await queue.put(("done", "error"))
+                await queue.put(("close", ""))
+            finally:
+                _job_update(job_id, done=True)
+                try:
+                    await _jobs_publish({"type": "done", "job_id": job_id, "error": str(e)})
+                except Exception:
+                    pass
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        queue: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(run_job(queue))
+        # Track task for external cancellation
+        try:
+            _JOBS_TASKS[job_id] = task
+        except Exception:
+            pass
+        try:
+            while True:
+                try:
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    _job_update(job_id, done=True)
+                except Exception:
+                    pass
+                try:
+                    await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                except Exception:
+                    pass
+            # Cleanup
+            try:
+                _JOBS_TASKS.pop(job_id, None)
+            except Exception:
+                pass
+            try:
+                _JOBS_CANCEL.discard(job_id)
+            except Exception:
+                pass
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:
+            return
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
+
+def _start_pipeline_job_for_pdfs(pdfs: List[str], mode: str = "missing") -> None:
+    """Start a background Pipeline job (split → eval → populate) for the given PDFs.
+
+    - Uses the same job registry/progress system as the /admin/pipeline-stream endpoint
+    - Non-blocking; returns immediately after scheduling
+    """
+    from pathlib import Path as _P
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # If called outside an event loop, do nothing
+        return
+    entry_names = [str(_P(e).name) for e in (pdfs or [])]
+    if not entry_names:
+        return
+    # Deduplicate: avoid starting identical job if already running
+    existing = _find_running_job("pipeline", entry_names, ("all" if mode == "all" else "missing"))
+    if existing:
+        try:
+            asyncio.create_task(_admin_log_publish(f"Pipeline already running: {existing} ({mode})"))
+        except Exception:
+            pass
+        return
+    job_id = _job_create("pipeline", entry_names, ("all" if mode == "all" else "missing"))
+    asyncio.create_task(_jobs_publish({"type": "start", "job": _JOBS_REGISTRY.get(job_id)}))
+
+    async def run_job():
+        try:
+            for step in ("split", "eval", "populate"):
+                await _admin_log_publish(f"Pipeline step: {step} ({mode})")
+                for pdf in pdfs:
+                    p = _P(pdf)
+                    # Cancellation check
+                    if job_id in _JOBS_CANCEL:
+                        try:
+                            await _admin_log_publish(f"⚠️ Job {job_id} cancelled")
+                        except Exception:
+                            pass
+                        _job_update(job_id, done=True)
+                        await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                        return
+                    await _admin_log_publish(f"{step}: {p.name}")
+                    def _on_line(ln: str):
+                        try:
+                            _job_update(job_id, entry=f"{step}:{p.name}", state="running", message=ln)
+                            loop.call_soon_threadsafe(lambda: asyncio.create_task(_jobs_publish({"type": "progress", "job_id": job_id, "entry": f"{step}:{p.name}", "line": ln})))
+                        except Exception:
+                            pass
+                    def _cancel_checker() -> bool:
+                        return job_id in _JOBS_CANCEL
+                    code = await asyncio.to_thread(_run_step_script, step, str(pdf), (mode == "all"), _on_line, _cancel_checker)
+                    if code != 0:
+                        try:
+                            await _admin_log_publish(f"ERROR: {step} {p.name} failed (exit {code})")
+                        except Exception:
+                            pass
+                        _job_update(job_id, done=True)
+                        await _jobs_publish({"type": "done", "job_id": job_id, "exit": code})
+                        return
+                    _job_update(job_id, entry=f"{step}:{p.name}", state="done", message="done")
+                    await _jobs_publish({"type": "progress", "job_id": job_id, "entry": f"{step}:{p.name}", "state": "done"})
+            _job_update(job_id, done=True)
+            await _jobs_publish({"type": "done", "job_id": job_id})
+        except Exception as e:
+            try:
+                await _admin_log_publish(f"error: {e}")
+            except Exception:
+                pass
+            _job_update(job_id, done=True)
+            try:
+                await _jobs_publish({"type": "done", "job_id": job_id, "error": str(e)})
+            except Exception:
+                pass
+
+    task = asyncio.create_task(run_job())
+    try:
+        _JOBS_TASKS[job_id] = task
+    except Exception:
+        pass
 
 
 @app.post("/admin/clear-selected")
@@ -1017,14 +1890,25 @@ async def admin_delete_pdfs(entries: List[str]):
     # Also return updated catalog listing for the Admin panel
     try:
         from src.catalog import load_catalog  # type: ignore
+        from src import config as _cfg  # type: ignore
+        from pathlib import Path as _P
+        base = _P(getattr(_cfg, "DATA_PATH", "data"))
         cat = load_catalog()
-        entries_out = [{
-            "filename": fname,
-            "file_id": meta.get("file_id"),
-            "game_name": meta.get("game_name"),
-            "size_bytes": meta.get("size_bytes"),
-            "updated_at": meta.get("updated_at"),
-        } for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower())]
+        entries_out = []
+        for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower()):
+            try:
+                # Hide entries whose PDF no longer exists on disk
+                if not (base / fname).exists():
+                    continue
+            except Exception:
+                pass
+            entries_out.append({
+                "filename": fname,
+                "file_id": meta.get("file_id"),
+                "game_name": meta.get("game_name"),
+                "size_bytes": meta.get("size_bytes"),
+                "updated_at": meta.get("updated_at"),
+            })
     except Exception:
         entries_out = []
     return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices, "catalog": entries_out}
@@ -1038,9 +1922,18 @@ async def admin_delete_pdfs(entries: List[str]):
 async def admin_catalog():
     try:
         from src.catalog import load_catalog, list_games_from_catalog  # type: ignore
+        from src import config as _cfg  # type: ignore
+        from pathlib import Path as _P
+        base = _P(getattr(_cfg, "DATA_PATH", "data"))
         cat = load_catalog()
         entries = []
         for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower()):
+            try:
+                # Only include if the PDF exists on disk
+                if not (base / fname).exists():
+                    continue
+            except Exception:
+                pass
             entries.append({
                 "filename": fname,
                 "file_id": meta.get("file_id"),
@@ -1456,7 +2349,7 @@ async def stream_chat(q: str, game: Optional[str] = None, include_web: Optional[
                         except Exception:
                             pass
                     await asyncio.sleep(0)
-            # Include any chunks if available in meta for client-side citation viewing
+            # Include any chunks and allowed citation map for client-side citation viewing
             yield _sse_event({"type": "done", "req": req_id, "meta": meta}).encode("utf-8")
             if echo_tokens:
                 try:

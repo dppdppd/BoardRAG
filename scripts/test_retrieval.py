@@ -37,7 +37,7 @@ def collect_result_info(doc: Any, score: float) -> Dict[str, Any]:
     sec_pages = parse_json_field(meta.get("section_pages"), {}) or {}
     sec_ids = parse_json_field(meta.get("section_ids"), {}) or {}
     anchors = parse_json_field(meta.get("header_anchors_pct"), {}) or {}
-    flags = parse_json_field(meta.get("section_flags"), {}) or {}
+    flags = {}
     boundary = str(meta.get("boundary_header_on_next") or "")
     # Choose a section id for dedupe: prefer first primary section if present
     section_id = ""
@@ -54,6 +54,7 @@ def collect_result_info(doc: Any, score: float) -> Dict[str, Any]:
         "section_pages": sec_pages,
         "section_ids": sec_ids,
         "header_anchors_pct": anchors,
+        # section_flags removed from ingestion; keep empty for backward-compat
         "section_flags": flags,
         "boundary_header_on_next": boundary,
         "section_id": section_id,

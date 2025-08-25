@@ -187,6 +187,53 @@ def ensure_catalog_up_to_date(log: Optional[callable] = None) -> Dict[str, dict]
     return cat
 
 
+def set_page_file_id(pdf_filename: str, page_1based: int, file_id: str, page_pdf_sha256: Optional[str] = None) -> None:
+    """Persist a per-page file_id under the parent PDF entry in the catalog.
+
+    Creates or updates `pages[<1-based>] = { file_id, page_pdf_sha256, updated_at }`.
+    """
+    if not pdf_filename or not file_id:
+        return
+    try:
+        page_key = str(int(page_1based))
+    except Exception:
+        page_key = str(page_1based)
+    cat = load_catalog()
+    entry = cat.get(pdf_filename) or {}
+    pages = entry.get("pages")
+    if not isinstance(pages, dict):
+        pages = {}
+    pages[page_key] = {
+        "file_id": str(file_id),
+        "page_pdf_sha256": str(page_pdf_sha256 or ""),
+        "updated_at": _now_iso(),
+    }
+    entry["pages"] = pages
+    entry["updated_at"] = _now_iso()
+    cat[pdf_filename] = entry
+    save_catalog(cat)
+
+
+def get_page_file_id(pdf_filename: str, page_1based: int) -> Optional[str]:
+    """Return persisted per-page file_id for a given PDF filename and 1-based page, if available."""
+    if not pdf_filename:
+        return None
+    try:
+        page_key = str(int(page_1based))
+    except Exception:
+        page_key = str(page_1based)
+    cat = load_catalog()
+    entry = cat.get(pdf_filename) or {}
+    pages = entry.get("pages")
+    if not isinstance(pages, dict):
+        return None
+    info = pages.get(page_key)
+    if not isinstance(info, dict):
+        return None
+    fid = str(info.get("file_id") or "").strip()
+    return fid or None
+
+
 def list_games_from_catalog() -> List[str]:
     cat = load_catalog()
     names: List[str] = []

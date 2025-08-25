@@ -4,7 +4,14 @@ import React, { useEffect, useRef, useState } from "react";
 import { isLocalhost } from "../../lib/config";
 import { Document, Page } from "react-pdf";
 
-type Chunk = { text: string; source?: string; page?: number; rects_norm?: any };
+type Chunk = { 
+  text: string; 
+  source?: string; 
+  page?: number; 
+  rects_norm?: any; 
+  text_spans?: Array<{[key: string]: number}>; 
+  header_anchor_bbox_pct?: any;
+};
 
 type PdfMeta = { filename?: string; pages?: number };
 
@@ -18,9 +25,10 @@ type Props = {
   targetPage?: number | null;
   adjacentPageWindow?: number; // how many pages on each side of target to render
   anchorNonce?: number; // increments whenever a new anchor action happens
+  anchorRectPct?: [number, number, number, number] | null; // optional fallback anchor bbox from citation
 };
 
-export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, setPdfMeta, targetPage, adjacentPageWindow = 1, anchorNonce }: Props) {
+export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, setPdfMeta, targetPage, adjacentPageWindow = 1, anchorNonce, anchorRectPct }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [centerPage, setCenterPage] = useState<number | null>(null);
   const anchoringRef = useRef<boolean>(false);
@@ -160,6 +168,30 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     ? Array.from({ length: totalPages }, (_v, i) => i + 1)
     : [Number(targetPageResolved) || 1];
   const pageContainerHeight = measuredPageHeight ?? Math.round((containerWidth || 738) * pageAspectRatio);
+  // Inset used when interpreting normalized bbox percentages
+  const CAL_MARGIN_PCT_V = 2.0; // top/bottom inset as % of rendered page height
+  const CAL_MARGIN_PCT_H = 2.0; // left/right inset as % of rendered page width
+
+  const mapCalibratedToCanvas = (
+    w: number,
+    h: number,
+    canvasLeft: number,
+    canvasTop: number,
+    x: number,
+    y: number,
+    bw: number,
+    bh: number,
+  ) => {
+    const availableW = Math.max(1, w * (1 - 2 * (CAL_MARGIN_PCT_H / 100)));
+    const availableH = Math.max(1, h * (1 - 2 * (CAL_MARGIN_PCT_V / 100)));
+    const originLeft = canvasLeft + (CAL_MARGIN_PCT_H / 100) * w;
+    const originTop = canvasTop + (CAL_MARGIN_PCT_V / 100) * h;
+    const left = originLeft + (Math.max(0, y) / 100) * availableW; // y is horizontal
+    const top = originTop + (Math.max(0, x) / 100) * availableH; // x is vertical
+    const width = Math.max(1, (Math.max(0, bw) / 100) * availableW);
+    const height = Math.max(1, (Math.max(0, bh) / 100) * availableH);
+    return { left, top, width, height } as const;
+  };
   const shouldRenderReal = (p: number): boolean => {
     if (typeof effectiveCenter === 'number' && typeof totalPages === 'number') {
       const isAnchoring = anchoringRef.current === true;
@@ -264,35 +296,112 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     const pageTop = offsetTopWithin(pageEl, sc);
     const viewTop = sc.scrollTop;
     
-    // Prefer header anchor from chunk metadata if available first
+    // Check for debug bbox first
     let rect: { top: number; left: number; width: number; height: number } | null = null;
     try {
+      const debugBboxRaw = sessionStorage.getItem('debug_bbox');
+      if (debugBboxRaw) {
+        const debugBbox = JSON.parse(debugBboxRaw);
+        if (debugBbox.active && debugBbox.page === target) {
+          const canvasEl = pageEl.querySelector('canvas') as HTMLCanvasElement;
+          const pageBox = pageEl.getBoundingClientRect();
+          const canvasBox = canvasEl?.getBoundingClientRect();
+          
+          const w = canvasEl?.clientWidth || pageEl.clientWidth || pageBox.width;
+          const h = canvasEl?.clientHeight || pageEl.clientHeight || pageBox.height;
+          const canvasLeft = canvasBox ? (canvasBox.left - pageBox.left) : 0;
+          const canvasTop = canvasBox ? (canvasBox.top - pageBox.top) : 0;
+          const mapped = mapCalibratedToCanvas(w, h, canvasLeft, canvasTop, debugBbox.x, debugBbox.y, debugBbox.w, debugBbox.h);
+          rect = { top: mapped.top, left: mapped.left, width: mapped.width, height: mapped.height };
+          console.log(`[DEBUG BBOX] Applied debug bbox on page ${target}:`, { 
+            debugBbox, 
+            mapped,
+            canvasSize: { w, h },
+            canvasOffset: { canvasLeft, canvasTop }
+          });
+        }
+      }
+    } catch (error) {
+      console.error('[DEBUG BBOX] Error processing debug bbox:', error);
+    }
+
+    // If no debug bbox, prefer header anchor from chunk metadata
+    if (!rect) {
+      try {
       const chunksForPage = byPage(target);
+      console.log(`[calculateBboxAnchor] page=${target}, chunks:`, chunksForPage.length);
+      
       for (const c of chunksForPage) {
-        const anchorsRaw: any = (c as any).header_anchors_pct || (c as any).header_anchors || (c as any).anchors;
+        const targetSection = (c as any).section;
+        console.log(`[calculateBboxAnchor] looking for section:`, targetSection);
+        
+        const anchorsRaw: any = (c as any).header_anchor_bbox_pct || (c as any).header_anchors_pct || (c as any).header_anchors || (c as any).anchors;
         let anchors: Record<string, number[]> | null = null;
         try { anchors = typeof anchorsRaw === 'string' ? JSON.parse(anchorsRaw) : anchorsRaw; } catch { anchors = null; }
+        console.log(`[calculateBboxAnchor] found anchors data:`, anchors);
+        
         if (anchors && typeof anchors === 'object') {
           const names = Object.keys(anchors);
-          if (names.length > 0) {
-            const first = anchors[names[0]] as any;
-            if (Array.isArray(first) && first.length >= 4) {
-              const pageBox = pageEl.getBoundingClientRect();
-              const w = pageEl.clientWidth || pageBox.width;
-              const h = pageEl.clientHeight || pageBox.height;
-              const x = Number(first[0]) || 0; const y = Number(first[1]) || 0; const bw = Number(first[2]) || 0; const bh = Number(first[3]) || 0;
-              const left = (y / 100) * w; // y is left→right
-              const top = (x / 100) * h;  // x is top→bottom
-              const width = Math.max(1, (bw / 100) * w);
-              const height = Math.max(1, (bh / 100) * h);
-              rect = { top, left, width, height } as any;
-              debugLog('performAnchorOnce: using header_anchors_pct', { top, left, width, height });
-              break;
-            }
+          console.log(`[calculateBboxAnchor] anchor keys:`, names);
+          
+          // Try to find anchor for the specific section first
+          let selectedAnchor = null;
+          let selectedKey = null;
+          
+          if (targetSection && anchors[targetSection]) {
+            selectedAnchor = anchors[targetSection];
+            selectedKey = targetSection;
+            console.log(`[calculateBboxAnchor] using specific section anchor:`, selectedKey);
+          } else if (names.length > 0) {
+            selectedAnchor = anchors[names[0]];
+            selectedKey = names[0];
+            console.log(`[calculateBboxAnchor] using first available anchor:`, selectedKey);
+          }
+          
+          if (Array.isArray(selectedAnchor) && selectedAnchor.length >= 4) {
+            const canvasEl = pageEl.querySelector('canvas') as HTMLCanvasElement;
+            const pageBox = pageEl.getBoundingClientRect();
+            const canvasBox = canvasEl?.getBoundingClientRect();
+            
+            // Use canvas dimensions (actual PDF content) instead of page container
+            const w = canvasEl?.clientWidth || pageEl.clientWidth || pageBox.width;
+            const h = canvasEl?.clientHeight || pageEl.clientHeight || pageBox.height;
+            
+            // Calculate position relative to canvas, not page container
+            const canvasLeft = canvasBox ? (canvasBox.left - pageBox.left) : 0;
+            const canvasTop = canvasBox ? (canvasBox.top - pageBox.top) : 0;
+            console.log(`[calculateBboxAnchor] element dimensions:`, {
+              pageElDims: { w: pageEl.clientWidth, h: pageEl.clientHeight },
+              canvasDims: { w: canvasEl?.clientWidth, h: canvasEl?.clientHeight },
+              boundingBox: { w: pageBox.width, h: pageBox.height },
+              finalUsed: { w, h }
+            });
+            const x = Number(selectedAnchor[0]) || 0; 
+            const y = Number(selectedAnchor[1]) || 0; 
+            const bw = Number(selectedAnchor[2]) || 0; 
+            const bh = Number(selectedAnchor[3]) || 0;
+            const mapped = mapCalibratedToCanvas(w, h, canvasLeft, canvasTop, x, y, bw, bh);
+            rect = { top: mapped.top, left: mapped.left, width: mapped.width, height: mapped.height } as any;
+            console.log(`[calculateBboxAnchor] SUCCESS: Found bbox anchor`, { 
+              selectedKey, x, y, bw, bh, 
+              mapped,
+              canvasSize: { w, h },
+              pageRect: pageBox,
+              calculations: {
+                insetH: `${CAL_MARGIN_PCT_H}%`,
+                insetV: `${CAL_MARGIN_PCT_V}%`
+              },
+              canvasOffset: { canvasLeft, canvasTop }
+            });
+            debugLog('performAnchorOnce: using header_anchors_pct', { selectedKey, mapped });
+            break;
           }
         }
       }
-    } catch {}
+    } catch (e) {
+      console.error('[calculateBboxAnchor] error:', e);
+    }
+    } // Close the if (!rect) block
     if (!rect) {
       debugLog('performAnchorOnce: no anchor rect found in chunk data; skipping phase 1 centering');
     }
@@ -300,18 +409,58 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     // Determine scroll behavior: instant for game switches, smooth for regular citations
     const scrollBehavior = isInitialGameLoad ? 'auto' : 'smooth';
     const phase = Number(anchorPhaseRef.current || 0);
+    console.log(`[performAnchorOnce] phase begin: ${phase}, hasRect: ${!!rect}, pageTop: ${pageTop}, viewTop: ${viewTop}`);
     debugLog('performAnchorOnce: phase begin', { phase, hasRect: !!rect, pageTop, viewTop });
 
-    // Phase 0: scroll to page top
+    // Phase 0: if we have a bbox, scroll it near the top (~20%) and add a padded, fading highlight
     if (phase === 0) {
-      const topTo = Math.max(0, pageTop);
+      let topTo = Math.max(0, pageTop);
+      const VIEW_TOP_OFFSET = Math.round(sc.clientHeight * 0.2);
+      if (rect) {
+        topTo = Math.max(0, pageTop + rect.top - VIEW_TOP_OFFSET);
+      }
       programmaticScrollRef.current = true;
       if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
       sc.scrollTo({ top: topTo, behavior: scrollBehavior });
       const delay = scrollBehavior === 'auto' ? 0 : 300;
       programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
-      anchorPhaseRef.current = 1; // next click → center on heading
-      debugLog('performAnchorOnce: phase 0 → scroll page top; next phase=1');
+      // Add highlight overlay if bbox present; strong then fade over 5s
+      if (rect) {
+        try {
+          const existing = pageEl.querySelectorAll('.bbox-highlight, .bbox-highlight-label');
+          existing.forEach(el => el.remove());
+          const pad = Math.max(8, Math.round(rect.height * 0.15));
+          const canvasEl = pageEl.querySelector('canvas') as HTMLCanvasElement;
+          const pageBox = pageEl.getBoundingClientRect();
+          const canvasW = canvasEl?.clientWidth || pageEl.clientWidth || pageBox.width;
+          const canvasH = canvasEl?.clientHeight || pageEl.clientHeight || pageBox.height;
+          const padded = {
+            left: Math.max(0, rect.left - pad),
+            top: Math.max(0, rect.top - pad),
+            width: Math.min(canvasW, rect.width + pad * 2),
+            height: Math.min(canvasH, rect.height + pad * 2),
+          };
+          const highlightDiv = document.createElement('div');
+          highlightDiv.className = 'bbox-highlight';
+          highlightDiv.style.position = 'absolute';
+          highlightDiv.style.left = `${padded.left}px`;
+          highlightDiv.style.top = `${padded.top}px`;
+          highlightDiv.style.width = `${padded.width}px`;
+          highlightDiv.style.height = `${padded.height}px`;
+          highlightDiv.style.backgroundColor = 'rgba(255, 255, 0, 0.5)';
+          highlightDiv.style.boxShadow = '0 0 0 2px rgba(255, 200, 0, 0.95)';
+          highlightDiv.style.transition = 'opacity 5s ease-out';
+          highlightDiv.style.opacity = '1';
+          highlightDiv.style.pointerEvents = 'none';
+          highlightDiv.style.zIndex = '1000';
+          pageEl.appendChild(highlightDiv);
+          requestAnimationFrame(() => { try { highlightDiv.style.opacity = '0'; } catch {} });
+          setTimeout(() => { try { highlightDiv.remove(); } catch {} }, 5200);
+        } catch {}
+      }
+      anchorPhaseRef.current = 2; // ready; next click restarts via nonce
+      console.log(`[performAnchorOnce] phase 0 → scroll to ${rect ? 'bbox near top' : 'page top'}; next phase=2, scrolled to: ${topTo}`);
+      debugLog('performAnchorOnce: phase 0 scroll complete');
       if (retryCount === 0) {
         anchoringRef.current = false;
         setIsInitialGameLoad(false);
@@ -320,26 +469,34 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
       return true;
     }
 
-    // Phase 1: center on heading/citation if available
-    if (phase === 1 && rect) {
+    // Phase 1 unused – positioning and highlight handled in phase 0
+
+    // Phase 2: check if we're still near the anchored position
+    if (phase === 2 && rect) {
       const rectCenterY = pageTop + rect.top + rect.height / 2;
-      const top = Math.max(0, rectCenterY - sc.clientHeight / 2);
-      programmaticScrollRef.current = true;
-      if (programmaticTimerRef.current) { clearTimeout(programmaticTimerRef.current); programmaticTimerRef.current = null; }
-      sc.scrollTo({ top, behavior: scrollBehavior });
-      const delay = scrollBehavior === 'auto' ? 0 : 300;
-      programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, delay);
-      anchorPhaseRef.current = 2; // next click → bump
-      debugLog('performAnchorOnce: phase 1 → center heading; next phase=2', { rectCenterY: rectCenterY, top });
-      if (retryCount === 0) {
-        anchoringRef.current = false;
-        setIsInitialGameLoad(false);
-        setTimeout(() => setPreviousAnchorCenter(null), 500);
+      const expectedScrollTop = Math.max(0, rectCenterY - sc.clientHeight / 2);
+      const currentScrollTop = sc.scrollTop;
+      const scrollTolerance = 50; // pixels
+      
+      if (Math.abs(currentScrollTop - expectedScrollTop) > scrollTolerance) {
+        // User scrolled away, reset to phase 0
+        anchorPhaseRef.current = 0;
+        console.log(`[performAnchorOnce] phase 2 → user scrolled away (${Math.abs(currentScrollTop - expectedScrollTop)}px), reset to phase 0`);
+        // Recursively call with phase 0
+        return performAnchorOnce(retryCount);
+      } else {
+        // Still near anchored position, stay at phase 2
+        console.log(`[performAnchorOnce] phase 2 → staying centered on bbox, no action needed`);
+        debugLog('performAnchorOnce: phase 2 → stay centered on bbox');
+        if (retryCount === 0) {
+          anchoringRef.current = false;
+          setIsInitialGameLoad(false);
+        }
+        return true;
       }
-      return true;
     }
-
-    // Phase 2 or no rect: provide a gentle bump and reset
+    
+    // Phase 2 without rect or other phases: provide a gentle bump and reset
     const currentTop = sc.scrollTop;
     const maxTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
     const bumpUp = Math.max(0, Math.min(maxTop, currentTop - 8));
@@ -351,8 +508,9 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
       sc.scrollTo({ top: settleTop, behavior: 'smooth' });
       programmaticTimerRef.current = setTimeout(() => { programmaticScrollRef.current = false; }, 350);
     }, 120);
-    anchorPhaseRef.current = 0; // reset cycle
-    debugLog('performAnchorOnce: phase 2 → bump and reset');
+    anchorPhaseRef.current = 0; // reset cycle for next citation
+    console.log(`[performAnchorOnce] phase ${phase} → gentle bump, reset to phase 0`);
+    debugLog('performAnchorOnce: phase 2+ → gentle bump, reset to phase 0');
     if (retryCount === 0) {
       anchoringRef.current = false;
       setIsInitialGameLoad(false);
@@ -378,8 +536,10 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
   useEffect(() => {
     const currentNonce = anchorNonce || 0;
     if (prevAnchorNonceRef.current !== currentNonce && prevAnchorNonceRef.current !== 0) {
-      // Anchor nonce changed - this is a citation click, use smooth scrolling
+      // Citation click: ensure we re-run anchoring on this page
       setIsInitialGameLoad(false);
+      anchorPhaseRef.current = 0; // force phase 0 so onRenderSuccess will trigger
+      anchoringRef.current = false; // allow performAnchorOnce to proceed
     }
     prevAnchorNonceRef.current = currentNonce;
   }, [anchorNonce]);
@@ -419,12 +579,37 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
     }
     // If total pages are known, attempt immediately; otherwise wait for render callback
     if (typeof totalPages === 'number' && isFinite(totalPages) && totalPages > 0) {
-      anchorPhaseRef.current = 0;
+      // Only reset phase if we're switching to a different page
+      if (prevTargetPageRef.current !== Number(targetPageResolved)) {
+        anchorPhaseRef.current = 0;
+        console.log(`[useEffect] Switching pages, reset phase to 0`);
+      } else {
+        console.log(`[useEffect] Same page, keeping current phase: ${anchorPhaseRef.current}`);
+      }
       const did = performAnchorOnce();
       // Expand downward only to avoid shifting target content
       setTimeout(() => { setRenderWindowDown(adjacentPageWindow); }, 120);
     }
   }, [anchorNonce, filename, targetPageResolved, totalPages]);
+
+  // Listen for debug bbox updates and refresh highlights
+  useEffect(() => {
+    const handleDebugBboxUpdate = () => {
+      console.log('[PdfPreview] Debug bbox update triggered');
+      // Re-trigger anchoring to apply/remove debug bbox highlights
+      if (targetPageResolved) {
+        anchoringRef.current = false;
+        anchorPhaseRef.current = 0;
+        const success = performAnchorOnce();
+        console.log('[PdfPreview] Debug bbox update result:', success);
+      }
+    };
+
+    window.addEventListener('debugBboxUpdate', handleDebugBboxUpdate);
+    return () => {
+      window.removeEventListener('debugBboxUpdate', handleDebugBboxUpdate);
+    };
+  }, [targetPageResolved]);
 
   return (
     <div ref={rootRef} className="pdf-preview-root">

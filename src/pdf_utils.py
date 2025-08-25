@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Callable, Optional, Tuple, List
+from typing import Callable, Optional, Tuple, List, Dict
 
 import fitz  # PyMuPDF
 
@@ -497,4 +497,169 @@ def find_header_anchor(pdf_path: str | os.PathLike, page_number_1_based: int, he
     except Exception:
         return None
     return None
+
+
+def compute_normalized_header_bbox(
+    pdf_path: str | os.PathLike,
+    page_number_1_based: int,
+    header_text: str,
+    *,
+    cal_margin_pct_h: float = 2.0,
+    cal_margin_pct_v: float = 2.0,
+) -> Tuple[float, float, float, float] | None:
+    """
+    Compute a normalized [x,y,w,h] bbox in [0-100] percentages for the header
+    within a 2% inset frame to avoid page edges.
+
+    - x is vertical from top inset origin; y is horizontal from left inset origin
+    - Uses PyMuPDF word positions; approximates width from the span of header tokens.
+    - Falls back to an estimated width if token matching is poor.
+    """
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return None
+    try:
+        pg_idx = max(1, int(page_number_1_based)) - 1
+    except Exception:
+        return None
+    text_norm = _normalize_search_text(str(header_text or ""))
+    if not text_norm:
+        return None
+    tokens = _tokenize_words_for_match(text_norm)
+    if not tokens:
+        return None
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            if pg_idx < 0 or pg_idx >= len(doc):
+                return None
+            page = doc.load_page(pg_idx)
+            rect = page.rect
+            w = float(rect.width)
+            h = float(rect.height)
+            inset_x = (max(0.0, cal_margin_pct_h) / 100.0) * w
+            inset_y = (max(0.0, cal_margin_pct_v) / 100.0) * h
+            frame_left = rect.x0 + inset_x
+            frame_top = rect.y0 + inset_y
+            frame_w = max(1.0, w - 2 * inset_x)
+            frame_h = max(1.0, h - 2 * inset_y)
+
+            try:
+                words_raw = page.get_text("words")
+            except Exception:
+                words_raw = []
+            words: List[Tuple[float, float, float, float, str, int, int, int]] = []  # type: ignore
+            for wrec in words_raw or []:
+                try:
+                    x0, y0, x1, y1, t, b, l, wn = float(wrec[0]), float(wrec[1]), float(wrec[2]), float(wrec[3]), str(wrec[4]), int(wrec[5]), int(wrec[6]), int(wrec[7])
+                except Exception:
+                    try:
+                        x0 = float(wrec[0]); y0 = float(wrec[1]); x1 = float(wrec[2]); y1 = float(wrec[3]); t = str(wrec[4])
+                        b = int(wrec[5]) if len(wrec) > 5 else 0
+                        l = int(wrec[6]) if len(wrec) > 6 else 0
+                        wn = int(wrec[7]) if len(wrec) > 7 else 0
+                    except Exception:
+                        continue
+                if not t or not t.strip():
+                    continue
+                words.append((x0, y0, x1, y1, t, b, l, wn))
+            words.sort(key=lambda ww: (ww[6], ww[7], ww[5], ww[1], ww[0]))
+
+            # Find a contiguous sequence matching the exact header tokens (case/space/punct-insensitive)
+            header_tokens = tokens
+            def _norm_word(s: str) -> str:
+                import re as _re
+                s2 = (s or "").lower().replace("\u00a0", " ")
+                return _re.sub(r"^[\s\-–—:;,.]+|[\s\-–—:;,.]+$", "", s2)
+            norm_words: List[str] = [_norm_word(wr[4]) for wr in words]
+            mlen = len(header_tokens)
+            i0: Optional[int] = None
+            i1: Optional[int] = None
+            matched_indices: Optional[List[int]] = None
+            if mlen > 0 and len(norm_words) >= mlen:
+                # Pass 1: exact contiguous match
+                for i in range(0, len(norm_words) - mlen + 1):
+                    window = norm_words[i:i+mlen]
+                    if all(a == b.lower() for a, b in zip(window, header_tokens)):
+                        i0, i1 = i, i + mlen - 1
+                        matched_indices = list(range(i0, i1 + 1))
+                        break
+                # Pass 2: allow small gaps across line/block breaks within vertical threshold
+                if i0 is None or i1 is None:
+                    # Estimate allowed vertical jump as ~1.6x median word height
+                    try:
+                        import statistics as _stats
+                        heights = [max(0.5, float(wr[3]) - float(wr[1])) for wr in words]
+                        med_h = _stats.median(heights) if heights else 8.0
+                        allowed_gap = max(6.0, 1.6 * float(med_h))
+                    except Exception:
+                        allowed_gap = 12.0
+                    for i in range(0, len(norm_words)):
+                        cur: List[int] = []
+                        k = 0
+                        last_y: Optional[float] = None
+                        last_line: Optional[int] = None
+                        # Advance j collecting tokens in order; skip non-matching words, but enforce vertical proximity when line changes
+                        for j in range(i, len(norm_words)):
+                            if k >= mlen:
+                                break
+                            if norm_words[j] == header_tokens[k].lower():
+                                y0j = float(words[j][1])
+                                line_j = int(words[j][6]) if len(words[j]) > 6 else None  # type: ignore
+                                if last_y is not None and last_line is not None and line_j is not None:
+                                    if line_j != last_line:
+                                        if abs(y0j - last_y) > allowed_gap:
+                                            # too far; abandon this start
+                                            cur = []
+                                            break
+                                cur.append(j)
+                                last_y = y0j
+                                last_line = line_j
+                                k += 1
+                                if k == mlen:
+                                    break
+                        if k == mlen and cur:
+                            # Ensure tokens are on at most two lines to avoid spanning large blocks
+                            try:
+                                lines_used = len(set(int(words[idx][6]) for idx in cur))
+                            except Exception:
+                                lines_used = 2
+                            if lines_used <= 2:
+                                matched_indices = cur
+                                i0, i1 = cur[0], cur[-1]
+                                break
+            # If no exact contiguous match, try PyMuPDF search_for on the full normalized header
+            if i0 is None or i1 is None or not matched_indices:
+                try:
+                    rects = page.search_for(text_norm)
+                    if rects:
+                        r = rects[0]
+                        y_pct = max(0.0, min(100.0, ((float(r.x0) - frame_left) / frame_w) * 100.0))
+                        x_pct = max(0.0, min(100.0, ((float(r.y0) - frame_top) / frame_h) * 100.0))
+                        w_pct = max(0.2, min(100.0, ((float(r.x1) - float(r.x0)) / frame_w) * 100.0))
+                        h_pct = max(0.2, min(100.0, ((float(r.y1) - float(r.y0)) / frame_h) * 100.0))
+                        return (x_pct, y_pct, w_pct, h_pct)
+                except Exception:
+                    pass
+                return None
+
+            # Union bbox across matched word rectangles (exact words only)
+            xs0 = [float(words[idx][0]) for idx in matched_indices]
+            ys0 = [float(words[idx][1]) for idx in matched_indices]
+            xs1 = [float(words[idx][2]) for idx in matched_indices]
+            ys1 = [float(words[idx][3]) for idx in matched_indices]
+            x0 = min(min(xs0), min(xs1))
+            y0 = min(ys0)
+            x1 = max(max(xs0), max(xs1))
+            y1 = max(ys1)
+            # Convert to normalized percentages within inset frame
+            y_pct = max(0.0, min(100.0, ((x0 - frame_left) / frame_w) * 100.0))
+            x_pct = max(0.0, min(100.0, ((y0 - frame_top) / frame_h) * 100.0))
+            w_pct = max(0.2, min(100.0, ((x1 - x0) / frame_w) * 100.0))
+            h_pct = max(0.2, min(100.0, ((y1 - y0) / frame_h) * 100.0))
+            return (x_pct, y_pct, w_pct, h_pct)
+    except Exception:
+        return None
+    return None
+
 

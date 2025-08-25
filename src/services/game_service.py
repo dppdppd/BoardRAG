@@ -94,37 +94,74 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
             if not matched:
                 failed_names.append(fname)
 
+        # Regardless of whether the PDF file was found above, clear associated artifacts
+        try:
+            safe_base = Path(fname).name
+            stem = Path(safe_base).stem
+            # 1) Clear vector DB chunks
+            try:
+                from ..vector_store import clear_pdf_chunks  # type: ignore
+            except Exception:
+                clear_pdf_chunks = None  # type: ignore
+            if stem:
+                pdf_basename = safe_base if safe_base.lower().endswith(".pdf") else f"{stem}.pdf"
+                try:
+                    if clear_pdf_chunks:
+                        _ = clear_pdf_chunks(pdf_basename)
+                except Exception:
+                    pass
+            # 2) Remove exported page PDFs directory data/<stem>/1_pdf_pages
+            try:
+                pages_dir = data_root / stem / "1_pdf_pages"
+                if pages_dir.exists():
+                    import shutil as _shutil
+                    _shutil.rmtree(pages_dir, ignore_errors=True)
+            except Exception:
+                pass
+            # 3) Remove analyzed/eval directories data/<stem>/2_llm_analyzed and data/<stem>/3_eval_jsons
+            try:
+                proc_dir = data_root / stem / "2_llm_analyzed"
+                if proc_dir.exists():
+                    import shutil as _shutil
+                    _shutil.rmtree(proc_dir, ignore_errors=True)
+                proc_dir = data_root / stem / "3_eval_jsons"
+                if proc_dir.exists():
+                    import shutil as _shutil
+                    _shutil.rmtree(proc_dir, ignore_errors=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # Clean catalog entries referencing deleted files (and selected filenames even if file missing)
     try:
-        if getattr(config, "DB_LESS", True):
-            from ..catalog import load_catalog, save_catalog  # type: ignore
-            cat = load_catalog()
-            keys_to_remove = set()
-            # Remove by actual deleted file basenames
-            for p in deleted_paths:
+        from ..catalog import load_catalog, save_catalog  # type: ignore
+        cat = load_catalog()
+        keys_to_remove = set()
+        # Remove by actual deleted file basenames
+        for p in deleted_paths:
+            try:
+                keys_to_remove.add(Path(p).name)
+            except Exception:
+                pass
+        # Also remove by requested filenames (basename only), even if file wasn't found
+        for name in filenames:
+            try:
+                keys_to_remove.add(Path(name).name)
+            except Exception:
+                pass
+        removed = 0
+        for key in list(keys_to_remove):
+            if key in cat:
                 try:
-                    keys_to_remove.add(Path(p).name)
+                    cat.pop(key, None)
+                    removed += 1
                 except Exception:
                     pass
-            # Also remove by requested filenames (basename only), even if file wasn't found
-            for name in filenames:
-                try:
-                    keys_to_remove.add(Path(name).name)
-                except Exception:
-                    pass
-            removed = 0
-            for key in list(keys_to_remove):
-                if key in cat:
-                    try:
-                        cat.pop(key, None)
-                        removed += 1
-                    except Exception:
-                        pass
-            if removed:
-                save_catalog(cat)
+        if removed:
+            save_catalog(cat)
     except Exception:
         pass
-        # No vector store cleanup in DB-less mode
 
     # Refresh lists
     if hasattr(get_available_games, "_filename_mapping"):

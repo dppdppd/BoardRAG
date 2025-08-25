@@ -15,7 +15,8 @@ def compute_sha256(path: Path) -> str:
 
 def ensure_pages_dir(pdf_path: Path, data_path: Path) -> Path:
     base = pdf_path.stem
-    out_dir = data_path / "pages" / base
+    # New hierarchy: per-PDF folder with ordered step directories
+    out_dir = data_path / base / "1_pdf_pages"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir
 
@@ -45,6 +46,7 @@ def export_single_page_pdfs(pdf_path: Path, pages_dir: Path) -> Tuple[int, List[
     doc = fitz.open(str(pdf_path))
     count = doc.page_count
     out_paths: List[Path] = []
+
     for i in range(count):
         name = f"p{i+1:04}.pdf"
         out = pages_dir / name

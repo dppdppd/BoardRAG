@@ -64,3 +64,5 @@ web/package-lock.json
 
 # Linters and tools
 .ruff_cache/
+
+/temp/
