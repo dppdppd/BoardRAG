@@ -760,19 +760,22 @@ def stream_query_rag(
                 source = str(meta.get('source') or '')
                 page0 = int(meta.get('page') or 0)
                 vi = int(meta.get('visual_importance') or 1)
-                pages_dir = data_dir / "pages" / _P(source).stem
+                # Explicit pages directory: data/<PDF_STEM>/1_pdf_pages
+                pages_dir = data_dir / _P(source).stem / "1_pdf_pages"
                 base_name = _P(source).name
-                # Resolve 1-based filenames
+                # Resolve 1-based filenames using slugged pattern <slug>_pNNNN.pdf
+                from .pdf_pages import page_slug_from_pdf, make_page_filename  # type: ignore
+                slug = page_slug_from_pdf(_P(source))
                 p1_num = (page0 if page0 > 0 else page0 + 1)
-                p1 = pages_dir / f"p{p1_num:04}.pdf"
+                p1 = pages_dir / make_page_filename(slug, p1_num)
                 if not p1.exists():
                     p1_num = page0 + 1
-                    p1 = pages_dir / f"p{p1_num:04}.pdf"
+                    p1 = pages_dir / make_page_filename(slug, p1_num)
                 p2_num = (page0 + 1 if page0 > 0 else page0 + 2)
-                p2 = pages_dir / f"p{p2_num:04}.pdf"
+                p2 = pages_dir / make_page_filename(slug, p2_num)
                 if not p2.exists():
                     p2_num = page0 + 2
-                    p2 = pages_dir / f"p{p2_num:04}.pdf"
+                    p2 = pages_dir / make_page_filename(slug, p2_num)
                 if vi >= 4 and p1.exists():
                     if str(p1) not in seen_attach:
                         attach_paths.append(p1)
@@ -864,9 +867,27 @@ def stream_query_rag(
                     def _sha256(_p):  # type: ignore
                         return ""
 
+                def _resolve_parent_pdf_name_from_page(pth: _P) -> str:
+                    try:
+                        # New layout: .../data/<PDF_STEM>/1_pdf_pages/pNNNN.pdf → <PDF_STEM>.pdf
+                        cand1 = data_dir / (pth.parent.parent.name + ".pdf")
+                        if cand1.exists():
+                            return cand1.name
+                        # Legacy layout: .../data/pages/<PDF_STEM>/pNNNN.pdf → <PDF_STEM>.pdf
+                        cand2 = data_dir / (pth.parent.name + ".pdf")
+                        if cand2.exists():
+                            return cand2.name
+                    except Exception:
+                        pass
+                    # Default best-effort
+                    try:
+                        return pth.parent.parent.name + ".pdf"
+                    except Exception:
+                        return pth.parent.name + ".pdf"
+
                 for p in attach_paths:
                     try:
-                        base_pdf_name = p.parent.name + ".pdf"
+                        base_pdf_name = _resolve_parent_pdf_name_from_page(p)
                         stem = p.stem  # pNNNN
                         p1 = int(stem[1:]) if stem.startswith("p") else 1
                         fid = _get_page_fid(base_pdf_name, p1)

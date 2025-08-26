@@ -162,16 +162,16 @@ def parse_and_enrich_page_json(
         full_text_local = (primary_text_local + "\n\n" + cont_text_local).strip()
     obj["full_text"] = full_text_local
 
-    # Compute code bboxes per section keyed by section_id on the primary page
+    # Compute header bboxes per section via exact section_start search on the primary page
     try:
         sections = obj.get("sections") or []
         page_num = _infer_1based(primary_page_pdf)
         anchors_local: dict[str, list[float]] = {}
         try:
-            from .pdf_utils import compute_normalized_section_code_bbox  # type: ignore
+            from .pdf_utils import compute_normalized_section_start_bbox_exact  # type: ignore
         except Exception:
-            compute_normalized_section_code_bbox = None  # type: ignore
-        if compute_normalized_section_code_bbox is not None:
+            compute_normalized_section_start_bbox_exact = None  # type: ignore
+        if compute_normalized_section_start_bbox_exact is not None:
             for it in sections:
                 if not isinstance(it, dict):
                     continue
@@ -185,7 +185,7 @@ def parse_and_enrich_page_json(
                 if not code or not start:
                     continue
                 try:
-                    bbox = compute_normalized_section_code_bbox(str(primary_page_pdf), 1, code, start)
+                    bbox = compute_normalized_section_start_bbox_exact(str(primary_page_pdf), 1, start)
                 except Exception:
                     bbox = None
                 if bbox and isinstance(bbox, (list, tuple)) and len(bbox) >= 4:

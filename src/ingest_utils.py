@@ -61,6 +61,15 @@ def build_embed_and_metadata(
 					section_titles[sid] = title_val
 				if summary_val:
 					section_summaries[sid] = summary_val
+				# Optional per-section header bbox (normalized pct) from upstream JSON
+				try:
+					bbox = item.get("header_bbox_pct")
+					if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+						x, y, bw, bh = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+						if 0 <= x <= 100 and 0 <= y <= 100 and 0 < bw <= 100 and 0 < bh <= 100:
+							header_anchors[sid] = [x, y, bw, bh]
+				except Exception:
+					pass
 				# Optional spans
 				spans = item.get("text_spans") or []
 				if spans:
@@ -183,15 +192,17 @@ def build_embed_and_metadata(
 		# Graceful failure: omit new fields
 		pass
 
-	# Compute section code bboxes locally keyed by section_id (normalized percentages)
+	# Compute header bboxes per section via exact section_start search on the primary page (normalized percentages)
 	try:
 		from pathlib import Path as _Path
 		from . import config as cfg  # type: ignore
-		from .pdf_utils import compute_normalized_section_code_bbox  # type: ignore
+		from .pdf_utils import compute_normalized_section_start_bbox_exact  # type: ignore
 		data_path = _Path(getattr(cfg, "DATA_PATH", "data"))
 		parent_pdf_name = pdf_filename
 		pages_dir = data_path / _Path(parent_pdf_name).stem / "1_pdf_pages"
-		page_pdf = pages_dir / f"p{page_1based:04}.pdf"
+		from .pdf_pages import page_slug_from_pdf, make_page_filename  # type: ignore
+		slug = page_slug_from_pdf(_Path(parent_pdf_name))
+		page_pdf = pages_dir / make_page_filename(slug, page_1based)
 		anchors_local: Dict[str, List[float]] = {}
 		if page_pdf.exists():
 			# Build maps from new fields
@@ -202,7 +213,7 @@ def build_embed_and_metadata(
 				sec_start_map = {}
 			for code, start in (sec_start_map.items() if isinstance(sec_start_map, dict) else []):
 				try:
-					bbox = compute_normalized_section_code_bbox(str(page_pdf), 1, str(code or ""), str(start or ""))
+					bbox = compute_normalized_section_start_bbox_exact(str(page_pdf), 1, str(start or ""))
 					if bbox:
 						x, y, bw, bh = bbox
 						anchors_local[str(code)] = [float(x), float(y), float(bw), float(bh)]
@@ -245,10 +256,10 @@ def build_embed_and_metadata(
 		return out
 
 	# Expand caps so we can rely on strong keyword/synonym matching
-	qs = _take_strings("search_questions", 8, 140)
+	qs = _take_strings("search_questions", 5, 140)
 	syns = _take_strings("search_synonyms", 20, 50)
-	rules = _take_strings("search_rules", 12, 140)
-	nums = _take_strings("search_numbers", 12, 50)
+	rules = _take_strings("search_rules", 8, 140)
+	# search_numbers dropped per schema change
 	keys = _take_strings("search_keywords", 24, 50)
 	search_lines: list[str] = []
 	for s in qs:
@@ -257,8 +268,6 @@ def build_embed_and_metadata(
 		search_lines.append(f"SYN: {s}")
 	for s in rules:
 		search_lines.append(f"R: {s}")
-	for s in nums:
-		search_lines.append(f"N: {s}")
 	for s in keys:
 		search_lines.append(f"KW: {s}")
 	search_block = ""

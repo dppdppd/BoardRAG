@@ -45,7 +45,7 @@ def main() -> int:
 		except Exception as e:
 			print(f"WARN: failed to clear existing chunks: {e}")
 
-	artifacts = sorted(processed_dir.glob("p*.json"))
+	artifacts = sorted(processed_dir.glob("*.json"))
 	if not artifacts:
 		print("No artifacts found")
 		return 0

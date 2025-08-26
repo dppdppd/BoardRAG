@@ -857,3 +857,85 @@ def compute_normalized_section_code_bbox(
     return None
 
 
+
+def compute_normalized_section_start_bbox_exact(
+    pdf_path: str | os.PathLike,
+    page_number_1_based: int,
+    section_start: str,
+    *,
+    cal_margin_pct_h: float = 2.0,
+    cal_margin_pct_v: float = 2.0,
+) -> Tuple[float, float, float, float] | None:
+    """Compute a normalized bbox [x,y,w,h] (percent) for a section_start line using
+    exact PDF text search on the given page. No fallbacks or alternative methods.
+
+    - Uses PyMuPDF page.search_for(section_start)
+    - Merges adjacent span rects on the same line into one logical rectangle
+    - Returns the first merged match as [x,y,w,h] in percent within a 2% inset frame
+    """
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        return None
+    try:
+        pg_idx = max(1, int(page_number_1_based)) - 1
+    except Exception:
+        return None
+    target = (section_start or "").strip()
+    if not target:
+        return None
+    try:
+        with fitz.open(str(pdf_path)) as doc:
+            if pg_idx < 0 or pg_idx >= len(doc):
+                return None
+            page = doc.load_page(pg_idx)
+            rect = page.rect
+            W = float(rect.width)
+            H = float(rect.height)
+            inset_x = (max(0.0, cal_margin_pct_h) / 100.0) * W
+            inset_y = (max(0.0, cal_margin_pct_v) / 100.0) * H
+            frame_left = rect.x0 + inset_x
+            frame_top = rect.y0 + inset_y
+            frame_w = max(1.0, W - 2 * inset_x)
+            frame_h = max(1.0, H - 2 * inset_y)
+
+            try:
+                rects = page.search_for(target)
+            except Exception:
+                rects = []
+            if not rects:
+                return None
+            # Merge adjacent rects on the same line into a single logical hit
+            merged: list[tuple[float, float, float, float]] = []
+            rects_sorted = sorted(rects, key=lambda rr: (float(rr.y0), float(rr.x0)))
+            def _close(a: float, b: float, tol: float) -> bool:
+                return abs(a - b) <= tol
+            for r in rects_sorted:
+                x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                if not merged:
+                    merged.append((x0, y0, x1, y1))
+                    continue
+                px0, py0, px1, py1 = merged[-1]
+                same_line = _close(y0, py0, tol=2.0) or _close(y1, py1, tol=2.0)
+                gap_tol = max(6.0, 0.1 * max(1.0, py1 - py0))
+                contiguous = (x0 - px1) <= gap_tol
+                if same_line and contiguous:
+                    nx0 = min(px0, x0)
+                    ny0 = min(py0, y0)
+                    nx1 = max(px1, x1)
+                    ny1 = max(py1, y1)
+                    merged[-1] = (nx0, ny0, nx1, ny1)
+                else:
+                    merged.append((x0, y0, x1, y1))
+            if not merged:
+                return None
+            x0, y0, x1, y1 = merged[0]
+            # Normalize to inset frame percentages (x=top, y=left convention)
+            x_pct = max(0.0, min(100.0, ((y0 - frame_top) / frame_h) * 100.0))
+            y_pct = max(0.0, min(100.0, ((x0 - frame_left) / frame_w) * 100.0))
+            w_pct = max(0.2, min(100.0, ((x1 - x0) / frame_w) * 100.0))
+            h_pct = max(0.2, min(100.0, ((y1 - y0) / frame_h) * 100.0))
+            return (x_pct, y_pct, w_pct, h_pct)
+    except Exception:
+        return None
+    return None

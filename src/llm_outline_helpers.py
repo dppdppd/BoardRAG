@@ -217,7 +217,8 @@ def upload_pdf_to_anthropic_files(api_key: str, pdf_path: str, *, retries: int =
         try:
             with open(pdf_path, "rb") as f:
                 files = {"file": (os.path.basename(pdf_path), f, "application/pdf")}
-                resp = requests.post(url, headers=headers, files=files, timeout=180)
+                data = {"purpose": "input"}
+                resp = requests.post(url, headers=headers, files=files, data=data, timeout=180)
             if resp.status_code >= 400:
                 # Include response body for user to diagnose; no retry by default
                 last_err = RuntimeError(f"upload failed: {resp.status_code} {resp.text[:1000]}")
@@ -278,23 +279,17 @@ def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: st
     import time as _time
     last_err: Exception | None = None
     for attempt in range(3):
-        try:
-            resp = requests.post(url, headers=headers, json=body, timeout=180)
-            if resp.status_code in (429,) or resp.status_code >= 500:
-                last_err = RuntimeError(f"messages (file_id) {resp.status_code}: {resp.text[:1000]}")
-                if attempt < 2:
-                    _time.sleep(2 ** attempt)
-                    continue
-                resp.raise_for_status()
-            resp.raise_for_status()
-            js = resp.json()
-            break
-        except Exception as e:
-            last_err = e
+        resp = requests.post(url, headers=headers, json=body, timeout=180)
+        if resp.status_code in (429,) or resp.status_code >= 500:
+            last_err = RuntimeError(f"messages (file_id) {resp.status_code}: {resp.text[:1000]}")
             if attempt < 2:
                 _time.sleep(2 ** attempt)
                 continue
-            raise
+            raise last_err
+        if resp.status_code >= 400:
+            raise RuntimeError(f"messages (file_id) {resp.status_code}: {resp.text[:1000]}")
+        js = resp.json()
+        break
     parts = js.get("content") or []
     texts = []
     for p in parts:
@@ -317,7 +312,6 @@ def anthropic_pdf_messages_with_files(api_key: str, model: str, system_prompt: s
         content.append({
             "type": "document",
             "source": {"type": "file", "file_id": fid},
-            "citations": {"enabled": True},
         })
     content.append({"type": "text", "text": user_prompt})
     body = {
@@ -330,28 +324,23 @@ def anthropic_pdf_messages_with_files(api_key: str, model: str, system_prompt: s
     import time as _time
     last_err: Exception | None = None
     for attempt in range(3):
-        try:
-            resp = requests.post(url, headers=headers, json=body, timeout=180)
-            if resp.status_code in (429,) or resp.status_code >= 500:
-                last_err = RuntimeError(f"messages (files) {resp.status_code}: {resp.text[:1000]}")
-                if attempt < 2:
-                    _time.sleep(2 ** attempt)
-                    continue
-                resp.raise_for_status()
-            resp.raise_for_status()
-            js = resp.json()
-            parts = js.get("content") or []
-            texts: List[str] = []
-            for p in parts:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    texts.append(str(p.get("text") or ""))
-            return "\n".join(texts).strip()
-        except Exception as e:
-            last_err = e
+        resp = requests.post(url, headers=headers, json=body, timeout=180)
+        if resp.status_code in (429,) or resp.status_code >= 500:
+            last_err = RuntimeError(f"messages (files) {resp.status_code}: {resp.text[:1000]}")
             if attempt < 2:
                 _time.sleep(2 ** attempt)
                 continue
-            raise
+            raise last_err
+        if resp.status_code >= 400:
+            raise RuntimeError(f"messages (files) {resp.status_code}: {resp.text[:1000]}")
+        js = resp.json()
+        parts = js.get("content") or []
+        texts: List[str] = []
+        for p in parts:
+            if isinstance(p, dict) and p.get("type") == "text":
+                texts.append(str(p.get("text") or ""))
+        return "\n".join(texts).strip()
+    raise RuntimeError(f"messages (files) failed: {last_err}")
     raise RuntimeError(f"Anthropic messages with files failed: {last_err}")
 
 
@@ -384,7 +373,6 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
                     {
                         "type": "document",
                         "source": {"type": "file", "file_id": file_id},
-                        "citations": {"enabled": True},
                     },
                     {"type": "text", "text": user_prompt},
                 ],
@@ -504,7 +492,6 @@ def anthropic_pdf_messages_with_pages_stream(api_key: str, model: str, system_pr
             content_blocks.append({
                 "type": "document",
                 "source": {"type": "base64", "media_type": "application/pdf", "data": data_b64},
-                "citations": {"enabled": True},
             })
         except Exception:
             continue

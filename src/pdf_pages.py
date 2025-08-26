@@ -5,6 +5,50 @@ from pathlib import Path
 from typing import Tuple, List
 
 
+def _slugify(text: str) -> str:
+    s = (text or "").lower()
+    out = []
+    prev_dash = False
+    for ch in s:
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        else:
+            if not prev_dash:
+                out.append("-")
+                prev_dash = True
+    slug = "".join(out).strip("-")
+    return slug or "file"
+
+
+def page_slug_from_pdf(pdf_path: Path) -> str:
+    return _slugify(pdf_path.stem)
+
+
+def make_page_filename(slug: str, page_1based: int) -> str:
+    return f"{slug}_p{max(1, int(page_1based)):04}.pdf"
+
+
+def parse_page_1based_from_name(name: str) -> int:
+    try:
+        base = Path(name).stem
+        # Expect pattern: <slug>_pNNNN
+        idx = base.rfind("_p")
+        if idx >= 0 and idx + 6 <= len(base):
+            num = int(base[idx+2:idx+6])
+            return max(1, num)
+    except Exception:
+        pass
+    try:
+        # Fallback: legacy pNNNN
+        base = Path(name).stem
+        if base.startswith("p"):
+            return max(1, int(base[1:]))
+    except Exception:
+        pass
+    return 1
+
+
 def compute_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -46,9 +90,10 @@ def export_single_page_pdfs(pdf_path: Path, pages_dir: Path) -> Tuple[int, List[
     doc = fitz.open(str(pdf_path))
     count = doc.page_count
     out_paths: List[Path] = []
+    slug = page_slug_from_pdf(pdf_path)
 
     for i in range(count):
-        name = f"p{i+1:04}.pdf"
+        name = make_page_filename(slug, i + 1)
         out = pages_dir / name
         if not out.exists():
             single = fitz.open()

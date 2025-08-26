@@ -354,14 +354,14 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                         pages_exported = 0
                         try:
                             if pages_dir.exists():
-                                pages_exported = sum(1 for x in pages_dir.glob("p*.pdf") if x.is_file() and (x.stat().st_size > 0))
+                                pages_exported = sum(1 for x in pages_dir.glob("*.pdf") if x.is_file() and (x.stat().st_size > 0))
                         except Exception:
                             pages_exported = 0
                         processed_dir = data / p.stem / "3_eval_jsons"
                         evals_present = 0
                         try:
                             if processed_dir.exists():
-                                evals_present = sum(1 for x in processed_dir.glob("p*.json") if x.is_file())
+                                evals_present = sum(1 for x in processed_dir.glob("*.json") if x.is_file())
                         except Exception:
                             evals_present = 0
                         chunks_present = 0
@@ -449,14 +449,14 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
             pages_exported = 0
             try:
                 if pages_dir.exists():
-                    pages_exported = sum(1 for x in pages_dir.glob("p*.pdf") if x.is_file() and (x.stat().st_size > 0))
+                    pages_exported = sum(1 for x in pages_dir.glob("*.pdf") if x.is_file() and (x.stat().st_size > 0))
             except Exception:
                 pages_exported = 0
             processed_dir = data / p.stem / "3_eval_jsons"
             evals_present = 0
             try:
                 if processed_dir.exists():
-                    evals_present = sum(1 for x in processed_dir.glob("p*.json") if x.is_file())
+                    evals_present = sum(1 for x in processed_dir.glob("*.json") if x.is_file())
             except Exception:
                 evals_present = 0
             chunks_present = 0
@@ -1427,7 +1427,7 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
         try:
             if pages_dir.exists():
                 # Count only valid page files that are non-empty
-                pages_exported = sum(1 for x in pages_dir.glob("p*.pdf") if x.is_file() and (x.stat().st_size > 0))
+                pages_exported = sum(1 for x in pages_dir.glob("*.pdf") if x.is_file() and (x.stat().st_size > 0))
         except Exception:
             pages_exported = 0
         # Count analyzed raw outputs
@@ -1435,7 +1435,7 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
         analyzed_present = 0
         try:
             if analyzed_dir.exists():
-                analyzed_present = sum(1 for x in analyzed_dir.glob("p*.raw.txt") if x.is_file() and (x.stat().st_size > 0))
+                analyzed_present = sum(1 for x in analyzed_dir.glob("*.raw.txt") if x.is_file() and (x.stat().st_size > 0))
         except Exception:
             analyzed_present = 0
         # Count eval artifacts
@@ -1443,7 +1443,7 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
         evals_present = 0
         try:
             if processed_dir.exists():
-                evals_present = sum(1 for x in processed_dir.glob("p*.json") if x.is_file())
+                evals_present = sum(1 for x in processed_dir.glob("*.json") if x.is_file())
         except Exception:
             evals_present = 0
         # Count chunks in DB

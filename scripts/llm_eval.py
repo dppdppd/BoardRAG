@@ -16,7 +16,7 @@ if str(_repo) not in sys.path:
     sys.path.insert(0, str(_repo))
 
 from src import config as cfg  # type: ignore
-from src.pdf_pages import ensure_pages_dir, compute_sha256
+from src.pdf_pages import ensure_pages_dir, compute_sha256, parse_page_1based_from_name
 from src.llm_outline_helpers import load_pdf_pages
 from src.llm_page_extract import extract_page_json
 from src.page_postprocess import parse_and_enrich_page_json
@@ -26,7 +26,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Run LLM extraction for a PDF and write per-page JSON artifacts (LLM mode)")
     ap.add_argument("pdf", type=str, help="PDF filename under DATA_PATH or absolute path")
     ap.add_argument("--force", action="store_true", help="Re-evaluate all pages (overwrite)")
-    ap.add_argument("--workers", type=int, default=16, help="Parallel workers for page extraction")
+    ap.add_argument("--workers", type=int, default=20, help="Parallel workers for page extraction")
     args = ap.parse_args()
 
     pdf_arg = Path(args.pdf)
@@ -42,7 +42,7 @@ def main() -> int:
 
     pages_dir = ensure_pages_dir(pdf_path, Path(cfg.DATA_PATH))
     # Do not backfill pages here. Only operate on existing page PDFs.
-    page_paths = sorted(pages_dir.glob("p*.pdf"))
+    page_paths = sorted(pages_dir.glob("*.pdf"))
     pdf_hash = compute_sha256(pdf_path)
     base_dir = Path(cfg.DATA_PATH) / pdf_path.stem
     analyzed_dir = base_dir / "2_llm_analyzed"
@@ -55,13 +55,13 @@ def main() -> int:
     # If forcing, remove existing per-page JSON artifacts to ensure a clean run
     if args.force:
         # Clear structured eval outputs
-        for fp in sorted(eval_dir.glob("p*.json")):
+        for fp in sorted(eval_dir.glob("*.json")):
             try:
                 fp.unlink()
             except Exception:
                 pass
         # Clear cached raw LLM outputs so we re-call the LLM
-        for rp in sorted(analyzed_dir.glob("p*.raw.txt")):
+        for rp in sorted(analyzed_dir.glob("*.raw.txt")):
             try:
                 rp.unlink()
             except Exception:
@@ -73,9 +73,8 @@ def main() -> int:
     indexed_pages = []
     for p in page_paths:
         try:
-            stem = p.stem
-            if stem.startswith("p"):
-                num = int(stem[1:])
+            num = parse_page_1based_from_name(p.name)
+            if num is not None:
                 indexed_pages.append((num, p))
         except Exception:
             continue
@@ -84,7 +83,8 @@ def main() -> int:
     # Build worklist
     work: list[Tuple[int, Path]] = []
     for page_num, page_pdf in indexed_pages:
-        raw_path = analyzed_dir / f"p{page_num:04}.raw.txt"
+        # Raw artifacts are saved using the page PDF stem (slugged)
+        raw_path = analyzed_dir / f"{page_pdf.stem}.raw.txt"
         raw_exists = raw_path.exists() and raw_path.stat().st_size > 0
         if raw_exists and not args.force:
             print(f"Skip p{page_num}: raw exists (2_llm_analyzed/{raw_path.name}); use --force to refresh")
@@ -123,7 +123,8 @@ def main() -> int:
                 page_num = n
             if success:
                 ok += 1
-                print(f"[llm-eval] saved raw 2_llm_analyzed/p{page_num:04}.raw.txt")
+                # Report the actual filename saved
+                print(f"[llm-eval] saved raw 2_llm_analyzed/{p.stem}.raw.txt")
             else:
                 err += 1
                 print(f"ERROR: LLM extract failed p{page_num}: {msg}")

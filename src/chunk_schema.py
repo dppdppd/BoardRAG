@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
 
-SCHEMA_VERSION = "v2.2"
+SCHEMA_VERSION = "v2.3"
 
 
 @dataclass

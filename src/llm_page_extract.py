@@ -30,14 +30,17 @@ def build_user_prompt(page_num_1based: int) -> str:
         "   - Treat lines like '21. DEMOLITION CHARGES' as a parent section, and include each child header that appears on the page (e.g., '21.1', '21.2', '21.3', '21.4'), each as its own sections[] entry.\n"
         "   - Recognize headers even if the title ends with a colon ':'; exclude the colon from the header text.\n"
         "   - Use regex at line starts to ensure coverage: match ^[A-Za-z]?\\d+(?:[./][A-Za-z0-9]+)*\\b for codes like '21.1', 'A10.2b', '3.1.2', '6/3'. If such a line exists, it MUST be included in sections.\n"
+        "\nSPECIAL CASE — TABLE OF CONTENTS / INDEX PAGES:\n"
+        "- If this page contains a contents/index page (many lines with dot leaders and an ending page number, e.g., '2. Game Parts .... 3'), DO NOT enumerate those listing lines as sections.\n"
+        f"- Instead, return exactly one sections[] item summarizing the table of contents or index: set section_id='toc', section_id_2='toc-summary', section_start='TABLE OF CONTENTS', title='Table of Contents', page={page_num_1based}.\n"
+        "- Only include this single synthetic TOC section and omit all the individual listing entries.\n"
         "3) Write \"summary\" as a comprehensive overview for identifying the relevant material; it should cover all of the topics on the page.\n"
         "   Additionally, include per-section \"summary\" fields (one sentence each) in sections[].\n"
         "4) Derive concise search aids from the page content only (no invention):\n"
-        "   - search_questions: 6–8 short user questions (<= 140 chars) like 'How do I …', 'When can I …'\n"
-        "   - search_synonyms: 30-50 short alias lines (<= 50 chars), e.g., 'range = distance'\n"
-        "   - search_rules: 10-20 trigger→outcome lines (<= 140 chars), e.g., 'If X then Y'\n"
-        "   - search_numbers: 10-20 key numeric facts normalized (<= 50 chars), e.g., 'hand limit: 6'\n"
-        "   - search_keywords: 10-50 core terms/phrases users might search that appear on this page (<= 50 chars each). Include common morphological variants and standard abbreviations, e.g., ['leader', 'leaders', 'squad leader', 'SL'].\n"
+        "   - search_questions: up to 5 short user questions (<= 140 chars) like 'How do I …', 'When can I …'\n"
+        "   - search_synonyms: up to 20 short alias lines (<= 50 chars), e.g., 'range = distance'\n"
+        "   - search_rules: 5–8 trigger→outcome lines (<= 140 chars), e.g., 'If X then Y'\n"
+        "   - search_keywords: up to 24 core terms/phrases users might search that appear on this page (<= 50 chars each). Include common morphological variants and standard abbreviations, e.g., ['leader', 'leaders', 'squad leader', 'SL'].\n"
         "\nCONSTRAINTS:\n"
         f"- sections[].page must equal the page where that header appears ({page_num_1based} or {next_page}).\n"
         "\nOUTPUT (single JSON object only; strict JSON, no prose):\n"
@@ -50,7 +53,6 @@ def build_user_prompt(page_num_1based: int) -> str:
         "  \"search_questions\": string[],\n"
         "  \"search_synonyms\": string[],\n"
         "  \"search_rules\": string[],\n"
-        "  \"search_numbers\": string[],\n"
         "  \"search_keywords\": string[]\n"
         "}\n"
         "\nRESPONSE RULES (critical):\n"
@@ -83,13 +85,10 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
 
     # Prefer a single Messages API call that includes both PDFs as separate document blocks.
     system_prompt = "You extract structured data from boardgame PDF pages. Be precise and faithful to the page text."
-    user_prompt = build_user_prompt(page_num_1based=_infer_1based(primary_page_pdf))
+    from .pdf_pages import parse_page_1based_from_name  # type: ignore
+    user_prompt = build_user_prompt(page_num_1based=parse_page_1based_from_name(primary_page_pdf.name))
 
-    # Compose a minimal merged text appendix to bias outputs without breaking rules
-    appendix = (
-        "\n\n[TEXT APPENDIX]\n"
-        "=== PAGE 1 TEXT (PRIMARY) ===\n" + (primary_text or "")
-    )
+    # No additional text appendix; we attach the page via Files API
 
     # Single call path: attach one or two PDFs as document blocks (fallback)
     from base64 import b64encode
@@ -115,16 +114,22 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
         return {
             "type": "document",
             "source": {"type": "base64", "media_type": "application/pdf", "data": data_b64},
-            "citations": {"enabled": True},
         }
 
     content_blocks = [_doc_block(primary_page_pdf)]
-    content_blocks.append({"type": "text", "text": user_prompt + appendix})
+    content_blocks.append({"type": "text", "text": user_prompt})
 
-    # Prefer using persisted file_id from catalog; if missing, upload, else fallback to base64
+    # Resolve the actual parent PDF filename from the page path.
+    def _resolve_parent_pdf_name() -> str:
+        # Uniform structure: data/<PDF_STEM>/1_pdf_pages/<slug>_pNNNN.pdf → <PDF_STEM>.pdf
+        try:
+            return primary_page_pdf.parent.parent.name + ".pdf"
+        except Exception:
+            return primary_page_pdf.parent.name + ".pdf"
+    parent_pdf_name = _resolve_parent_pdf_name()
+    page_num_1based = parse_page_1based_from_name(primary_page_pdf.name)
+    # Files API policy: use existing file_id from catalog; else upload page PDF and store id
     shared_fids: Optional[list[str]] = None
-    parent_pdf_name = primary_page_pdf.parent.name + ".pdf"
-    page_num_1based = _infer_1based(primary_page_pdf)
     try:
         from .catalog import get_page_file_id as _get_page_fid  # type: ignore
         fid0 = _get_page_fid(parent_pdf_name, page_num_1based)
@@ -132,29 +137,13 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
             shared_fids = [fid0]
     except Exception:
         shared_fids = None
-    # If not in catalog, attempt one upload to get a reusable file_id
     if not shared_fids:
-        try:
-            from .llm_outline_helpers import upload_pdf_to_anthropic_files  # type: ignore
-            fids: list[str] = [upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))]
-            shared_fids = fids
-            try:
-                print(f"[anthropic] uploaded files: {','.join(fids)}")
-            except Exception:
-                pass
-            # Persist per-page file_id in catalog for later reuse on visual queries
-            try:
-                from .catalog import set_page_file_id  # type: ignore
-                from .pdf_pages import compute_sha256 as _sha256  # type: ignore
-                page_hash = _sha256(primary_page_pdf)
-                set_page_file_id(parent_pdf_name, page_num_1based, fids[0], page_hash)
-            except Exception:
-                pass
-        except Exception as _e_upload:
-            try:
-                print(f"[anthropic] files upload failed; falling back to base64: {_e_upload}")
-            except Exception:
-                pass
+        from .llm_outline_helpers import upload_pdf_to_anthropic_files  # type: ignore
+        from .catalog import set_page_file_id  # type: ignore
+        from .pdf_pages import compute_sha256 as _sha256  # type: ignore
+        fid_new = upload_pdf_to_anthropic_files(api_key, str(primary_page_pdf))
+        set_page_file_id(parent_pdf_name, page_num_1based, fid_new, _sha256(primary_page_pdf))
+        shared_fids = [fid_new]
 
     def _send_and_collect_text(
         req_blocks: list[dict],
@@ -217,16 +206,16 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
                     try:
                         from .catalog import set_page_file_id  # type: ignore
                         from .pdf_pages import compute_sha256 as _sha256  # type: ignore
-                        parent_pdf_name = primary_page_pdf.parent.name + ".pdf"
-                        page_num_1based = _infer_1based(primary_page_pdf)
+                        parent_pdf_name_local = _resolve_parent_pdf_name()
+                        page_num_1based = parse_page_1based_from_name(primary_page_pdf.name)
                         page_hash = _sha256(primary_page_pdf)
-                        set_page_file_id(parent_pdf_name, page_num_1based, fids[0], page_hash)
+                        set_page_file_id(parent_pdf_name_local, page_num_1based, fids[0], page_hash)
                     except Exception:
                         pass
                     txt = anthropic_pdf_messages_with_files(api_key, model, sys_msg, user_suffix_text, fids)
                     return txt, fids
                 except Exception as e:
-                    raise RuntimeError(f"Anthropic base64 messages {resp.status_code}: {err_text}; Files fallback failed: {e}")
+                    raise RuntimeError(f"Anthropic messages {resp.status_code}: {err_text}; Files fallback failed: {e}")
             raise RuntimeError(f"Anthropic messages {resp.status_code}: {err_text}")
         js = resp.json()
         parts = js.get("content") or []
@@ -242,15 +231,10 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
         json_raw = str(raw_override)
     else:
         json_user_prompt = user_prompt
-        # Prefer Files API if we have file_ids; else fall back to base64 doc blocks
-        if shared_fids:
-            json_raw, _ = _send_and_collect_text(
-                [], system_prompt, json_user_prompt, existing_file_ids=shared_fids
-            )
-        else:
-            json_raw, _ = _send_and_collect_text(
-                content_blocks[:-1], system_prompt, json_user_prompt, existing_file_ids=None
-            )
+        # Use Files API with the resolved/uploaded file_id
+        json_raw, _ = _send_and_collect_text(
+            [], system_prompt, json_user_prompt, existing_file_ids=shared_fids
+        )
 
     # Optional artifact dump: persist raw to raw_dir and other artifacts to debug_dir
     try:
@@ -262,7 +246,7 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{stem}.system.txt").write_text(system_prompt, encoding="utf-8")
             (debug_dir / f"{stem}.user.txt").write_text(user_prompt, encoding="utf-8")
-            (debug_dir / f"{stem}.appendix.txt").write_text(appendix, encoding="utf-8")
+            # No appendix file
     except Exception:
         pass
 
@@ -274,12 +258,8 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
 
 
 def _infer_1based(primary_page_pdf: Path) -> int:
-    try:
-        name = primary_page_pdf.stem
-        if name.startswith("p"):
-            return int(name[1:])
-    except Exception:
-        pass
-    return 1
+    # Deprecated: kept for backward compatibility where directly used.
+    from .pdf_pages import parse_page_1based_from_name  # type: ignore
+    return parse_page_1based_from_name(primary_page_pdf.name)
 
 
