@@ -185,6 +185,7 @@ def parse_and_enrich_page_json(
                 if not code or not start:
                     continue
                 try:
+                    # Always search on the single-page PDF for deterministic matching
                     bbox = compute_normalized_section_start_bbox_exact(str(primary_page_pdf), 1, start)
                 except Exception:
                     bbox = None
@@ -215,12 +216,17 @@ def parse_and_enrich_page_json(
 
 
 def _infer_1based(primary_page_pdf: Path) -> int:
+    # Support slugged filenames like <slug>_pNNNN.pdf and legacy pNNNN.pdf
     try:
-        name = primary_page_pdf.stem
-        if name.startswith("p"):
-            return int(name[1:])
+        from .pdf_pages import parse_page_1based_from_name  # type: ignore
+        return int(parse_page_1based_from_name(primary_page_pdf.name))
     except Exception:
-        pass
+        try:
+            name = primary_page_pdf.stem
+            if name.startswith("p"):
+                return int(name[1:])
+        except Exception:
+            pass
     return 1
 
 

@@ -899,10 +899,43 @@ def compute_normalized_section_start_bbox_exact(
             frame_w = max(1.0, W - 2 * inset_x)
             frame_h = max(1.0, H - 2 * inset_y)
 
-            try:
-                rects = page.search_for(target)
-            except Exception:
-                rects = []
+            # Try multiple text variants to handle typographic apostrophes and minor text encoding differences
+            def _variants(s: str) -> list[str]:
+                out: list[str] = []
+                base = (s or "").replace("\u00a0", " ").strip()
+                # 1) as-is
+                out.append(base)
+                # 2) straight → smart apostrophes commonly seen in PDFs
+                try:
+                    out.append(base.replace("'", "\u2019"))
+                    out.append(base.replace("'", "\u02BC"))
+                except Exception:
+                    pass
+                # 3) prefix of first ~7 tokens to be tolerant to hyphenation/wrap
+                try:
+                    toks = [t for t in base.split() if t]
+                    if len(toks) >= 4:
+                        prefix = " ".join(toks[: min(7, len(toks))])
+                        out.append(prefix)
+                except Exception:
+                    pass
+                # Deduplicate while preserving order
+                seen: set[str] = set()
+                uniq: list[str] = []
+                for v in out:
+                    if v and v not in seen:
+                        uniq.append(v)
+                        seen.add(v)
+                return uniq
+
+            rects = []
+            for needle in _variants(target):
+                try:
+                    rects = page.search_for(needle)
+                except Exception:
+                    rects = []
+                if rects:
+                    break
             if not rects:
                 return None
             # Merge adjacent rects on the same line into a single logical hit

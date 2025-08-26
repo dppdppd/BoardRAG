@@ -291,6 +291,15 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
       return false;
     }
 
+    // Ensure the PDF canvas is present and measured; otherwise, calculations will be off
+    const canvasReadyEl = pageEl.querySelector('canvas') as HTMLCanvasElement | null;
+    if (!canvasReadyEl || !canvasReadyEl.clientWidth || !canvasReadyEl.clientHeight) {
+      debugLog('performAnchorOnce: canvas not ready yet; scheduling short retry', { hasCanvas: !!canvasReadyEl, w: canvasReadyEl?.clientWidth, h: canvasReadyEl?.clientHeight, retryCount });
+      // Allow another attempt shortly; clear anchoring flag so next call proceeds
+      anchoringRef.current = false;
+      setTimeout(() => { try { performAnchorOnce(Math.min(5, (retryCount || 0) + 1)); } catch {} }, 50);
+      return false;
+    }
     const sc = getScrollableAncestor(pageEl) || (document?.querySelector?.('.modal-preview .preview-top') as HTMLElement) || (document?.querySelector?.('.preview-panel .preview-top') as HTMLElement) || null;
     if (!sc) return false;
     const pageTop = offsetTopWithin(pageEl, sc);

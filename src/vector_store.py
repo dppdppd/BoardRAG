@@ -140,12 +140,24 @@ def search_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[
     # Try to bias server-side by filtering on search hints if possible; fall back to plain search
     filt = {"source": pdf} if pdf else None
     try:
-        # Lightweight keyword OR over search hint fields by duplicating the query as filter-ready tokens
-        # Note: Chroma's filter supports exact matches on scalar fields; our fields are JSON strings, so
-        # server-side filtering is limited. We rely on client-side rerank below regardless.
+        # Use server-side metadata filter when available
         results = db.similarity_search_with_score(query, k=k, filter=filt) if filt else db.similarity_search_with_score(query, k=k)
     except Exception:
-        results = db.similarity_search_with_score(query, k=k)
+        # Some langchain-chroma versions do not support 'filter' – do NOT fall back to global mixing.
+        # Instead, over-fetch and filter client-side by exact 'source'.
+        raw = db.similarity_search_with_score(query, k=max(k, 24))
+        if pdf:
+            target = str(pdf).strip().lower()
+            def _is_match(doc) -> bool:
+                try:
+                    meta = getattr(doc, 'metadata', {}) or {}
+                    src = str(meta.get('source') or '').strip().lower()
+                    return src == target
+                except Exception:
+                    return False
+            results = [(d, s) for (d, s) in raw if _is_match(d)]
+        else:
+            results = raw
     # Client-side re-rank: boost chunks whose metadata search hints contain query terms
     try:
         import re as _re

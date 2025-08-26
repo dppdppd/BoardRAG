@@ -78,6 +78,31 @@ def search_pdf_for_string(
     import fitz  # type: ignore
 
     results: List[Dict[str, Any]] = []
+
+    def _variants(s: str) -> List[str]:
+        out: List[str] = []
+        base = _norm(s)
+        # 1) as-is
+        out.append(base)
+        # 2) smart apostrophes
+        out.append(base.replace("'", "\u2019"))
+        out.append(base.replace("'", "\u02BC"))
+        # 3) collapse multiple spaces (already normalized) + prefix of first ~7 tokens
+        try:
+            toks = [t for t in base.split() if t]
+            if len(toks) >= 4:
+                prefix = " ".join(toks[:min(7, len(toks))])
+                out.append(prefix)
+        except Exception:
+            pass
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        uniq: List[str] = []
+        for v in out:
+            if v not in seen and v:
+                uniq.append(v)
+                seen.add(v)
+        return uniq
     with fitz.open(pdf_path.as_posix()) as doc:
         pages = range(len(doc)) if page_number_1_based is None else [max(1, int(page_number_1_based)) - 1]
         for idx in pages:
@@ -86,10 +111,14 @@ def search_pdf_for_string(
             page = doc.load_page(idx)
             prect = page.rect
             page_rect = (float(prect.x0), float(prect.y0), float(prect.x1), float(prect.y1))
-            try:
-                rects = page.search_for(target_text)
-            except Exception:
-                rects = []
+            rects = []
+            for needle in _variants(target_text):
+                try:
+                    rects = page.search_for(needle)
+                except Exception:
+                    rects = []
+                if rects:
+                    break
             # Merge adjacent rects on the same line into a single logical hit
             merged: List[Tuple[float, float, float, float]] = []
             rects_sorted = sorted(rects or [], key=lambda rr: (float(rr.y0), float(rr.x0)))

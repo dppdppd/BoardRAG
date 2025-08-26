@@ -9,11 +9,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
 	sys.path.insert(0, str(REPO_ROOT))
 
-# Import search utility from tester script
+# Use app locator for parity with production
 try:
-	from scripts.test_pdf_locator import search_pdf_for_string  # type: ignore
+	from src.pdf_utils import compute_normalized_section_start_bbox_exact as _loc  # type: ignore
 except Exception as e:
-	print(f"Failed to import search utility: {e}", file=sys.stderr)
+	print(f"Failed to import app locator: {e}", file=sys.stderr)
 	sys.exit(2)
 
 
@@ -73,18 +73,20 @@ def main() -> None:
 		if not start:
 			continue
 		total += 1
-		matches = search_pdf_for_string(pdf_path, start, p)
-		ok = len(matches) > 0
+		bbox = _loc(str(pdf_path), int(p) if p else 1, start) if p else _loc(str(pdf_path), 1, start)
+		ok = bool(bbox)
 		if ok:
 			success += 1
 		if args.verbose:
-			print(json.dumps({
+			payload = {
 				"section_id": it.get("section_id"),
 				"page": p,
 				"start": start,
 				"found": ok,
-				"matches": matches,
-			}, ensure_ascii=False))
+			}
+			if bbox:
+				payload["bbox_pct"] = bbox
+			print(json.dumps(payload, ensure_ascii=False))
 
 	print(json.dumps({
 		"file": pdf_path.name,
