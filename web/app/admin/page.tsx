@@ -801,61 +801,59 @@ export default function AdminPage() {
         </div>
       </div>
 
-      <div className="admin-tool alt">
-        <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Blocked Sessions</h3>
-        <div style={{ display: "grid", gap: 6 }}>
-          {blockedSessions.length === 0 ? (
-            <div className="muted" style={{ fontSize: 15 }}>No blocked sessions</div>
-          ) : (
-            <>
-              <select
-                multiple
-                size={Math.min(8, Math.max(3, blockedSessions.length))}
-                value={unblockSelection}
-                onChange={(e) => setUnblockSelection(Array.from(e.target.selectedOptions).map((o) => o.value))}
-                style={{ width: "100%", fontSize: 14, padding: 6 }}
-              >
-                {blockedSessions.map((s) => (
-                  <option key={s.sid} value={s.sid} title={s.sid}>
-                    {s.sid} {s.since ? `(since ${new Date(s.since).toLocaleString()})` : ""}
-                  </option>
-                ))}
-              </select>
-              <div>
-                <button onClick={unblockSelected} disabled={unblockSelection.length === 0} style={{ padding: "6px 10px" }}>Unblock Selected</button>
-                <button onClick={() => refetchBlocked()} style={{ padding: "6px 10px", marginLeft: 6 }}>Refresh</button>
-              </div>
-            </>
-          )}
+      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr 1.2fr", alignItems: "start" }}>
+        <div className="admin-tool">
+          <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Global Model</h3>
+          <div className="muted" style={{ fontSize: 15 }}>
+            {(() => {
+              const prov = (modelData?.provider || '').toLowerCase();
+              const gen = modelData?.generator || '';
+              if (!gen) return "Loading…";
+              const label = prov === 'anthropic' ? `[Anthropic] ${gen}` : prov === 'openai' ? `[OpenAI] ${gen}` : gen;
+              return `Active: ${label}`;
+            })()}
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+            <button className="btn" onClick={() => refetchModel()} style={{ padding: '6px 10px' }}>Refresh</button>
+          </div>
         </div>
-      </div>
 
-      
-
-      <div className="admin-tool">
-        <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Global Model</h3>
-        <div className="muted" style={{ fontSize: 15 }}>
-          {(() => {
-            const prov = (modelData?.provider || '').toLowerCase();
-            const gen = modelData?.generator || '';
-            if (!gen) return "Loading…";
-            const label = prov === 'anthropic' ? `[Anthropic] ${gen}` : prov === 'openai' ? `[OpenAI] ${gen}` : gen;
-            return `Active: ${label}`;
-          })()}
+        <div className="admin-tool alt">
+          <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Blocked Sessions</h3>
+          <div style={{ display: "grid", gap: 6 }}>
+            {blockedSessions.length === 0 ? (
+              <div className="muted" style={{ fontSize: 15 }}>No blocked sessions</div>
+            ) : (
+              <>
+                <select
+                  multiple
+                  size={Math.min(8, Math.max(3, blockedSessions.length))}
+                  value={unblockSelection}
+                  onChange={(e) => setUnblockSelection(Array.from(e.target.selectedOptions).map((o) => o.value))}
+                  style={{ width: "100%", fontSize: 14, padding: 6 }}
+                >
+                  {blockedSessions.map((s) => (
+                    <option key={s.sid} value={s.sid} title={s.sid}>
+                      {s.sid} {s.since ? `(since ${new Date(s.since).toLocaleString()})` : ""}
+                    </option>
+                  ))}
+                </select>
+                <div>
+                  <button onClick={unblockSelected} disabled={unblockSelection.length === 0} style={{ padding: "6px 10px" }}>Unblock Selected</button>
+                  <button onClick={() => refetchBlocked()} style={{ padding: "6px 10px", marginLeft: 6 }}>Refresh</button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
-        <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-          <button className="btn" onClick={() => refetchModel()} style={{ padding: '6px 10px' }}>Refresh</button>
-        </div>
-      </div>
 
-      {/* Removed legacy Assign/Reprocess/Delete control; use Catalog section above */}
-
-      <div className="admin-tool" style={{ gridColumn: "1 / -1" }}>
-        <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Technical Info</h3>
-        <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 4, fontSize: 14 }}>{storageData?.markdown || ""}</pre>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
-          <button onClick={openFs} style={{ padding: "6px 10px" }}>Browse DATA</button>
+        <div className="admin-tool">
+          <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Technical Info</h3>
+          <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 4, fontSize: 14 }}>{storageData?.markdown || ""}</pre>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
+            <button onClick={openFs} style={{ padding: "6px 10px" }}>Browse DATA</button>
+          </div>
         </div>
       </div>
 

@@ -764,19 +764,8 @@ def compute_normalized_section_code_bbox(
             # Stable read order
             words.sort(key=lambda ww: (ww[6], ww[7], ww[5], ww[1], ww[0]))
 
-            # Quick path: try direct search for the code or the full start line
-            try:
-                rects_code = page.search_for(code)
-            except Exception:
-                rects_code = []
-            if rects_code:
-                r = rects_code[0]
-                x0, y0, x1, y1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
-                nx = max(0.0, (y0 - frame_top) * 100.0 / frame_h)
-                ny = max(0.0, (x0 - frame_left) * 100.0 / frame_w)
-                nw = max(0.1, (x1 - x0) * 100.0 / frame_w)
-                nh = max(0.1, (y1 - y0) * 100.0 / frame_h)
-                return (nx, ny, nw, nh)
+            # Avoid global code search here; it often matches inline mentions. We'll
+            # prefer locating via section_start and only use a guarded fallback later.
             try:
                 rects_line = page.search_for(start_text)
             except Exception:
@@ -823,10 +812,31 @@ def compute_normalized_section_code_bbox(
                 j += 1
             # If we didn't reach a prefix, try single-token match by literal code
             if not acc.lower().startswith(code_ns.lower()):
+                # Heuristic: accept only if the token is the first word on its line
+                # and close to the left inset (prevents matching inline mentions).
+                LEFT_INSET_TOL = max(6.0, 0.02 * W)
                 for k in range(max(0, start_idx - 3), min(len(words), start_idx + 6)):
                     if _norm_no_space(words[k][4]).lower().startswith(code_ns.lower()):
-                        used = [k]
-                        break
+                        try:
+                            line_k = int(words[k][6])
+                        except Exception:
+                            line_k = None  # type: ignore
+                        # Find the first word index of the same line
+                        first_idx_same_line = None
+                        if line_k is not None:
+                            for m in range(max(0, k - 6), k + 1):
+                                try:
+                                    if int(words[m][6]) == line_k:
+                                        first_idx_same_line = m if first_idx_same_line is None else first_idx_same_line
+                                except Exception:
+                                    pass
+                        # Check left alignment tolerance
+                        x0k = float(words[k][0])
+                        near_left = (x0k - frame_left) <= LEFT_INSET_TOL
+                        is_first_on_line = (first_idx_same_line == k) if first_idx_same_line is not None else near_left
+                        if is_first_on_line and near_left:
+                            used = [k]
+                            break
             if not used:
                 return None
 
