@@ -121,11 +121,7 @@ type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; 
   const buildMessageCitations = (used: Set<string>, lookup: Map<string, CitationEntry>): Record<string, CitationEntry> => {
     const cit: Record<string, CitationEntry> = {};
     for (const key of used) {
-      let v = lookup.get(key);
-      if (!v) {
-        const m = key.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/);
-        if (m && m[1]) v = lookup.get(m[1]);
-      }
+      const v = lookup.get(key);
       if (v) cit[key] = { ...v, header: v.header || key };
     }
     return cit;
@@ -178,7 +174,7 @@ export default function HomePage() {
       (pdfjs as any).GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${ver}/build/pdf.worker.min.js`;
     } catch {}
   }, []);
-  // Turn bare section citations like [3.5] or [3.5.1] and verbal tags like [EQUIPMENT] into clickable links we can intercept
+  // Generic decoration for common patterns (kept as fallback)
   const decorateCitations = (input: string): string => {
     if (!input) return input;
     let out = input;
@@ -204,6 +200,61 @@ export default function HomePage() {
       }
     });
     return out;
+  };
+
+  // Decorate ONLY bracketed tokens that exactly match allowed citations for a given preceding user index
+  const decorateCitationsAllowed = (input: string, precedingUserIdx: number): string => {
+    if (!input) return input;
+    let out = input;
+    // Always transform legacy encoded citations first
+    out = out.replace(/\[([^\]\n]+?)\s*:\s*(\{[\s\S]*?\})\]/g, (_m, code) => {
+      const encCode = encodeURIComponent(String(code));
+      return `[${code}](section:${encCode})`;
+    });
+    try {
+      // Build allowed set: prefer assistant.dev.citations for the QA after precedingUserIdx
+      const allowed = new Set<string>();
+      try {
+        let userSeen = -1;
+        let targetAssistant: any = null;
+        for (let i = 0; i < messages.length; i++) {
+          const msg = messages[i];
+          if (msg.role === 'user') { userSeen += 1; continue; }
+          if (msg.role === 'assistant' && userSeen === precedingUserIdx) { targetAssistant = msg; break; }
+        }
+        const devCitations = Array.isArray((targetAssistant?.dev as any)?.citations) ? (targetAssistant?.dev as any)?.citations : [];
+        for (const c of devCitations) {
+          const label = String(c?.section || '').trim();
+          const code = String(c?.code || '').trim();
+          if (label) allowed.add(label);
+          if (code) allowed.add(code);
+        }
+      } catch {}
+      // Also merge any window registry entries if present
+      try {
+        const reg = (window as any).__boardrag_allowed_answers_by_user__ || {};
+        const am: Map<string, any> | undefined = reg[precedingUserIdx];
+        if (am && am.size > 0) {
+          for (const [k] of am.entries()) allowed.add(String(k));
+        }
+      } catch {}
+      if (allowed.size === 0) {
+        // No Allowed list available → do not decorate anything
+        return out;
+      }
+      // Replace any bracketed token that matches an allowed key exactly
+      out = out.replace(/\[([^\]\n]{1,120})\](?!\()/g, (m, p1) => {
+        const key = String(p1);
+        if (allowed.has(key)) {
+          const enc = encodeURIComponent(key);
+          return `[${key}](section:${enc})`;
+        }
+        return m;
+      });
+      return out;
+    } catch {
+      return out;
+    }
   };
   // State
   const [sessionId, setSessionId] = useState<string>("");
@@ -270,8 +321,7 @@ export default function HomePage() {
       const lookup = buildCitationLookupFromAllowed(citationsForBundle);
       const minimalMap: any[] = [];
       for (const key of usedCitations) {
-        const normKey = (key.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\b/) || [])[1] || key;
-        const v = lookup.get(key) || lookup.get(normKey);
+        const v = lookup.get(key);
         if (v && v.file && v.header && v.page) {
           minimalMap.push({ file: v.file, section: v.header, page: v.page, header_anchor_bbox_pct: v.header_anchor_bbox_pct, text_spans: (v as any).text_spans });
         }
@@ -1596,9 +1646,7 @@ export default function HomePage() {
         return;
       }
       const citeMap: Record<string, any> = targetAssistant.citations as any;
-      const codeMatch = sec.match(/^\s*([A-Za-z]?\d+(?:\.[A-Za-z0-9]+)*)\s*(?:\b.*)?$/);
       const keys = [sec];
-      if (codeMatch && codeMatch[1]) keys.unshift(codeMatch[1]);
       let hit: any = null;
       for (const k of keys) { if (citeMap[k]) { hit = citeMap[k]; break; } }
       if (!hit || !hit.file || !hit.page) {
@@ -1937,11 +1985,13 @@ export default function HomePage() {
                               a({ href, title, children, ...props }: { href?: string; title?: string; children?: any }) {
                                 if (href && typeof href === 'string' && href.startsWith('section:')) {
                                   const sec = decodeURIComponent(href.slice('section:'.length));
+                                  const pending = isStreaming;
                                   return (
                                     <button
-                                      className="btn link"
+                                      className={`btn link citation${pending ? ' pending' : ''}`}
                                       onClick={(e) => {
                                         e.preventDefault();
+                                        if (pending) return; // disable clicks while streaming
                                         // Always handle citations client-side (no server calls).
                                         // Provide the preceding user index so we resolve against the correct assistant reply.
                                         openCitation(sec, undefined, userCounter as any);
@@ -1952,8 +2002,9 @@ export default function HomePage() {
                                         background: 'none',
                                         border: 'none',
                                         color: 'var(--accent)',
-                                        textDecoration: 'underline',
-                                        cursor: 'pointer',
+                                        textDecoration: pending ? 'none' : 'underline',
+                                        cursor: pending ? 'default' : 'pointer',
+                                        opacity: pending ? 0.6 : 1,
                                       }}
                                     >
                                       {"["}{children}{"]"}
@@ -1964,7 +2015,7 @@ export default function HomePage() {
                               },
                             }}
                           >
-                            {decorateCitations(m.content)}
+                            {decorateCitationsAllowed(m.content, userCounter as number)}
                           </ReactMarkdown>
                           {(() => {
                             // Render developer panel mapping citations -> destinations for this assistant (toggle by button)
@@ -2076,11 +2127,13 @@ export default function HomePage() {
                             a({ href, title, children, ...props }: { href?: string; title?: string; children?: any }) {
                               if (href && typeof href === 'string' && href.startsWith('section:')) {
                                 const sec = decodeURIComponent(href.slice('section:'.length));
+                                const pending = isStreaming;
                                 return (
                                   <button
-                                    className="btn link"
+                                    className={`btn link citation${pending ? ' pending' : ''}`}
                                     onClick={(e) => {
                                       e.preventDefault();
+                                      if (pending) return; // disable clicks while streaming
                                       try {
                                         if (selectedGame) localStorage.setItem(`boardrag_last_section:${selectedGame}`, sec);
                                       } catch {}
@@ -2092,8 +2145,9 @@ export default function HomePage() {
                                       background: 'none',
                                       border: 'none',
                                       color: 'var(--accent)',
-                                      textDecoration: 'underline',
-                                      cursor: 'pointer',
+                                      textDecoration: pending ? 'none' : 'underline',
+                                      cursor: pending ? 'default' : 'pointer',
+                                      opacity: pending ? 0.6 : 1,
                                     }}
                                   >
                                     {"["}{children}{"]"}
@@ -2104,7 +2158,7 @@ export default function HomePage() {
                             },
                           }}
                         >
-                          {decorateCitations(m.content)}
+                          {decorateCitationsAllowed(m.content, ucForHandlers as number)}
                         </ReactMarkdown>
                         {isAdmin && (
                           <div style={{ display: 'flex', gap: 6, marginTop: 6, justifyContent: 'flex-end' }}>

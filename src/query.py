@@ -696,16 +696,6 @@ def stream_query_rag(
         except Exception:
             allowed_struct = []
         instruction = (
-            "INSTRUCTIONS:\n"
-            "Answer the user's question based ONLY on the attached material.\n"
-            "Do NOT include any preamble or meta phrases anywhere (forbidden: 'Based on the rulebook', 'According to', 'As per', 'From the rulebook', 'Looking at the rulebook', 'Per the rules', 'Looking at your question').\n"
-            "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the following format:\n"
-            "[<section>]. Place it immediately after the paragraph with no trailing text.\n"
-            "Do not combine multiple sections into a single bracketed citation.\n"
-            "Do not enclose a citation with parentheses or unnecessary text, such as \"(see [13.1])\".\n"
-            "Use ONLY section labels from the Allowed citations list below; do not invent or paraphrase labels.\n"
-            "Example (format only; replace with an allowed citation):\n"
-            "Wire cards can only be placed as a discard. [13.1]\n"
             f"{allowed_block}\n\n"
             f"Question: {query_text}\n\n"
         )
@@ -801,7 +791,13 @@ def stream_query_rag(
             model = _cfg2.GENERATOR_MODEL
             system_prompt = (
                 "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations. "
-                "Start directly (lead with Yes/No for yes/no questions). Do not use any preambles or meta phrases such as 'Based on the rulebook' or 'According to'."
+                "Start directly (lead with Yes/No for yes/no questions). Do not use any preambles or meta phrases such as 'Based on the rulebook' or 'According to'. "
+                "Answer the user's question based ONLY on the attached material. "
+                "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the form [<section>], placed immediately after the paragraph with no trailing text. "
+                "Do not combine multiple sections into a single bracketed citation. "
+                "Do not enclose a citation with parentheses or extra text (e.g., '(see [13.1])'). "
+                "Use ONLY section labels from the Allowed citations list; do not invent or paraphrase labels. "
+                "Example (format only): Wire cards can only be placed as a discard. [13.1]"
             )
             # Resolve page file_ids from catalog
             page_file_ids: list[str] = []

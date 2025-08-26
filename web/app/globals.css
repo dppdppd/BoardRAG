@@ -361,6 +361,7 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 .muted { color: var(--muted); }
 .chip { background: var(--control-bg); border: 1px solid var(--control-border); padding: 6px 10px; border-radius: var(--radius); }
 .btn { background: var(--control-bg); color: var(--text); border: 1px solid var(--control-border); border-radius: var(--radius); padding: 10px 16px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, transform .05s ease; -webkit-tap-highlight-color: transparent; }
+.citation.pending { pointer-events: none; cursor: default; opacity: 0.1; text-decoration: none; }
 .btn.primary { background: var(--accent); color: #ffffff; border-color: var(--accent); border-radius: var(--radius); }
 .btn.ghost { background: transparent; border-color: var(--control-border); }
 .btn.stop { background: #ef4444; color: #ffffff; border-color: #ef4444; }
@@ -502,7 +503,7 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .react-pdf__Page__textContent .heading-highlight {
   position: relative;
   /* Hybrid highlighter stripe + fill for visibility across colored backgrounds */
-  background: linear-gradient(to top, rgba(255,235,59,0.85) 0%, rgba(255,235,59,0.85) 62%, rgba(255,235,59,0.35) 62%, rgba(255,235,59,0) 100%);
+  background: linear-gradient(to top, rgba(255, 235, 59, 0.651) 0%, rgba(255, 235, 59, 0.575) 62%, rgba(255,235,59,0.35) 62%, rgba(255,235,59,0) 100%);
   outline: 3px solid #ff9800;           /* vivid orange frame */
   border-radius: 4px;
   /* Outer dark halo + orange glow to separate from page colors */
