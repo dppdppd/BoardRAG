@@ -1,6 +1,8 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { isLocalhost } from "../../lib/config";
+import { API_BASE } from "../../lib/config";
 
 type Props = {
   open: boolean;
@@ -53,6 +55,12 @@ export default function BottomSheetMenu({ open, onClose, games, selectedGame, se
           <section className="surface pad section" style={{ marginTop: 12 }}>
             <summary>Debug Bbox</summary>
             <DebugBboxControl selectedGame={selectedGame} />
+          </section>
+        )}
+        {isAdmin && (
+          <section className="surface pad section" style={{ marginTop: 12 }}>
+            <summary>Page Citations (Admin)</summary>
+            <AdminPageCitations selectedGame={selectedGame} />
           </section>
         )}
         <section className="surface pad section" style={{ marginTop: 12 }}>
@@ -230,4 +238,157 @@ function DebugBboxControl({ selectedGame }: { selectedGame: string }) {
   );
 }
 
+
+function AdminPageCitations({ selectedGame }: { selectedGame: string }) {
+  const [pageInput, setPageInput] = useState<string>("");
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string>("");
+  const [results, setResults] = useState<any[]>([]);
+  const [pdfList, setPdfList] = useState<string[]>([]);
+  const [selectedPdf, setSelectedPdf] = useState<string>("");
+
+  const apiBase = API_BASE;
+
+  const onFetch = async () => {
+    setError("");
+    setResults([]);
+    const p = parseInt(pageInput || "", 10);
+    if (!selectedGame) { setError("Select a game first"); return; }
+    const pdfName = (selectedPdf || "").trim();
+    if (!pdfName) { setError("Select a PDF"); return; }
+    if (!Number.isFinite(p) || p <= 0) { setError("Enter a valid page number"); return; }
+    try {
+      setLoading(true);
+      const fn = pdfName;
+      const base = String(apiBase || "").replace(/\/+$/, "");
+      const url = `${base}/admin/citations-by-page?filename=${encodeURIComponent(fn)}&page=${encodeURIComponent(String(p))}`;
+      const headers: any = {};
+      try {
+        const t = sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token');
+        if (t) headers['Authorization'] = `Bearer ${t}`;
+      } catch {}
+      const resp = await fetch(url, { headers });
+      if (!resp.ok) {
+        const msg = await resp.text().catch(() => resp.statusText);
+        throw new Error(msg || `HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      setResults(Array.isArray(data?.citations) ? data.citations : []);
+    } catch (e: any) {
+      setError(String(e?.message || e || 'error'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load PDFs for the current game
+  useEffect(() => {
+    setPdfList([]);
+    setSelectedPdf("");
+    if (!selectedGame) return;
+    (async () => {
+      try {
+        const base = String(apiBase || "").replace(/\/+$/, "");
+        const url = `${base}/game-pdfs?game=${encodeURIComponent(selectedGame)}`;
+        const headers: any = {};
+        try { const t = sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token'); if (t) headers['Authorization'] = `Bearer ${t}`; } catch {}
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) {
+          // fallback to last seen
+          let files: string[] = [];
+          try { const lastPdf = localStorage.getItem(`boardrag_last_pdf:${selectedGame}`); if (lastPdf) files = [lastPdf]; } catch {}
+          setPdfList(files);
+          if (files && files.length > 0) setSelectedPdf(files[0]);
+          return;
+        }
+        const data = await resp.json();
+        const files: string[] = Array.isArray(data?.pdfs) ? data.pdfs : [];
+        setPdfList(files);
+        if (files && files.length > 0) setSelectedPdf(files[0]);
+      } catch {}
+    })();
+  }, [selectedGame]);
+
+  return (
+    <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+      <div className="row" style={{ gap: 8, alignItems: 'center' }}>
+        <select
+          className="select compact"
+          value={selectedPdf}
+          onChange={(e) => setSelectedPdf(e.target.value)}
+          style={{ minWidth: 200 }}
+        >
+          <option value="" disabled>Select PDF…</option>
+          {pdfList.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+        <input
+          className="input"
+          type="number"
+          min={1}
+          placeholder="Page #"
+          value={pageInput}
+          onChange={(e) => setPageInput(e.target.value)}
+          style={{ width: 120 }}
+        />
+        <button className="btn" onClick={onFetch} disabled={loading || !selectedGame} style={{ padding: '6px 10px' }}>
+          {loading ? 'Loading…' : 'List citations'}
+        </button>
+      </div>
+      {error && (
+        <div className="muted" style={{ color: '#b00020', fontSize: 12 }}>{error}</div>
+      )}
+      {(!loading && (!results || results.length === 0) && !error) && (
+        <div className="bubble assistant" style={{ fontSize: 13 }}>
+          Enter a page number and click List citations.
+        </div>
+      )}
+      {!loading && error && (
+        <div className="bubble assistant" style={{ fontSize: 13, color: '#b00020' }}>
+          {error}
+        </div>
+      )}
+      {!loading && results && (
+        <div className="bubble assistant" style={{ fontSize: 13 }}>
+          {results.length > 0 ? (
+            <div>
+              {results.map((r, i) => (
+                <div key={i} style={{ marginBottom: 6 }}>
+                  <div>
+                    {/* Render a clickable section link matching normal answer bubbles */}
+                    • <a
+                      href={`section:${encodeURIComponent(String(r.code || r.section || ''))}`}
+                      className="btn link"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        try {
+                          const fn = selectedGame && selectedGame.endsWith('.pdf') ? selectedGame : String(r.file || '');
+                          const meta = { file: fn || r.file, page: r.page, header_anchor_bbox_pct: r.header_anchor_bbox_pct, header: r.section };
+                          const op = (window as any).__openSectionModal;
+                          if (typeof op === 'function') op(String(r.code || r.section || ''), meta);
+                        } catch {}
+                      }}
+                      style={{ padding: 0, background: 'none', border: 'none', color: 'var(--accent)', textDecoration: 'underline', cursor: 'pointer' }}
+                    >
+                      [{String(r.code || r.section || '—')}]
+                    </a>
+                    {r.section && r.code ? <span style={{ color: '#666' }}> ({r.section})</span> : null}
+                  </div>
+                  {Array.isArray(r.header_anchor_bbox_pct) && r.header_anchor_bbox_pct.length >= 4 && (
+                    <div style={{ color: '#666', marginLeft: 16 }}>
+                      anchor: [{r.header_anchor_bbox_pct.map((n: any) => Number(n).toFixed(2)).join(', ')}]
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div>No citations found for this page.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 

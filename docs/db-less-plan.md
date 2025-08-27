@@ -15,9 +15,8 @@ Move from a local vector DB to a fully DB‑less flow powered by Anthropic Claud
   - On startup, scans `data/` and populates the catalog (uploads any missing PDFs to Anthropic Files API).
   - Logs catalog status to the admin log stream.
 - `src/catalog.py`
-  - Catalog file: `.cache/games_catalog.json` with entries: `{ file_id, game_name, size_bytes, updated_at }` keyed by PDF filename.
-  - `ensure_catalog_up_to_date(log)` scans `data/`, uploads untracked PDFs, extracts `game_name` via Sonnet, and persists the catalog.
-  - `resolve_file_ids_for_game(game)` returns `[(abs_path, file_id)]` for a given game (or all if `game` is `None`).
+  - Catalog file: `data/catalog/games_catalog.json` with entries: `{ game_name, pages, size_bytes, updated_at }` keyed by PDF filename.
+  - `ensure_catalog_up_to_date(log)` scans `data/`, records metadata and `game_name` (defaults to filename stem), and persists the catalog. Main PDF uploads and top-level `file_id` are not used.
 - `src/query.py`
   - DB‑less branch uses the catalog’s `(path, file_id)` pairs to call Anthropic Messages API with citations enabled.
   - Asks the model to return `{ answer, spans: [{page, header}] }` per file; merges multi‑PDF results.
@@ -55,11 +54,11 @@ Stored at `.cache/games_catalog.json`:
 
 ### Query Flow (DB‑less)
 1. Client calls `/stream` or `/stream-ndjson` with `q` and optional `game`.
-2. Server resolves the relevant PDFs via `resolve_file_ids_for_game(game)`.
-   - If `game` is provided: select only catalog entries matching the game name (case‑insensitive) or filename prefix.
+2. Server resolves the relevant PDFs directly from the catalog entries by `game_name` or filename prefix.
+   - If `game` is provided: select only catalog entries matching the game name (case-insensitive) or filename prefix.
    - If absent: include all cataloged PDFs.
    - Cap included PDFs to a small number (default 2) to respect input size/time.
-3. For each `(path, file_id)`:
+3. For each selected PDF’s pages (page-level file_ids are managed elsewhere):
    - Build a single request to Anthropic Messages API (citations enabled) including:
      - `system`: role and constraints.
      - `user`: instruction to answer based only on the attached PDF and to return JSON with `answer` and `spans`.
@@ -129,7 +128,7 @@ Notes:
 1. Place PDFs in `data/`.
 2. Set `ANTHROPIC_API_KEY` in the environment.
 3. Launch the API: `launch_api.cmd` or `launch_local.cmd`.
-4. On startup, the server uploads new PDFs, extracts game names, and caches `file_id`s.
+4. On startup, the server scans PDFs and persists metadata and `game_name`. It does not upload main PDFs or cache top-level `file_id`s; only per-page IDs are used during extraction.
 5. Ask a question via `/stream` with an optional `game` filter. The response includes spotlight anchors.
 
 

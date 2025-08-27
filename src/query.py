@@ -884,8 +884,14 @@ def stream_query_rag(
                 for p in attach_paths:
                     try:
                         base_pdf_name = _resolve_parent_pdf_name_from_page(p)
-                        stem = p.stem  # pNNNN
-                        p1 = int(stem[1:]) if stem.startswith("p") else 1
+                        # Support slugged filenames like <slug>_pNNNN.pdf and legacy pNNNN.pdf
+                        try:
+                            from .pdf_pages import parse_page_1based_from_name  # type: ignore
+                            p1 = int(parse_page_1based_from_name(p.name))
+                        except Exception:
+                            # Fallback to best-effort legacy parse
+                            stem = p.stem
+                            p1 = int(stem[1:]) if stem.startswith("p") else 1
                         fid = _get_page_fid(base_pdf_name, p1)
                         if not fid:
                             fid = _upload_page(api_key, str(p))

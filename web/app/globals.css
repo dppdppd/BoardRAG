@@ -497,13 +497,13 @@ input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px;
 .react-pdf__message { display: none !important; }
 
 /* Absolute overlay rectangle for headings (span-independent) */
-.heading-overlay { position: absolute; pointer-events: none; background: rgba(255,235,59,0.35); outline: 3px solid #ff9800; border-radius: 4px; box-shadow: 0 0 0 2px rgba(0,0,0,0.15), 0 0 0 6px rgba(255,152,0,0.28), 0 6px 22px rgba(255,152,0,0.45); z-index: 2; }
+.heading-overlay { position: absolute; pointer-events: none; background: rgba(255, 230, 0, 0.315); outline: 3px solid #ff9800; border-radius: 4px; box-shadow: 0 0 0 2px rgba(0,0,0,0.15), 0 0 0 6px rgba(255,152,0,0.28), 0 6px 22px rgba(255,152,0,0.45); z-index: 2; }
 .textLayer .chunk-highlight { background: color-mix(in oklab, var(--accent) 35%, transparent); outline: 2px solid color-mix(in oklab, var(--accent) 65%, transparent); border-radius: 2px; }
 .textLayer .heading-highlight,
 .react-pdf__Page__textContent .heading-highlight {
   position: relative;
   /* Hybrid highlighter stripe + fill for visibility across colored backgrounds */
-  background: linear-gradient(to top, rgba(255, 235, 59, 0.651) 0%, rgba(255, 235, 59, 0.575) 62%, rgba(255,235,59,0.35) 62%, rgba(255,235,59,0) 100%);
+  background: linear-gradient(to top, rgba(255, 235, 59, 0.432) 0%, rgba(255, 235, 59, 0.336) 62%, rgba(255,235,59,0.35) 62%, rgba(255,235,59,0) 100%);
   outline: 3px solid #ff9800;           /* vivid orange frame */
   border-radius: 4px;
   /* Outer dark halo + orange glow to separate from page colors */

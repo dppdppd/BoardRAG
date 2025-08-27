@@ -199,6 +199,13 @@ PDF_ENABLE_RASTER_FALLBACK = os.getenv("PDF_ENABLE_RASTER_FALLBACK", "False").lo
 PDF_RASTER_DPI = int(os.getenv("PDF_RASTER_DPI", "150"))
 PDF_JPEG_QUALITY = int(os.getenv("PDF_JPEG_QUALITY", "70"))
 
+# ---------------------------------------------------------------------------
+# Optional - Pipeline Cleanup
+# ---------------------------------------------------------------------------
+# When enabled, after successful populate the pipeline deletes intermediate
+# artifacts to save disk space: page PDFs, raw.txt, and JSON files.
+PIPELINE_DELETE_INTERMEDIATE = os.getenv("PIPELINE_DELETE_INTERMEDIATE", "False").lower() in {"1", "true", "yes"}
+
 # Templates (these are small text files so they can stay in repo)
 JINJA_TEMPLATE_PATH = os.getenv("JINJA_TEMPLATE_PATH", "rag_query_improved.txt")
 EVAL_TEMPLATE_PATH = os.getenv("EVAL_TEMPLATE_PATH", "eval_prompt_tests.txt")

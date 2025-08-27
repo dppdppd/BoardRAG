@@ -11,7 +11,7 @@ type Props = {
 export default function MarkdownWithSectionLinks({ content, onSectionClick }: Props) {
   return (
     <ReactMarkdown
-      {...({ urlTransform: (url: string) => url } as any)}
+      {...({ urlTransform: (url: string) => url, skipHtml: true } as any)}
       components={{
         a({ href, title, children, ...props }: { href?: string; title?: string; children?: any }) {
           if (href && typeof href === 'string' && href.startsWith('section:')) {

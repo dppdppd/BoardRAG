@@ -323,236 +323,112 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
         role = _require_auth(authorization, token)
     except Exception:
         role = "user"
-    # DB-less: return catalog names only; do not touch DB or trigger refresh, and include per-game progress
+    # Always use catalog for listing games; include per-game progress
     try:
         from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
+        try:
+            from src.catalog import list_games_from_catalog  # type: ignore
+            games = list_games_from_catalog() or []
+            # Build per-PDF status, then aggregate to game progress
+            progress: Dict[str, Dict[str, object]] = {}
             try:
-                from src.catalog import list_games_from_catalog  # type: ignore
-                games = list_games_from_catalog() or []
-                # Build per-PDF status, then aggregate to game progress
-                progress: Dict[str, Dict[str, object]] = {}
+                from pathlib import Path as _P
+                data = _P(getattr(_cfg, "DATA_PATH", "data"))
+                # Import page counter independently of vector store
                 try:
-                    from pathlib import Path as _P
-                    data = _P(getattr(_cfg, "DATA_PATH", "data"))
-                    try:
-                        from src.pdf_pages import get_page_count  # type: ignore
-                        from src.vector_store import count_processed_pages  # type: ignore
-                    except Exception:
-                        get_page_count = None  # type: ignore
-                        count_processed_pages = None  # type: ignore
-                    # Pre-scan PDFs for status
-                    pdf_status: Dict[str, Dict[str, int]] = {}
-                    for p in sorted([p for p in data.glob("*.pdf") if p.is_file()]):
-                        total = 0
-                        try:
-                            if get_page_count:
-                                total = get_page_count(p)
-                        except Exception:
-                            total = 0
-                        pages_dir = data / p.stem / "1_pdf_pages"
-                        pages_exported = 0
-                        try:
-                            if pages_dir.exists():
-                                pages_exported = sum(1 for x in pages_dir.glob("*.pdf") if x.is_file() and (x.stat().st_size > 0))
-                        except Exception:
-                            pages_exported = 0
-                        processed_dir = data / p.stem / "3_eval_jsons"
-                        evals_present = 0
-                        try:
-                            if processed_dir.exists():
-                                evals_present = sum(1 for x in processed_dir.glob("*.json") if x.is_file())
-                        except Exception:
-                            evals_present = 0
-                        chunks_present = 0
-                        try:
-                            if count_processed_pages and total > 0:
-                                chunks_present = count_processed_pages(p.stem, total)
-                        except Exception:
-                            chunks_present = 0
-                        pdf_status[p.name] = {
-                            "total": int(total or 0),
-                            "pages": int(pages_exported or 0),
-                            "evals": int(evals_present or 0),
-                            "chunks": int(chunks_present or 0),
-                        }
-                    # Aggregate per game using catalog mapping
-                    try:
-                        from src.catalog import get_pdf_filenames_for_game  # type: ignore
-                        for g in games:
-                            pdfs = list(get_pdf_filenames_for_game(g) or [])
-                            best_ratio = 0.0
-                            complete_flag = False
-                            for fn in pdfs:
-                                st = pdf_status.get(fn)
-                                if not st:
-                                    continue
-                                tot = max(0, int(st.get("total", 0)))
-                                if tot <= 0:
-                                    continue
-                                r_pages = (st.get("pages", 0) or 0) / float(tot)
-                                r_evals = (st.get("evals", 0) or 0) / float(tot)
-                                r_chunks = (st.get("chunks", 0) or 0) / float(tot)
-                                ratio = max(0.0, min(1.0, min(r_pages, r_evals, r_chunks)))
+                    from src.pdf_pages import get_page_count  # type: ignore
+                except Exception:
+                    get_page_count = None  # type: ignore
+                try:
+                    from src.vector_store import count_processed_pages  # type: ignore
+                except Exception:
+                    count_processed_pages = None  # type: ignore
+                # Compute minimal progress per game: chunks vs total pages
+                try:
+                    from src.catalog import get_pdf_filenames_for_game  # type: ignore
+                    for g in games:
+                        filenames = list(get_pdf_filenames_for_game(g) or [])
+                        total_pages = 0
+                        total_chunks = 0
+                        sum_pages_files = 0
+                        sum_analyzed_files = 0
+                        sum_eval_jsons = 0
+                        best_ratio = 0.0
+                        complete_flag = False
+                        for fn in filenames:
+                            try:
+                                pdf_path = (data / fn).resolve()
+                                base_dir = pdf_path.parent / pdf_path.stem
+                                # Denominator: page count from base PDF
+                                pages = 0
+                                if get_page_count and pdf_path.exists():
+                                    pages = int(get_page_count(pdf_path))
+                                # Numerators: count files in respective directories (no fallbacks)
+                                pages_dir = base_dir / "1_pdf_pages"
+                                analyzed_dir = base_dir / "2_llm_analyzed"
+                                evals_dir = base_dir / "3_eval_jsons"
+                                try:
+                                    pages_files = sum(1 for x in pages_dir.iterdir() if x.is_file()) if pages_dir.exists() else 0
+                                except Exception:
+                                    pages_files = 0
+                                try:
+                                    analyzed_files = sum(1 for x in analyzed_dir.iterdir() if x.is_file()) if analyzed_dir.exists() else 0
+                                except Exception:
+                                    analyzed_files = 0
+                                try:
+                                    eval_jsons = sum(1 for x in evals_dir.iterdir() if x.is_file()) if evals_dir.exists() else 0
+                                except Exception:
+                                    eval_jsons = 0
+                                # Chunks from DB
+                                chunks = 0
+                                if count_processed_pages and pages > 0:
+                                    chunks = int(count_processed_pages(pdf_path.stem, pages))
+                                # Aggregate per game
+                                total_pages += max(0, pages)
+                                total_chunks += max(0, chunks)
+                                sum_pages_files += max(0, pages_files)
+                                sum_analyzed_files += max(0, analyzed_files)
+                                sum_eval_jsons += max(0, eval_jsons)
+                                # Track best per-PDF ratio (chunks/total)
+                                ratio = 0.0 if pages <= 0 else max(0.0, min(1.0, chunks / float(pages)))
                                 if ratio > best_ratio:
                                     best_ratio = ratio
-                                if ratio >= 1.0:
+                                if ratio >= 1.0 and pages > 0:
                                     complete_flag = True
-                            progress[g] = {"complete": bool(complete_flag), "ratio": float(best_ratio)}
-                    except Exception:
-                        pass
+                            except Exception:
+                                continue
+                        progress[g] = {
+                            "complete": bool(complete_flag),
+                            "ratio": (0.0 if total_pages <= 0 else max(0.0, min(1.0, total_chunks / float(total_pages)))),
+                            "total_pages": int(total_pages),
+                            "pages": int(sum_pages_files),
+                            "analyzed": int(sum_analyzed_files),
+                            "evals": int(sum_eval_jsons),
+                            "chunks": int(total_chunks),
+                        }
                 except Exception:
-                    progress = {}
-                return {"games": games, "progress": progress}
+                    pass
             except Exception:
-                return {"games": [], "progress": {}}
+                progress = {}
+            return {"games": games, "progress": progress}
+        except Exception:
+            return {"games": [], "progress": {}}
     except Exception:
         return {"games": [], "progress": {}}
 
-    # Legacy DB-backed behavior
-    try:
-        from src.services.library_service import is_library_busy  # type: ignore
-        if is_library_busy():
-            return {"games": get_available_games()}
-    except Exception:
-        pass
-    games = get_available_games()
-    if not games:
-        try:
-            from src.services.library_service import is_library_busy  # type: ignore
-            if not is_library_busy():
-                _msg, games2, _pdf = refresh_games()
-                if games2:
-                    games = games2
-        except Exception:
-            pass
-    # Legacy path: also provide progress (same computation as above), do not filter by role
-    try:
-        from src import config as _cfg  # type: ignore
-        from pathlib import Path as _P
-        data = _P(getattr(_cfg, "DATA_PATH", "data"))
-        try:
-            from src.pdf_pages import get_page_count  # type: ignore
-            from src.vector_store import count_processed_pages  # type: ignore
-        except Exception:
-            get_page_count = None  # type: ignore
-            count_processed_pages = None  # type: ignore
-        pdf_status: Dict[str, Dict[str, int]] = {}
-        for p in sorted([p for p in data.glob("*.pdf") if p.is_file()]):
-            total = 0
-            try:
-                if get_page_count:
-                    total = get_page_count(p)
-            except Exception:
-                total = 0
-            pages_dir = data / p.stem / "1_pdf_pages"
-            pages_exported = 0
-            try:
-                if pages_dir.exists():
-                    pages_exported = sum(1 for x in pages_dir.glob("*.pdf") if x.is_file() and (x.stat().st_size > 0))
-            except Exception:
-                pages_exported = 0
-            processed_dir = data / p.stem / "3_eval_jsons"
-            evals_present = 0
-            try:
-                if processed_dir.exists():
-                    evals_present = sum(1 for x in processed_dir.glob("*.json") if x.is_file())
-            except Exception:
-                evals_present = 0
-            chunks_present = 0
-            try:
-                if count_processed_pages and total > 0:
-                    chunks_present = count_processed_pages(p.stem, total)
-            except Exception:
-                chunks_present = 0
-            pdf_status[p.name] = {
-                "total": int(total or 0),
-                "pages": int(pages_exported or 0),
-                "evals": int(evals_present or 0),
-                "chunks": int(chunks_present or 0),
-            }
-        progress: Dict[str, Dict[str, object]] = {}
-        # Prefer catalog mapping to associate filenames with games; fall back to stored mapping
-        mapping_ok = False
-        try:
-            from src.catalog import get_pdf_filenames_for_game  # type: ignore
-            for g in games or []:
-                pdfs = list(get_pdf_filenames_for_game(g) or [])
-                best_ratio = 0.0
-                complete_flag = False
-                for fn in pdfs:
-                    st = pdf_status.get(fn)
-                    if not st:
-                        continue
-                    tot = max(0, int(st.get("total", 0)))
-                    if tot <= 0:
-                        continue
-                    r_pages = (st.get("pages", 0) or 0) / float(tot)
-                    r_evals = (st.get("evals", 0) or 0) / float(tot)
-                    r_chunks = (st.get("chunks", 0) or 0) / float(tot)
-                    ratio = max(0.0, min(1.0, min(r_pages, r_evals, r_chunks)))
-                    if ratio > best_ratio:
-                        best_ratio = ratio
-                    if ratio >= 1.0:
-                        complete_flag = True
-                progress[g] = {"complete": bool(complete_flag), "ratio": float(best_ratio)}
-            mapping_ok = True
-        except Exception:
-            mapping_ok = False
-        if not mapping_ok:
-            try:
-                from src.query import get_stored_game_names  # type: ignore
-                stored = get_stored_game_names()
-                by_game: Dict[str, list[str]] = {}
-                for fname, gname in (stored or {}).items():
-                    key = str(gname or "").strip()
-                    if not key:
-                        continue
-                    import os as _os
-                    base = _os.path.basename(fname)
-                    by_game.setdefault(key, []).append(base)
-                for g in games or []:
-                    pdfs = by_game.get(g, [])
-                    best_ratio = 0.0
-                    complete_flag = False
-                    for fn in pdfs:
-                        st = pdf_status.get(fn)
-                        if not st:
-                            continue
-                        tot = max(0, int(st.get("total", 0)))
-                        if tot <= 0:
-                            continue
-                        r_pages = (st.get("pages", 0) or 0) / float(tot)
-                        r_evals = (st.get("evals", 0) or 0) / float(tot)
-                        r_chunks = (st.get("chunks", 0) or 0) / float(tot)
-                        ratio = max(0.0, min(1.0, min(r_pages, r_evals, r_chunks)))
-                        if ratio > best_ratio:
-                            best_ratio = ratio
-                        if ratio >= 1.0:
-                            complete_flag = True
-                    progress[g] = {"complete": bool(complete_flag), "ratio": float(best_ratio)}
-            except Exception:
-                progress = {}
-        return {"games": games, "progress": progress}
-    except Exception:
-        return {"games": games, "progress": {}}
+    # (Removed unreachable legacy block)
 
 
 @app.get("/pdf-choices")
 async def list_pdf_choices():
-    # In DB-less mode, source choices from catalog explicitly
+    # Always source choices from catalog
     try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
-            try:
-                from src.catalog import get_pdf_choices_from_catalog  # type: ignore
-                choices = get_pdf_choices_from_catalog()
-                return {"choices": choices}
-            except Exception:
-                pass
+        from src.catalog import get_pdf_choices_from_catalog  # type: ignore
+        choices = get_pdf_choices_from_catalog()
+        return {"choices": choices}
     except Exception:
-        pass
-    return {"choices": get_pdf_dropdown_choices()}
+        # Fallback to legacy service only if catalog lookup fails
+        return {"choices": get_pdf_dropdown_choices()}
 
 
 @app.get("/game-pdfs")
@@ -565,12 +441,10 @@ async def get_game_pdfs(game: str, token: Optional[str] = None, authorization: O
         return {"pdfs": []}
     
     try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
-            from src.catalog import get_pdf_filenames_for_game  # type: ignore
-            return {"pdfs": get_pdf_filenames_for_game(game)}
+        from src.catalog import get_pdf_filenames_for_game  # type: ignore
+        return {"pdfs": get_pdf_filenames_for_game(game)}
     except Exception:
-        pass
+        return {"pdfs": []}
     
     # Fallback: use stored game names mapping for legacy mode
     try:
@@ -932,15 +806,16 @@ async def upload(files: List[UploadFile] = File(...)):
     except Exception:
         pass
 
-    # Always update catalog and run name-extraction; legacy DB path removed
+    # Update catalog only for the uploaded files; legacy DB path removed
     await _admin_log_publish("📚 Updating catalog for uploaded PDFs…")
     try:
-        from src.catalog import ensure_catalog_up_to_date, list_games_from_catalog, get_pdf_choices_from_catalog  # type: ignore
+        from src.catalog import ensure_catalog_for_files, list_games_from_catalog, get_pdf_choices_from_catalog  # type: ignore
     except Exception as e:
         await _admin_log_publish(f"❌ Catalog module error: {e}")
         return {"message": "Catalog update failed", "games": [], "pdf_choices": []}
 
-    await asyncio.to_thread(ensure_catalog_up_to_date, log_cb)
+    if saved:
+        await asyncio.to_thread(ensure_catalog_for_files, saved, log_cb)
 
     # Start a background Pipeline (missing) for the uploaded PDFs
     try:
@@ -1374,42 +1249,39 @@ async def admin_jobs_clear(token: Optional[str] = None, authorization: Optional[
 async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
     _ = _require_auth(authorization, token)
     from src import config as cfg  # type: ignore
-    from src.pdf_pages import get_page_count
     from src.vector_store import count_processed_pages  # type: ignore
     from pathlib import Path as _P
     import os as _os
     data = _P(cfg.DATA_PATH)
     pdfs = sorted([p for p in data.glob("*.pdf") if p.is_file()])
     items = []
+    # Use base PDF page count as denominator for all metrics
+    try:
+        from src.pdf_pages import get_page_count  # type: ignore
+    except Exception:
+        get_page_count = None  # type: ignore
     for p in pdfs:
+        # Denominator: base PDF page count
         total = 0
         try:
-            total = get_page_count(p)
+            if get_page_count:
+                total = int(get_page_count(p))
         except Exception:
-            pass
-        # Count exported page PDFs
+            total = 0
+        # Numerators: simple file counts per directory (no fallbacks/filters beyond is_file)
         pages_dir = data / p.stem / "1_pdf_pages"
-        pages_exported = 0
+        analyzed_dir = data / p.stem / "2_llm_analyzed"
+        processed_dir = data / p.stem / "3_eval_jsons"
         try:
-            if pages_dir.exists():
-                # Count only valid page files that are non-empty
-                pages_exported = sum(1 for x in pages_dir.glob("*.pdf") if x.is_file() and (x.stat().st_size > 0))
+            pages_exported = sum(1 for x in pages_dir.iterdir() if x.is_file()) if pages_dir.exists() else 0
         except Exception:
             pages_exported = 0
-        # Count analyzed raw outputs
-        analyzed_dir = data / p.stem / "2_llm_analyzed"
-        analyzed_present = 0
         try:
-            if analyzed_dir.exists():
-                analyzed_present = sum(1 for x in analyzed_dir.glob("*.raw.txt") if x.is_file() and (x.stat().st_size > 0))
+            analyzed_present = sum(1 for x in analyzed_dir.iterdir() if x.is_file()) if analyzed_dir.exists() else 0
         except Exception:
             analyzed_present = 0
-        # Count eval artifacts
-        processed_dir = data / p.stem / "3_eval_jsons"
-        evals_present = 0
         try:
-            if processed_dir.exists():
-                evals_present = sum(1 for x in processed_dir.glob("*.json") if x.is_file())
+            evals_present = sum(1 for x in processed_dir.iterdir() if x.is_file()) if processed_dir.exists() else 0
         except Exception:
             evals_present = 0
         # Count chunks in DB
@@ -1418,7 +1290,8 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             chunks_present = count_processed_pages(p.stem, total)
         except Exception:
             chunks_present = 0
-        complete = (pages_exported >= total) and (evals_present >= total) and (chunks_present >= total) and (total > 0)
+        # Complete: only consider DB vs expected catalog pages
+        complete = (chunks_present >= total) and (total > 0)
         items.append({
             "filename": p.name,
             "total_pages": total,
@@ -1429,6 +1302,89 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             "complete": complete,
         })
     return {"items": items}
+
+
+@app.get("/admin/citations-by-page")
+async def admin_citations_by_page(filename: str, page: int, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    try:
+        from pathlib import Path as _P
+        from src.vector_store import get_metadata_for_page  # type: ignore
+        import json as _json
+        # Normalize inputs
+        base = _P(filename).name
+        stem = _P(base).stem
+        p1 = int(page)
+        if p1 <= 0:
+            raise HTTPException(status_code=400, detail="page must be >= 1")
+        md = get_metadata_for_page(stem, p1)
+        if not md:
+            return {"file": base, "page": p1, "citations": []}
+        # Parse stored structures
+        def _load(obj, key, default):
+            try:
+                v = obj.get(key)
+                if isinstance(v, str):
+                    return _json.loads(v) if v else default
+                return v if v is not None else default
+            except Exception:
+                return default
+        section_pages = _load(md, "section_pages", {}) or {}
+        section_ids = _load(md, "section_ids", {}) or {}
+        header_anchors = _load(md, "header_anchors_pct", {}) or {}
+        text_spans = _load(md, "text_spans", {}) or {}
+        primary = _load(md, "primary_sections", []) or []
+
+        # Build citation-like entries for any headers mapped to this page
+        out = []
+        # Collect headers that map to this page
+        headers_for_page = []
+        try:
+            for hdr, pg in (section_pages.items() if isinstance(section_pages, dict) else []):
+                try:
+                    if int(pg) == p1:
+                        headers_for_page.append(str(hdr))
+                except Exception:
+                    continue
+        except Exception:
+            headers_for_page = []
+        # If empty, include primary headers if the chunk itself is the requested page
+        try:
+            p1_chunk = int(md.get("page_1based") or (int(md.get("page") or 0) + 1))
+        except Exception:
+            p1_chunk = int(md.get("page") or 0) + 1
+        if not headers_for_page and isinstance(primary, list) and p1_chunk == p1:
+            headers_for_page = [str(x) for x in primary if x]
+
+        for hdr in sorted(set(headers_for_page)):
+            entry = {
+                "file": base,
+                "section": hdr,
+                "page": p1,
+                "code": str(section_ids.get(hdr) or ""),
+            }
+            try:
+                code_key = str(section_ids.get(hdr) or "").strip()
+                arr = header_anchors.get(code_key) if code_key else None
+                if arr is None:
+                    arr = header_anchors.get(hdr)
+                if isinstance(arr, list) and len(arr) >= 4:
+                    entry["header_anchor_bbox_pct"] = [float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])]
+            except Exception:
+                pass
+            try:
+                spans = text_spans.get(hdr)
+                if spans:
+                    entry["text_spans"] = spans
+            except Exception:
+                pass
+            out.append(entry)
+
+        return {"file": base, "page": p1, "citations": out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
 
 
 class ProcessSelectedPayload(BaseModel):
@@ -1746,6 +1702,41 @@ async def admin_pipeline_stream(entries: str, mode: str = "missing", start: str 
                         return
                     await queue.put(("log", f"{step} {p.name} done"))
                     _job_update(job_id, entry=f"{step}:{p.name}", state="done", message="done")
+                    # Optional cleanup after successful populate per PDF
+                    try:
+                        if step == "populate":
+                            from src import config as _cfg_cleanup  # type: ignore
+                            if bool(getattr(_cfg_cleanup, "PIPELINE_DELETE_INTERMEDIATE", False)):
+                                base = p.parent / p.stem
+                                pages_dir = base / "1_pdf_pages"
+                                analyzed_dir = base / "2_llm_analyzed"
+                                eval_dir = base / "3_eval_jsons"
+                                # Delete files; then attempt to remove empty directories
+                                for d, pattern in (
+                                    (pages_dir, "*.pdf"),
+                                    (analyzed_dir, "*.raw.txt"),
+                                    (eval_dir, "*.json"),
+                                ):
+                                    try:
+                                        if d.exists():
+                                            for x in d.glob(pattern):
+                                                try:
+                                                    if x.is_file():
+                                                        x.unlink()
+                                                except Exception:
+                                                    pass
+                                            # Attempt to remove directory if empty
+                                            try:
+                                                next(iter(d.iterdir()))
+                                            except StopIteration:
+                                                try:
+                                                    d.rmdir()
+                                                except Exception:
+                                                    pass
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
             await queue.put(("done", "ok"))
             await queue.put(("close", ""))
             _job_update(job_id, done=True)
@@ -1976,18 +1967,9 @@ async def admin_delete_pdfs(entries: List[str]):
     # Also return updated catalog listing for the Admin panel
     try:
         from src.catalog import load_catalog  # type: ignore
-        from src import config as _cfg  # type: ignore
-        from pathlib import Path as _P
-        base = _P(getattr(_cfg, "DATA_PATH", "data"))
         cat = load_catalog()
         entries_out = []
         for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower()):
-            try:
-                # Hide entries whose PDF no longer exists on disk
-                if not (base / fname).exists():
-                    continue
-            except Exception:
-                pass
             entries_out.append({
                 "filename": fname,
                 "file_id": meta.get("file_id"),
@@ -2014,12 +1996,6 @@ async def admin_catalog():
         cat = load_catalog()
         entries = []
         for fname, meta in sorted(cat.items(), key=lambda kv: kv[0].lower()):
-            try:
-                # Only include if the PDF exists on disk
-                if not (base / fname).exists():
-                    continue
-            except Exception:
-                pass
             entries.append({
                 "filename": fname,
                 "file_id": meta.get("file_id"),
@@ -2035,7 +2011,7 @@ async def admin_catalog():
 @app.post("/admin/catalog/refresh")
 async def admin_catalog_refresh():
     try:
-        from src.catalog import ensure_catalog_up_to_date, load_catalog, list_games_from_catalog  # type: ignore
+        from src.catalog import ensure_catalog_up_to_date, backfill_catalog_from_data, load_catalog, list_games_from_catalog  # type: ignore
         await _admin_log_publish("📚 Catalog refresh requested …")
         # Explicitly reload current catalog from disk before warming
         try:
@@ -2052,6 +2028,8 @@ async def admin_catalog_refresh():
                 loop.call_soon_threadsafe(asyncio.create_task, _admin_log_publish(msg))
             except Exception:
                 pass
+        # Ensure all PDFs on disk are represented in the catalog
+        await asyncio.to_thread(backfill_catalog_from_data, _sync_log)
         await asyncio.to_thread(ensure_catalog_up_to_date, _sync_log)
         await _admin_log_publish("📚 Catalog refresh complete")
         cat = load_catalog()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 from datetime import datetime
+import threading
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
@@ -14,6 +15,7 @@ from .llm_outline_helpers import upload_pdf_to_anthropic_files, anthropic_pdf_me
 # Use a dedicated subdirectory to avoid cluttering the PDF directory
 CATALOG_DIR = Path(getattr(cfg, "DATA_PATH", "data")) / "catalog"
 CATALOG_PATH = CATALOG_DIR / "games_catalog.json"
+CATALOG_LOCK = threading.RLock()
 
 
 def _now_iso() -> str:
@@ -26,6 +28,7 @@ def _now_iso() -> str:
 def load_catalog() -> Dict[str, dict]:
     try:
         if CATALOG_PATH.exists():
+            # Read without lock to allow concurrent readers; writes are atomic
             return json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
     except Exception:
         pass
@@ -34,42 +37,41 @@ def load_catalog() -> Dict[str, dict]:
 
 def save_catalog(cat: Dict[str, dict]) -> None:
     try:
-        CATALOG_DIR.mkdir(parents=True, exist_ok=True)
-        CATALOG_PATH.write_text(json.dumps(cat, ensure_ascii=False, indent=2), encoding="utf-8")
+        with CATALOG_LOCK:
+            CATALOG_DIR.mkdir(parents=True, exist_ok=True)
+            tmp_path = CATALOG_PATH.with_suffix(CATALOG_PATH.suffix + ".tmp")
+            data = json.dumps(cat, ensure_ascii=False, indent=2)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(data)
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            # Atomic replace to avoid readers seeing a partially-written file
+            try:
+                os.replace(tmp_path, CATALOG_PATH)
+            except Exception:
+                # Fallback: attempt rename via Path API
+                try:
+                    Path(tmp_path).replace(CATALOG_PATH)
+                except Exception:
+                    pass
     except Exception:
         pass
 
 
 def _extract_game_name_from_pdf(api_key: str, model: str, file_id: str) -> str:
-    system = (
-        "You extract the official commercial game/module name from a boardgame rulebook PDF. "
-        "Return JSON ONLY: {\"game_name\": string}."
-    )
-    user = (
-        "Identify the official commercial game name as printed on the cover/title/intro pages.\n"
-        "Return JSON ONLY: {\\\"game_name\\\": \\\"<short title>\\\"}"
-    )
-    try:
-        raw = anthropic_pdf_messages_with_file(api_key, model, system, user, file_id)
-        # Pull last JSON object
-        import re as _re
-        mlist = list(_re.finditer(r"\{[\s\S]*?\}", raw))
-        for m in reversed(mlist):
-            try:
-                obj = json.loads(m.group(0))
-                name = str(obj.get("game_name") or "").strip()
-                if name:
-                    return name
-            except Exception:
-                continue
-    except Exception:
-        pass
+    # Main PDF is no longer uploaded or inspected for name extraction.
+    # Fallback to empty so callers can default to filename stem.
     return ""
 
 
 def ensure_catalog_up_to_date(log: Optional[callable] = None) -> Dict[str, dict]:
-    """Scan data/ for PDFs, upload any missing via Files API, and store {file_id, game_name}.
+    """Scan data/ for PDFs and maintain catalog metadata without uploading main PDFs.
 
+    Only per-page file_ids are supported elsewhere; here we record game_name (from filename stem)
+    and basic metadata. We never attempt to upload the full PDF or store a top-level file_id.
     Returns the updated catalog.
     """
     def _log(msg: str) -> None:
@@ -120,65 +122,24 @@ def ensure_catalog_up_to_date(log: Optional[callable] = None) -> Dict[str, dict]
         except Exception:
             size = 0
         entry = cat.get(key) or {}
-        if entry.get("file_id"):
-            # Already in catalog: do nothing
-            try:
-                if log:
-                    log(f"⏭  [{idx}/{len(pdfs)}] Skip (already cataloged): {key}")
-            except Exception:
-                pass
-            continue
-        if not api_key:
-            _log(f"⚠️ Skipping upload for {key}: ANTHROPIC_API_KEY missing")
-            continue
+        # Preserve any user-assigned name if present; otherwise default to filename stem
+        existing_name = str((entry or {}).get("game_name") or "").strip()
+        final_name = existing_name or p.stem
+        # Update in-place to avoid dropping other fields; never set top-level file_id
+        entry = entry or {}
+        entry.pop("file_id", None)
+        entry["game_name"] = final_name
+        entry.setdefault("pages", entry.get("pages") if isinstance(entry.get("pages"), dict) else None)
+        entry["size_bytes"] = size
+        entry["updated_at"] = _now_iso()
+        cat[key] = entry
         try:
-            _log(f"📤 [{idx}/{len(pdfs)}] Uploading {key} …")
-            fid = upload_pdf_to_anthropic_files(api_key, str(p.resolve()), retries=1, backoff_s=0.0)
-            _log(f"🔗 Received file_id={fid} for {key}")
-            extracted_name = _extract_game_name_from_pdf(api_key, model, fid) or p.stem
-            # Preserve any user-assigned name if present
-            existing_name = str((entry or {}).get("game_name") or "").strip()
-            final_name = existing_name or extracted_name
-            if final_name:
-                try:
-                    if existing_name:
-                        _log(f"🏷  Preserving assigned game_name='{existing_name}'")
-                    else:
-                        _log(f"🏷  Extracted game_name='{extracted_name}'")
-                except Exception:
-                    pass
-            # Update in-place to avoid dropping other fields
-            entry = entry or {}
-            entry["file_id"] = fid
-            entry["game_name"] = final_name
-            entry.setdefault("pages", None)
-            entry["size_bytes"] = size
-            entry["updated_at"] = _now_iso()
-            cat[key] = entry
-            _log(f"✅ Cataloged {key} → '{final_name}' ({fid})")
-            save_catalog(cat)
-        except Exception as e:
-            _log(f"❌ Upload failed for {key}: {e}")
-            continue
-    # Remove catalog entries for PDFs that no longer exist on disk
-    try:
-        present = {p.name for p in pdfs}
-        removed = 0
-        for key in list(cat.keys()):
-            if key not in present:
-                try:
-                    cat.pop(key, None)
-                    removed += 1
-                except Exception:
-                    pass
-        if removed:
-            try:
-                _log(f"🧹 Removed {removed} stale catalog entrie(s) with missing PDFs")
-            except Exception:
-                pass
-            save_catalog(cat)
-    except Exception:
-        pass
+            if log:
+                log(f"✅ Cataloged {key} → '{final_name}'")
+        except Exception:
+            pass
+        save_catalog(cat)
+    # Do not purge catalog entries whose PDFs are missing; keep catalog authoritative
     try:
         if log:
             log("📚 Catalog scan complete")
@@ -186,6 +147,120 @@ def ensure_catalog_up_to_date(log: Optional[callable] = None) -> Dict[str, dict]
         pass
     return cat
 
+
+def ensure_catalog_for_files(filenames: List[str], log: Optional[callable] = None) -> Dict[str, dict]:
+    """Update catalog entries only for the specified PDF filenames without uploading main PDFs.
+
+    - Only processes the provided `filenames` (basenames under DATA_PATH)
+    - Does NOT upload or store a top-level `file_id`
+    - Sets/keeps `game_name` (defaults to filename stem if missing)
+    - Does NOT scan or modify entries for other PDFs
+    """
+    def _log(msg: str) -> None:
+        try:
+            if log:
+                log(msg)
+        except Exception:
+            pass
+
+    data_dir = Path(getattr(cfg, "DATA_PATH", "data"))
+    pdfs: List[Path] = []
+    for name in (filenames or []):
+        try:
+            fn = Path(name).name
+            p = (data_dir / fn)
+            if p.exists() and p.is_file() and p.suffix.lower() == ".pdf":
+                pdfs.append(p)
+        except Exception:
+            continue
+    try:
+        if log:
+            log(f"🔎 Considering {len(pdfs)} uploaded PDF(s) for catalog update")
+    except Exception:
+        pass
+
+    cat = load_catalog()
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    model = os.getenv("OUTLINE_LLM_MODEL", "claude-sonnet-4-20250514")
+
+    for idx, p in enumerate(pdfs, start=1):
+        key = p.name
+        try:
+            size = p.stat().st_size
+        except Exception:
+            size = 0
+        entry = cat.get(key) or {}
+        # Preserve any user-assigned name if present; otherwise default to filename stem
+        existing_name = str((entry or {}).get("game_name") or "").strip()
+        final_name = existing_name or p.stem
+        # Update in-place; never set top-level file_id
+        entry = entry or {}
+        entry.pop("file_id", None)
+        entry["game_name"] = final_name
+        entry.setdefault("pages", entry.get("pages") if isinstance(entry.get("pages"), dict) else None)
+        entry["size_bytes"] = size
+        entry["updated_at"] = _now_iso()
+        cat[key] = entry
+        try:
+            if log:
+                log(f"✅ Cataloged {key} → '{final_name}'")
+        except Exception:
+            pass
+        save_catalog(cat)
+
+    try:
+        if log:
+            log("📚 Catalog update for uploaded files complete")
+    except Exception:
+        pass
+    return cat
+
+
+def backfill_catalog_from_data(log: Optional[callable] = None) -> Dict[str, dict]:
+    """Ensure every top-level PDF in DATA_PATH has a catalog entry.
+
+    Does not upload or set top-level file_id. Creates minimal entries with
+    game_name defaulting to filename stem and size_bytes. Preserves existing fields.
+    """
+    def _log(msg: str) -> None:
+        try:
+            if log:
+                log(msg)
+        except Exception:
+            pass
+
+    data_dir = Path(getattr(cfg, "DATA_PATH", "data"))
+    pdfs = []
+    try:
+        pdfs = sorted([p for p in data_dir.glob("*.pdf") if p.is_file()])
+    except Exception:
+        pdfs = []
+
+    cat = load_catalog()
+    created = 0
+    for p in pdfs:
+        key = p.name
+        if key in cat:
+            continue
+        try:
+            size = p.stat().st_size
+        except Exception:
+            size = 0
+        entry: dict = {
+            "game_name": p.stem,
+            "pages": None,
+            "size_bytes": size,
+            "updated_at": _now_iso(),
+        }
+        cat[key] = entry
+        created += 1
+    if created:
+        try:
+            _log(f"➕ Backfilled {created} missing PDF entrie(s) from data/")
+        except Exception:
+            pass
+        save_catalog(cat)
+    return cat
 
 def set_page_file_id(pdf_filename: str, page_1based: int, file_id: str, page_pdf_sha256: Optional[str] = None) -> None:
     """Persist a per-page file_id under the parent PDF entry in the catalog.
@@ -200,6 +275,16 @@ def set_page_file_id(pdf_filename: str, page_1based: int, file_id: str, page_pdf
         page_key = str(page_1based)
     cat = load_catalog()
     entry = cat.get(pdf_filename) or {}
+    # Ensure a default game_name exists for entries created via per-page uploads
+    try:
+        has_name = bool(str((entry or {}).get("game_name") or "").strip())
+    except Exception:
+        has_name = False
+    if not has_name:
+        try:
+            entry["game_name"] = Path(pdf_filename).stem
+        except Exception:
+            entry["game_name"] = str(pdf_filename)
     pages = entry.get("pages")
     if not isinstance(pages, dict):
         pages = {}
@@ -238,40 +323,19 @@ def list_games_from_catalog() -> List[str]:
     cat = load_catalog()
     names: List[str] = []
     seen: set[str] = set()
-    for _fname, meta in cat.items():
-        n = str(meta.get("game_name") or "").strip()
-        if not n:
-            continue
-        if n.lower() not in seen:
+    for fname, meta in cat.items():
+        # Fallback to filename stem when game_name is missing
+        fallback_name = Path(fname).stem
+        n = str(meta.get("game_name") or "").strip() or fallback_name
+        key = n.lower()
+        if key not in seen:
             names.append(n)
-            seen.add(n.lower())
+            seen.add(key)
     names.sort(key=lambda s: s.lower())
     return names
 
 
-def resolve_file_ids_for_game(game: Optional[str]) -> List[Tuple[str, str]]:
-    """Return list of (abs_path, file_id) for a given game name; empty game returns all."""
-    cat = load_catalog()
-    if not game:
-        out: List[Tuple[str, str]] = []
-        base = Path(getattr(cfg, "DATA_PATH", "data")).resolve()
-        for fname, meta in cat.items():
-            fid = str(meta.get("file_id") or "").strip()
-            if not fid:
-                continue
-            out.append((str((base / fname).resolve()), fid))
-        return out
-    key = str(game).strip().lower()
-    out: List[Tuple[str, str]] = []
-    base = Path(getattr(cfg, "DATA_PATH", "data")).resolve()
-    for fname, meta in cat.items():
-        name = str(meta.get("game_name") or "").strip()
-        fid = str(meta.get("file_id") or "").strip()
-        if not fid or not name:
-            continue
-        if name.strip().lower() == key or fname.strip().lower().startswith(key):
-            out.append((str((base / fname).resolve()), fid))
-    return out
+ 
 
 
 # ---------------------------------------------------------------------------
@@ -312,11 +376,12 @@ def validate_catalog(log: Optional[callable] = None) -> Dict[str, object]:
     for i, (fname, meta) in enumerate(sorted(cat.items(), key=lambda kv: kv[0].lower()), start=1):
         fid = str((meta or {}).get("file_id") or "").strip()
         gname = str((meta or {}).get("game_name") or "").strip()
+        # We no longer maintain top-level file_id; mark as skipped when absent
         if not fid:
-            status = "missing_file_id"
-            missing += 1
+            status = "skipped_no_main_file_id"
+            skipped += 1
             entries.append({"filename": fname, "game_name": gname, "file_id": None, "status": status})
-            _log(f"⚠️  [{i}] Missing file_id: {fname}")
+            _log(f"⏭  [{i}] Skipped (no main file_id by design): {fname}")
             continue
         if not api_key:
             status = "skipped_no_api_key"

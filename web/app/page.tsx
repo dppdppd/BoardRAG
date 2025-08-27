@@ -1313,6 +1313,15 @@ export default function HomePage() {
   const [previewAnchorRectPct, setPreviewAnchorRectPct] = useState<[number, number, number, number] | null>(null);
   const [previewRectsNorm, setPreviewRectsNorm] = useState<number[][] | null>(null);
   const [lastOpenedCitation, setLastOpenedCitation] = useState<string | null>(null);
+  const [pendingCitation, setPendingCitation] = useState<null | {
+    sec: string;
+    mfile: string;
+    mpage: number;
+    sectionText: string;
+    fullPageText: string;
+    anchorRect?: number[] | null;
+    textSpans?: any;
+  }>(null);
   // Stable auth token to avoid rebuilding PDF URLs on every render
   const tokenRef = useRef<string | null>(null);
   // Portal root inside chat for mobile modal alignment
@@ -1325,6 +1334,44 @@ export default function HomePage() {
       tokenRef.current = sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token');
     } catch {}
   }, []);
+
+  // When the preview PDF finishes loading/switching, if there's a pending citation, finalize navigation
+  useEffect(() => {
+    try {
+      if (!pendingCitation) return;
+      const norm = (s: string) => (s || '').trim();
+      const loadedName = String(previewPdfMeta?.filename || '');
+      if (!loadedName) return; // wait until meta present
+      if (norm(loadedName) !== norm(pendingCitation.mfile)) return; // still loading other file
+      // We have the correct PDF loaded; synthesize chunks and anchor
+      const { mfile, mpage, sec, sectionText, fullPageText, anchorRect, textSpans } = {
+        sec: pendingCitation.sec,
+        mfile: pendingCitation.mfile,
+        mpage: pendingCitation.mpage,
+        sectionText: pendingCitation.sectionText,
+        fullPageText: pendingCitation.fullPageText,
+        anchorRect: pendingCitation.anchorRect,
+        textSpans: pendingCitation.textSpans,
+      } as any;
+      const anchorsPct = (Array.isArray(anchorRect) && anchorRect.length >= 4)
+        ? { [sectionText]: [Number(anchorRect[0])||0, Number(anchorRect[1])||0, Number(anchorRect[2])||0, Number(anchorRect[3])||0] }
+        : undefined;
+      const syntheticChunks = [ {
+        text: fullPageText || sectionText,
+        source: mfile,
+        page: Number(mpage) - 1,
+        section: sec,
+        section_number: sec,
+        ...(anchorsPct ? { header_anchors_pct: anchorsPct } : {}),
+        ...(textSpans ? { text_spans: textSpans } : {})
+      } as any ];
+      setPreviewChunks(syntheticChunks as any);
+      setPreviewTargetPage(mpage);
+      setAnchorNonce((n) => (n + 1) | 0);
+      setPendingCitation(null);
+      try { postLog(`[pendingCitation] finalized sec=${sec} file=${mfile} page=${mpage}`); } catch {}
+    } catch {}
+  }, [previewPdfMeta, pendingCitation]);
 
   const openSectionModal = async (sec: string, uid?: string, meta?: any) => {
     if (!sec) return;
@@ -1504,6 +1551,18 @@ export default function HomePage() {
       setSectionLoading(false);
     }
   };
+
+  useEffect(() => {
+    try {
+      (window as any).__openSectionModal = (sec: string, meta?: any) => {
+        try { if (selectedGame && sec) localStorage.setItem(`boardrag_last_section:${selectedGame}`, sec); } catch {}
+        openSectionModal(sec, undefined, meta);
+      };
+    } catch {}
+    return () => {
+      try { delete (window as any).__openSectionModal; } catch {}
+    };
+  }, [openSectionModal, selectedGame]);
 
   // Load last-used PDF filename when game changes (for preview context)
   useEffect(() => {
@@ -1688,15 +1747,14 @@ export default function HomePage() {
         return;
       }
       
-      // New citation - do full setup
-      console.log(`[openCitation] new citation ${sec}, setting up chunks and state`);
-      setLastOpenedCitation(citationKey);
+      // New citation - prepare state
+      console.log(`[openCitation] new citation ${sec}, preparing state`);
       
       // Try to find full page text from dev chunks that match this page
       let fullPageText = resolved.text || '';
       const matchingChunk = devChunks.find((c: any) => 
         Number(c.page) === (mpage - 1) && // chunks use 0-based page numbers
-        String(c.source || '').includes(mfile.replace('.pdf', ''))
+        String(c.source || '').trim().toLowerCase() === mfile.trim().toLowerCase()
       );
       if (matchingChunk && matchingChunk.text && matchingChunk.text.length > fullPageText.length) {
         fullPageText = matchingChunk.text;
@@ -1716,10 +1774,30 @@ export default function HomePage() {
         if (!samePreview) setPreviewPdfMeta({ filename: mfile, pages: undefined });
         try { if (selectedGame) localStorage.setItem(`boardrag_last_pdf:${selectedGame}`, mfile); } catch {}
       } catch {}
+      try {
+        const norm = (s: string) => (s || '').trim();
+        const willSwitch = !(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
+        if (willSwitch || !(previewPdfMeta && typeof previewPdfMeta.pages === 'number')) {
+          setPendingCitation({
+            sec,
+            mfile,
+            mpage,
+            sectionText,
+            fullPageText,
+            anchorRect: (resolved as any)?.header_anchor_bbox_pct,
+            textSpans: (resolved as any)?.text_spans,
+          });
+          console.log(`[openCitation] deferring anchor until PDF loads:`, { mfile, mpage });
+          setLastOpenedCitation(citationKey);
+          try { postLog(`[openCitation] defer userIdx=${String(mapKey)} sec=${sec} file=${mfile} page=${mpage}`); } catch {}
+          return;
+        }
+      } catch {}
+      // Same PDF already loaded → proceed immediately
       try { 
-        console.log(`[openCitation] setting target page ${mpage} and incrementing anchor nonce`);
-        setPreviewTargetPage(mpage); 
-        setAnchorNonce((n) => (n + 1) | 0); 
+        console.log(`[openCitation] same PDF loaded; applying target page ${mpage}`);
+        setPreviewTargetPage(mpage);
+        setAnchorNonce((n) => (n + 1) | 0);
       } catch {}
       try {
         const arr: any = (resolved as any)?.header_anchor_bbox_pct;
@@ -1734,20 +1812,11 @@ export default function HomePage() {
           ...(anchorsPct ? { header_anchors_pct: anchorsPct } : {}),
           ...(textSpans ? { text_spans: textSpans } : {})
         } as any ];
-        console.log(`[openCitation] synthetic chunk created for ${sec}:`, {
-          hasTextSpans: !!textSpans,
-          textSpansType: typeof textSpans,
-          textSpansValue: textSpans,
-          hasAnchors: !!anchorsPct,
-          anchorsValue: anchorsPct,
-          finalTextLength: (fullPageText || sectionText).length,
-          usedFullPageText: !!fullPageText,
-          usedResolvedText: !!resolved.text
-        });
         setPreviewChunks(syntheticChunks as any);
-        } catch {}
-      try { postLog(`[openCitation] target-from-stored userIdx=${String(mapKey)} sec=${sec} file=${mfile} page=${mpage}`); } catch {}
-      return;
+        setLastOpenedCitation(citationKey);
+        try { postLog(`[openCitation] target-from-stored userIdx=${String(mapKey)} sec=${sec} file=${mfile} page=${mpage}`); } catch {}
+        return;
+      } catch {}
     } catch {}
   };
 

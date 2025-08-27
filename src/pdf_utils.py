@@ -851,6 +851,30 @@ def compute_normalized_section_code_bbox(
             ny = max(0.0, (x0 - frame_left) * 100.0 / frame_w)
             nw = max(0.1, (x1 - x0) * 100.0 / frame_w)
             nh = max(0.1, (y1 - y0) * 100.0 / frame_h)
+            # Adjust for page rotation so that returned coords align with rendered top-left
+            try:
+                rot = int(getattr(page, "rotation", 0) or 0) % 360
+            except Exception:
+                rot = 0
+            if rot == 90:
+                # 90° CW: swap axes
+                tx = ny
+                ty = max(0.0, 100.0 - nx - nh)
+                tw = nh
+                th = nw
+                nx, ny, nw, nh = tx, ty, tw, th
+            elif rot == 180:
+                # 180°: invert both axes
+                nx = max(0.0, 100.0 - nx - nh)
+                ny = max(0.0, 100.0 - ny - nw)
+                # sizes unchanged
+            elif rot == 270:
+                # 270° CW (or 90° CCW): swap axes inverse
+                tx = max(0.0, 100.0 - ny - nw)
+                ty = nx
+                tw = nh
+                th = nw
+                nx, ny, nw, nh = tx, ty, tw, th
             return (nx, ny, nw, nh)
     except Exception:
         return None
@@ -964,11 +988,32 @@ def compute_normalized_section_start_bbox_exact(
                 return None
             x0, y0, x1, y1 = merged[0]
             # Normalize to inset frame percentages (x=top, y=left convention)
-            x_pct = max(0.0, min(100.0, ((y0 - frame_top) / frame_h) * 100.0))
-            y_pct = max(0.0, min(100.0, ((x0 - frame_left) / frame_w) * 100.0))
-            w_pct = max(0.2, min(100.0, ((x1 - x0) / frame_w) * 100.0))
-            h_pct = max(0.2, min(100.0, ((y1 - y0) / frame_h) * 100.0))
-            return (x_pct, y_pct, w_pct, h_pct)
+            nx = max(0.0, min(100.0, ((y0 - frame_top) / frame_h) * 100.0))
+            ny = max(0.0, min(100.0, ((x0 - frame_left) / frame_w) * 100.0))
+            nw = max(0.2, min(100.0, ((x1 - x0) / frame_w) * 100.0))
+            nh = max(0.2, min(100.0, ((y1 - y0) / frame_h) * 100.0))
+            # Adjust for page rotation so that returned coords align with rendered top-left
+            try:
+                rot = int(getattr(page, "rotation", 0) or 0) % 360
+            except Exception:
+                rot = 0
+            if rot == 90:
+                tx = ny
+                ty = max(0.0, 100.0 - nx - nh)
+                tw = nh
+                th = nw
+                nx, ny, nw, nh = tx, ty, tw, th
+            elif rot == 180:
+                nx = max(0.0, 100.0 - nx - nh)
+                ny = max(0.0, 100.0 - ny - nw)
+                # sizes unchanged
+            elif rot == 270:
+                tx = max(0.0, 100.0 - ny - nw)
+                ty = nx
+                tw = nh
+                th = nw
+                nx, ny, nw, nh = tx, ty, tw, th
+            return (nx, ny, nw, nh)
     except Exception:
         return None
     return None
