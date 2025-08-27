@@ -287,26 +287,24 @@ def rename_pdfs(selected_entries: List[str], new_name: str) -> Tuple[str, List[s
         else:
             filenames.append(entry.strip())
 
-    # DB-less path: update catalog mapping only
+    # Always update catalog mapping (DB-less is the only mode now)
+    updated = 0
     try:
-        if getattr(config, "DB_LESS", True):
-            updated = set_game_name_for_filenames(filenames, new_name)
-            games = get_available_games()
-            pdf_choices = get_pdf_choices_from_catalog() or get_pdf_dropdown_choices()
-            if updated:
-                msg = (
-                    f"✅ Assigned {len(filenames)} PDF(s) to game '{new_name}': {', '.join(filenames)}"
-                    if len(filenames) > 1
-                    else f"✅ Assigned '{filenames[0]}' to game '{new_name}'"
-                )
-            else:
-                msg = "ℹ️ No catalog entries updated"
-            return msg, games, pdf_choices
+        updated = set_game_name_for_filenames(filenames, new_name)
     except Exception:
-        pass
+        updated = 0
 
-    # Legacy DB path removed
-    return ("disabled in DB-less mode", get_available_games(), get_pdf_dropdown_choices())
+    games = get_available_games()
+    pdf_choices = get_pdf_choices_from_catalog() or get_pdf_dropdown_choices()
+    if updated:
+        msg = (
+            f"✅ Assigned {len(filenames)} PDF(s) to game '{new_name}': {', '.join(filenames)}"
+            if len(filenames) > 1
+            else f"✅ Assigned '{filenames[0]}' to game '{new_name}'"
+        )
+    else:
+        msg = "ℹ️ No catalog entries updated"
+    return msg, games, pdf_choices
 
 
 def get_pdf_dropdown_choices() -> List[str]:

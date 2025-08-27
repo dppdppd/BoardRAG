@@ -932,57 +932,17 @@ async def upload(files: List[UploadFile] = File(...)):
     except Exception:
         pass
 
-    # DB-less: update catalog instead of DB refresh
+    # Always update catalog and run name-extraction; legacy DB path removed
+    await _admin_log_publish("📚 Updating catalog for uploaded PDFs…")
     try:
-        from src import config as _cfg  # type: ignore
-        if bool(getattr(_cfg, "IS_DB_LESS_MODE", True)):
-            await _admin_log_publish("📚 Updating catalog for uploaded PDFs…")
-            try:
-                from src.catalog import ensure_catalog_up_to_date, list_games_from_catalog  # type: ignore
-                from src.catalog import get_pdf_choices_from_catalog  # type: ignore
-            except Exception as e:
-                await _admin_log_publish(f"❌ Catalog module error: {e}")
-                return {"message": "Catalog update failed", "games": [], "pdf_choices": []}
-            await asyncio.to_thread(ensure_catalog_up_to_date, log_cb)
-            games = list_games_from_catalog()
-            try:
-                choices = get_pdf_choices_from_catalog()
-            except Exception:
-                choices = []
-            # After catalog update (extraction/assignment), start a background Pipeline (missing) for the uploaded PDFs
-            try:
-                from pathlib import Path as _P
-                base = _P(getattr(_cfg, "DATA_PATH", "data"))
-                pdfs_abs = [str((base / name).resolve()) for name in saved]
-                _start_pipeline_job_for_pdfs(pdfs_abs, mode="missing")
-            except Exception:
-                pass
-            summary = f"✅ Uploaded {len(saved)} PDF(s) successfully" if saved else "Upload complete."
-            return {"message": summary, "games": games, "pdf_choices": choices}
-    except Exception:
-        pass
+        from src.catalog import ensure_catalog_up_to_date, list_games_from_catalog, get_pdf_choices_from_catalog  # type: ignore
+    except Exception as e:
+        await _admin_log_publish(f"❌ Catalog module error: {e}")
+        return {"message": "Catalog update failed", "games": [], "pdf_choices": []}
 
-    # Legacy DB-backed refresh path
-    from src.services.library_service import refresh_games as svc_refresh_games  # local import
+    await asyncio.to_thread(ensure_catalog_up_to_date, log_cb)
 
-    await _admin_log_publish("⚙️ Processing uploaded PDFs…")
-    refresh_msg, games, pdf_choices = await asyncio.to_thread(svc_refresh_games, log_cb)
-
-    for line in (refresh_msg or "").splitlines():
-        if line.strip():
-            await _admin_log_publish(line.strip())
-
-    try:
-        import re
-        m = re.search(r"Added\s+(\d+)\s+new PDF\(s\)", refresh_msg or "")
-        if m:
-            summary = f"✅ Uploaded {len(saved)} PDF(s) successfully"
-        else:
-            summary = "Upload complete."
-    except Exception:
-        summary = "Upload complete."
-
-    # After legacy refresh and name extraction, also start a background Pipeline (missing) for the uploaded PDFs
+    # Start a background Pipeline (missing) for the uploaded PDFs
     try:
         from pathlib import Path as _P
         from src import config as _cfg  # type: ignore
@@ -992,7 +952,13 @@ async def upload(files: List[UploadFile] = File(...)):
     except Exception:
         pass
 
-    return {"message": summary, "games": games, "pdf_choices": pdf_choices}
+    games = list_games_from_catalog()
+    try:
+        choices = get_pdf_choices_from_catalog()
+    except Exception:
+        choices = []
+    summary = f"✅ Uploaded {len(saved)} PDF(s) successfully" if saved else "Upload complete."
+    return {"message": summary, "games": games, "pdf_choices": choices}
 
 
 @app.post("/admin/rebuild")

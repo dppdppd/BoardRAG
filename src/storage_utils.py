@@ -6,7 +6,11 @@ from . import config
 
 
 def get_pdf_storage_usage():
-    """Calculate total disk space used by PDF files."""
+    """Calculate total disk space used by top-level PDF files only.
+
+    Only counts PDFs located directly under `DATA_PATH` and excludes any PDFs in
+    subdirectories (e.g., per-page PDFs under `<PDF_STEM>/1_pdf_pages`).
+    """
     try:
         pdf_dir = Path(config.DATA_PATH)
         if not pdf_dir.exists():
@@ -15,7 +19,8 @@ def get_pdf_storage_usage():
         total_size = 0
         file_count = 0
         
-        for pdf_file in pdf_dir.rglob("*.pdf"):
+        # Only count PDFs that are direct children of the data directory
+        for pdf_file in pdf_dir.glob("*.pdf"):
             if pdf_file.is_file():
                 total_size += pdf_file.stat().st_size
                 file_count += 1

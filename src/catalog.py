@@ -349,9 +349,9 @@ def validate_catalog(log: Optional[callable] = None) -> Dict[str, object]:
 # ---------------------------------------------------------------------------
 
 def set_game_name_for_filenames(filenames: List[str], new_name: str) -> int:
-    """Update catalog entries' game_name for the given filenames.
+    """Set game_name for the given PDF filenames in the catalog.
 
-    Returns the number of entries updated. Does not create new entries.
+    Creates catalog entries when missing. Returns the number of entries written.
     """
     if not new_name or not filenames:
         return 0
@@ -359,15 +359,16 @@ def set_game_name_for_filenames(filenames: List[str], new_name: str) -> int:
     updated = 0
     for fn in filenames:
         key = Path(fn).name
-        if key in cat:
-            try:
-                entry = cat.get(key) or {}
-                entry["game_name"] = new_name
-                entry["updated_at"] = _now_iso()
-                cat[key] = entry
-                updated += 1
-            except Exception:
-                pass
+        try:
+            entry = cat.get(key) or {}
+            entry["game_name"] = new_name
+            entry.setdefault("file_id", str(entry.get("file_id") or ""))
+            entry.setdefault("pages", entry.get("pages") if isinstance(entry.get("pages"), dict) else None)
+            entry["updated_at"] = _now_iso()
+            cat[key] = entry
+            updated += 1
+        except Exception:
+            pass
     if updated:
         save_catalog(cat)
     return updated
