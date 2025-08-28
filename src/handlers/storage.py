@@ -1,6 +1,6 @@
 """Storage and session management UI handlers."""
 
-import gradio as gr
+# Legacy Gradio removal: no gradio imports
 from ..storage_utils import format_storage_info
 
 

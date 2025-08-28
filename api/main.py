@@ -827,6 +827,19 @@ async def upload(files: List[UploadFile] = File(...)):
     except Exception:
         pass
 
+    # Trigger background name extraction using existing LLM-based function per file
+    try:
+        from src.retrieval.game_names import extract_and_store_game_name  # type: ignore
+        for name in saved:
+            async def _run(fname: str) -> None:
+                try:
+                    await asyncio.to_thread(extract_and_store_game_name, fname)
+                except Exception:
+                    pass
+            asyncio.create_task(_run(name))
+    except Exception:
+        pass
+
     games = list_games_from_catalog()
     try:
         choices = get_pdf_choices_from_catalog()
@@ -2536,6 +2549,67 @@ async def stream_chat_ndjson(q: str, game: Optional[str] = None, include_web: Op
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(safe_stream(), media_type="application/x-ndjson", headers=headers)
+
+# ----------------------------------------------------------------------------
+# Generate a short title for a Q&A pair
+# ----------------------------------------------------------------------------
+
+class TitleQaPayload(BaseModel):
+    q: str
+    a: str
+    game: Optional[str] = None
+
+
+@app.post("/title-qa")
+async def title_qa(payload: TitleQaPayload, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _role = _require_auth(authorization, token)
+    try:
+        # Build concise title prompt
+        from src import config as cfg
+        prompt = (
+            "Generate a concise, human-friendly title for this Q&A.\n\n"
+            "Requirements:\n"
+            "- Single line\n"
+            "- 2 to 6 words\n"
+            "- <= 40 characters\n"
+            "- No trailing punctuation\n"
+            "- Use Title Case\n"
+            "- Avoid the game name\n\n"
+            f"Game: {payload.game or '-'}\n\n"
+            f"Question:\n{payload.q}\n\n"
+            f"Answer:\n{payload.a}\n\n"
+            "Title:"
+        )
+
+        # Select model based on configured provider
+        provider = (cfg.LLM_PROVIDER or "openai").lower()
+        if provider == "anthropic":
+            from langchain_anthropic import ChatAnthropic  # type: ignore
+            model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0)
+        elif provider == "ollama":
+            from langchain_community.llms.ollama import Ollama  # type: ignore
+            model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL)
+        else:
+            from langchain_openai import ChatOpenAI  # type: ignore
+            # Use deterministic temperature; timeout consistent with other calls
+            model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=0, timeout=60)
+
+        response = model.invoke(prompt)
+        raw = getattr(response, "content", str(response))
+        text = str(raw or "").strip()
+        # Use first line; strip quotes and trailing punctuation
+        first = (text.split("\n", 1)[0] if text else "").strip().strip("\"").strip("'")
+        import re as _re
+        title = _re.sub(r"[.!?:;,\s]+$", "", first)
+        if len(title) > 60:
+            title = title[:60].rstrip()
+        if not title:
+            # Fallback: derive from question
+            q_line = (payload.q or "").strip().split("\n", 1)[0]
+            title = _re.sub(r"[.!?:;,\s]+$", "", q_line)[:60].rstrip()
+        return {"title": title}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 # ----------------------------------------------------------------------------
 # Admin: list/unblock blocked sessions

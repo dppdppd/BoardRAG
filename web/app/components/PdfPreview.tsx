@@ -164,6 +164,7 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
   }, [measuredPageHeight]);
   const containerWidth = measuredWidth ?? 738; // stable default to reduce reflow
   // Back to full list of pages; we will render placeholders for non-window pages
+  // When total pages are unknown (first load), render only the target page so we can anchor immediately
   const allPages: number[] = (typeof totalPages === 'number' && totalPages > 0)
     ? Array.from({ length: totalPages }, (_v, i) => i + 1)
     : [Number(targetPageResolved) || 1];
@@ -587,7 +588,12 @@ export default function PdfPreview({ API_BASE, token, title, chunks, pdfMeta, se
       scrollTimeoutRef.current = null;
     }
     // If total pages are known, attempt immediately; otherwise wait for render callback
-    if (typeof totalPages === 'number' && isFinite(totalPages) && totalPages > 0) {
+    // Attempt anchoring as soon as the target page renders, even if total pages unknown
+    if (typeof totalPages !== 'number' || !isFinite(totalPages) || totalPages <= 0) {
+      anchorPhaseRef.current = 0;
+      const did = performAnchorOnce();
+      setTimeout(() => { setRenderWindowDown(adjacentPageWindow); }, 120);
+    } else {
       // Only reset phase if we're switching to a different page
       if (prevTargetPageRef.current !== Number(targetPageResolved)) {
         anchorPhaseRef.current = 0;

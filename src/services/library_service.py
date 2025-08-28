@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Callable
 
 from .. import config
-from ..query import (
+from ..retrieval.game_names import (
     get_available_games,
     extract_and_store_game_name,
+    get_stored_game_names,
 )
-from ..query import get_stored_game_names
 from ..pdf_utils import optimize_with_raster_fallback_if_large
 
 

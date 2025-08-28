@@ -1,6 +1,6 @@
 version: "3.8"
 
-# Docker Compose file for running BoardRAG with a Gradio interface. All runtime
+# Docker Compose file for optional local services (e.g., Ollama). All runtime
 # configuration (including `LLM_PROVIDER`) is picked up from the project-root
 # `.env` file — nothing is hard-coded here.
 
@@ -19,23 +19,7 @@ services:
     profiles:
       - ollama   # Start with:  COMPOSE_PROFILES=ollama docker compose up
 
-  # Gradio front-end running the BoardRAG app
-  gradio:
-    build:
-      context: .
-      dockerfile: docker/gradio/Dockerfile.app
-    command: python app.py
-    volumes:
-      # Bind-mount host folders so large PDFs and the vector DB stay outside the
-      # image. Adjust paths if you run compose from a different directory.
-      - ./data:/app/data
-      - ./chroma:/app/chroma
-    ports:
-      - "7860:7860"
-    env_file:
-      - .env      # bring all user-defined environment variables inside
-    environment:
-      ENABLE_CHROMA_TELEMETRY: "False"
+  # No Gradio frontend; Next.js app runs separately.
 
 volumes:
   ollama:

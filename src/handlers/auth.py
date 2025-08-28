@@ -1,6 +1,6 @@
 """Authentication-related UI handlers."""
 
-import gradio as gr
+# Legacy Gradio removal: no gradio imports
 from .. import config
 from ..storage_utils import format_storage_info
 

@@ -3,7 +3,7 @@
 import os
 import shutil
 from pathlib import Path
-import gradio as gr
+# Legacy Gradio removal: no gradio imports
 
 from langchain_chroma import Chroma
 

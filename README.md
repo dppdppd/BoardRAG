@@ -75,15 +75,9 @@ python query.py --query_text "How can I build a hotel in Monopoly?"
 
 You can also include the flags `--include_sources` and `include_contexts` to include the sources and chunks used to build the answer, respectively. The LLM used for generation is configured via the environment variable `GENERATOR_MODEL`.
 
-### Gradio Interface
+### Frontend
 
-If you want to use a Gradio interface to query the RAG model, please run the following command:
-
-```bash
-python app.py
-```
-
-This will start a Gradio interface where you can input your question and get the answer from the RAG model. Make sure that the database is already populated and that your `OPENAI_API_KEY` is exported.
+The app uses a Next.js frontend in `web/`. Start it with your usual Next workflow after setting `NEXT_PUBLIC_API_BASE` to point at the FastAPI server.
 
 ### Tests
 

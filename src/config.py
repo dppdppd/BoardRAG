@@ -23,30 +23,41 @@ load_dotenv()
 # Provider and Model Configuration
 # ---------------------------------------------------------------------------
 
-# LLM Provider selection: "openai", "anthropic", or "ollama"
+# LLM Provider selection: "openai", "anthropic", "ollama", or "openrouter"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
 
 # Model configurations by provider
 MODEL_CONFIGS = {
     "openai": {
-        "generator": "gpt-4o",
+        "generator": "o3-mini",
         "embedder": "text-embedding-3-small",
-        "evaluator": "gpt-4o",
+        "evaluator": "o3-mini",
     },
     "anthropic": {
         "generator": "claude-sonnet-4-20250514",
         "embedder": "text-embedding-3-small",  # Still use OpenAI for embeddings
         "evaluator": "claude-sonnet-4-20250514",
     },
+    # "anthropic": {
+    #     "generator": "claude-3-7-sonnet-20250219",
+    #     "embedder": "text-embedding-3-small",  # Still use OpenAI for embeddings
+    #     "evaluator": "claude-3-7-sonnet-20250219",
+    # },
     "ollama": {
         "generator": "mistral",
         "embedder": "nomic-embed-text",
         "evaluator": "mistral",
     },
+    "openrouter": {
+        # OpenRouter model id for Llama 3.3 70B Instruct
+        "generator": "meta-llama/llama-3.3-70b-instruct",
+        "embedder": "text-embedding-3-small",
+        "evaluator": "meta-llama/llama-3.3-70b-instruct",
+    },
 }
 
 # Get model configuration for selected provider
-_config = MODEL_CONFIGS.get(LLM_PROVIDER.lower(), MODEL_CONFIGS["openai"])
+_config = MODEL_CONFIGS.get(LLM_PROVIDER.lower())
 
 GENERATOR_MODEL = os.getenv("GENERATOR_MODEL", _config["generator"])
 EMBEDDER_MODEL = os.getenv("EMBEDDER_MODEL", _config["embedder"])
@@ -76,6 +87,8 @@ SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "brave").lower()
 # API keys for external providers (only required when selected)
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 BRAVE_API_KEY = os.getenv("BRAVE_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 # ---------------------------------------------------------------------------
 # Optional - Search Query Rewrite Configuration
@@ -147,6 +160,19 @@ IGNORE_VISUAL_IMPORTANCE = os.getenv("IGNORE_VISUAL_IMPORTANCE", "True").lower()
 
 # Debug print so users can see what the setting resolved to at import time
 print(f"[config] IGNORE_VISUAL_IMPORTANCE = {IGNORE_VISUAL_IMPORTANCE}")
+
+# ---------------------------------------------------------------------------
+# Optional - Streaming Validation/Repair (detached, togglable)
+# ---------------------------------------------------------------------------
+# When enabled, server will perform an inline streaming transform that
+# validates per-sentence formatting and attempts lightweight repair without
+# stalling the outgoing stream.
+ENABLE_STREAM_VALIDATION = os.getenv("ENABLE_STREAM_VALIDATION", "False").lower() in {"1", "true", "yes"}
+STREAM_REPAIR_USE_LLM = os.getenv("STREAM_REPAIR_USE_LLM", "False").lower() in {"1", "true", "yes"}
+STREAM_REPAIR_TIMEOUT_MS = int(os.getenv("STREAM_REPAIR_TIMEOUT_MS", "100"))
+STREAM_REPAIR_MAX_CONSECUTIVE_INVALID = int(os.getenv("STREAM_REPAIR_MAX_CONSECUTIVE_INVALID", "3"))
+
+print(f"[config] ENABLE_STREAM_VALIDATION = {ENABLE_STREAM_VALIDATION}")
 
 # ---------------------------------------------------------------------------
 # Data and Template Paths

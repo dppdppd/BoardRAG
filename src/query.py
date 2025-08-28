@@ -192,15 +192,20 @@ def extract_game_name_from_filename(filename: str, debug: bool = False) -> str:
 
     for attempt in range(max_retries):
         try:
-            # Use configured provider for filename extraction
-            if cfg.LLM_PROVIDER.lower() == "anthropic":
+            # Use configured provider for filename extraction (strict, no normalization)
+            _prov = (cfg.LLM_PROVIDER or "").lower()
+            if _prov == "anthropic":
                 model = ChatAnthropic(model=cfg.GENERATOR_MODEL, temperature=0)
-            elif cfg.LLM_PROVIDER.lower() == "ollama":
+            elif _prov == "ollama":
                 from langchain_community.llms.ollama import Ollama
 
                 model = Ollama(model=cfg.GENERATOR_MODEL, base_url=cfg.OLLAMA_URL)
+            elif _prov == "openrouter":
+                from langchain_openai import ChatOpenAI as _OpenRouterChat
+                base_url = getattr(cfg, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+                api_key = getattr(cfg, "OPENROUTER_API_KEY", None)
+                model = _OpenRouterChat(model=cfg.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S, base_url=base_url, api_key=api_key)
             else:  # openai
-                # o3 model only supports temperature=1, other OpenAI models use 0 for determinism
                 if _openai_requires_default_temperature(cfg.GENERATOR_MODEL):
                     model = ChatOpenAI(model=cfg.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S)
                 else:
@@ -708,6 +713,23 @@ def stream_query_rag(
         def _inject_pages(text: str) -> str:
             return text
 
+        # Define system prompt once (used for all providers) so it can be returned via metadata
+        system_prompt = (
+            "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations. "
+            "Do not use any preambles or phrases that reference the rulebook or the context such as 'Based on the rulebook,' 'According to', 'Based on the provided material,' etc. "
+            "Answer the user's question based ONLY on the attached material. "
+            "Answer concisely in a few short paragraphs. "
+            "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the form [<section>], placed immediately after the paragraph with no trailing text. "
+            "Do not combine multiple sections into a single bracketed citation. "
+            "Do not enclose a citation with parentheses or extra text (e.g., '(see [13.1])'). "
+            "Use ONLY section labels from the Allowed citations list, VERBATIM. Do not add any characters, words, or symbols to the section labels."
+            # "Example (format only): Wire cards can only be placed as a discard. [13.1]"
+        )
+
+        # Collect streaming validation/repair log (if enabled)
+        repairs_log: list[dict[str, Any]] = []
+        sv_acc: dict[str, str] = {"original": "", "repaired": ""}
+
         def _gen():
             # If provider is not Anthropic, run a single completion and stream slices
             try:
@@ -726,17 +748,34 @@ def stream_query_rag(
                             model = ChatOpenAI(model=_cfg2.GENERATOR_MODEL, temperature=1, timeout=REQUEST_TIMEOUT_S)
                         else:
                             model = ChatOpenAI(model=_cfg2.GENERATOR_MODEL, temperature=0, timeout=REQUEST_TIMEOUT_S)
+                    elif provider == "openrouter":
+                        # Use OpenRouter base URL and key to access meta-llama/llama-3.3-70b-instruct
+                        from langchain_openai import ChatOpenAI as _OpenRouterChat
+                        base_url = getattr(_cfg2, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+                        api_key = getattr(_cfg2, "OPENROUTER_API_KEY", None)
+                        # Do not pass temperature if model rejects it (treat like OpenAI guard if needed)
+                        model_name = getattr(_cfg2, "GENERATOR_MODEL", "meta-llama/llama-3.3-70b-instruct")
+                        params = {"model": model_name, "timeout": REQUEST_TIMEOUT_S, "base_url": base_url, "api_key": api_key}
+                        try:
+                            # Many OpenRouter models accept temperature; default to 0 for determinism
+                            params["temperature"] = 0
+                        except Exception:
+                            pass
+                        model = _OpenRouterChat(**params)
                     else:
                         from langchain_community.llms.ollama import Ollama  # type: ignore
                         model = Ollama(model=_cfg2.GENERATOR_MODEL, base_url=getattr(_cfg2, "OLLAMA_URL", "http://localhost:11434"))
                     resp = model.invoke(instruction)
                     text = str(getattr(resp, "content", resp) or "")
                     text = _inject_pages(text)
-                    slice_size = 64
-                    for i in range(0, len(text), slice_size):
-                        piece = text[i:i+slice_size]
-                        if piece:
-                            yield piece
+                    def _raw_chunks():
+                        slice_size = 64
+                        for i in range(0, len(text), slice_size):
+                            piece = text[i:i+slice_size]
+                            if piece:
+                                yield piece
+                    for _out in _stream_with_validation(_raw_chunks(), allowed_struct, repairs_log, sv_acc, instruction):
+                        yield _out
                 except Exception as e:
                     yield f"Model error: {e}"
                 return
@@ -789,16 +828,6 @@ def stream_query_rag(
             # Stream tokens using Files API page file_ids when available; otherwise fall back to base64 page attachments
             api_key = _cfg2.ANTHROPIC_API_KEY
             model = _cfg2.GENERATOR_MODEL
-            system_prompt = (
-                "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations. "
-                "Start directly (lead with Yes/No for yes/no questions). Do not use any preambles or meta phrases such as 'Based on the rulebook' or 'According to'. "
-                "Answer the user's question based ONLY on the attached material. "
-                "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the form [<section>], placed immediately after the paragraph with no trailing text. "
-                "Do not combine multiple sections into a single bracketed citation. "
-                "Do not enclose a citation with parentheses or extra text (e.g., '(see [13.1])'). "
-                "Use ONLY section labels from the Allowed citations list; do not invent or paraphrase labels. "
-                "Example (format only): Wire cards can only be placed as a discard. [13.1]"
-            )
             # Resolve page file_ids from catalog
             page_file_ids: list[str] = []
             try:
@@ -824,24 +853,28 @@ def stream_query_rag(
                     carry = ""
                     import re as _re
                     _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
-                    for delta in _file_stream(api_key, model, system_prompt, instruction, fid):
-                        txt = str(delta or "")
-                        if not txt:
-                            continue
-                        combined = carry + txt
-                        replaced = _inject_pages(combined)
-                        m = _incomplete.search(replaced)
-                        if m:
-                            cut = m.start()
-                            out = replaced[:cut]
-                            carry = replaced[cut:]
-                        else:
-                            out = replaced
-                            carry = ""
-                        if out:
-                            yield out
-                    if carry:
-                        yield carry
+                    def _raw_chunks():
+                        nonlocal carry
+                        for delta in _file_stream(api_key, model, system_prompt, instruction, fid):
+                            txt = str(delta or "")
+                            if not txt:
+                                continue
+                            combined = carry + txt
+                            replaced = _inject_pages(combined)
+                            m = _incomplete.search(replaced)
+                            if m:
+                                cut = m.start()
+                                out = replaced[:cut]
+                                carry = replaced[cut:]
+                            else:
+                                out = replaced
+                                carry = ""
+                            if out:
+                                yield out
+                        if carry:
+                            yield carry
+                    for _out in _stream_with_validation(_raw_chunks(), allowed_struct, repairs_log, sv_acc, instruction):
+                        yield _out
             else:
                 # No page file_ids available; attempt to upload page PDFs now and persist
                 new_fids: list[str] = []
@@ -913,11 +946,44 @@ def stream_query_rag(
                         carry = ""
                         import re as _re
                         _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
-                        for delta in _file_stream(api_key, model, system_prompt, instruction, fid):
-                            txt = str(delta or "")
-                            if not txt:
+                        def _raw_chunks():
+                            nonlocal carry
+                            for delta in _file_stream(api_key, model, system_prompt, instruction, fid):
+                                txt = str(delta or "")
+                                if not txt:
+                                    continue
+                                combined = carry + txt
+                                replaced = _inject_pages(combined)
+                                m = _incomplete.search(replaced)
+                                if m:
+                                    cut = m.start()
+                                    out = replaced[:cut]
+                                    carry = replaced[cut:]
+                                else:
+                                    out = replaced
+                                    carry = ""
+                                if out:
+                                    yield out
+                            if carry:
+                                yield carry
+                        for _out in _stream_with_validation(_raw_chunks(), allowed_struct, repairs_log, sv_acc, instruction):
+                            yield _out
+                else:
+                    # Final fallback: stream with base64 page attachments
+                    try:
+                        from .llm_outline_helpers import anthropic_pdf_messages_with_pages_stream as _pages_stream  # type: ignore
+                    except Exception:
+                        def _pages_stream(*args, **kwargs):
+                            return []  # type: ignore
+                    carry = ""
+                    import re as _re
+                    _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
+                    def _raw_chunks():
+                        nonlocal carry
+                        for delta in _pages_stream(api_key, model, system_prompt, instruction, [str(p) for p in attach_paths]):
+                            if not delta:
                                 continue
-                            combined = carry + txt
+                            combined = carry + str(delta)
                             replaced = _inject_pages(combined)
                             m = _incomplete.search(replaced)
                             if m:
@@ -931,33 +997,8 @@ def stream_query_rag(
                                 yield out
                         if carry:
                             yield carry
-                else:
-                    # Final fallback: stream with base64 page attachments
-                    try:
-                        from .llm_outline_helpers import anthropic_pdf_messages_with_pages_stream as _pages_stream  # type: ignore
-                    except Exception:
-                        def _pages_stream(*args, **kwargs):
-                            return []  # type: ignore
-                    carry = ""
-                    import re as _re
-                    _incomplete = _re.compile(r"\[[^\]]*:\s*\{[^\]]*$", _re.DOTALL)
-                    for delta in _pages_stream(api_key, model, system_prompt, instruction, [str(p) for p in attach_paths]):
-                        if not delta:
-                            continue
-                        combined = carry + str(delta)
-                        replaced = _inject_pages(combined)
-                        m = _incomplete.search(replaced)
-                        if m:
-                            cut = m.start()
-                            out = replaced[:cut]
-                            carry = replaced[cut:]
-                        else:
-                            out = replaced
-                            carry = ""
-                        if out:
-                            yield out
-                    if carry:
-                        yield carry
+                    for _out in _stream_with_validation(_raw_chunks(), allowed_struct, repairs_log, sv_acc, instruction):
+                        yield _out
 
         # Build metadata for developer inspection
         try:
@@ -1050,13 +1091,252 @@ def stream_query_rag(
                     included_chunks_payload.append(payload)
                 except Exception:
                     continue
-            meta = {"sources": srcs, "context": ctx_text, "prompt": instruction, "original_query": query_text, "chunks": included_chunks_payload, "spans": [], "citations": allowed_struct}
+            meta = {"sources": srcs, "context": ctx_text, "prompt": instruction, "original_query": query_text, "chunks": included_chunks_payload, "spans": [], "citations": allowed_struct, "system": system_prompt, "stream_validation": {"enabled": bool(getattr(cfg, "ENABLE_STREAM_VALIDATION", False)), "repairs": repairs_log, "original_full": sv_acc.get("original", ""), "repaired_full": sv_acc.get("repaired", "")}}
         except Exception:
-            meta = {"sources": [], "context": "", "prompt": query_text, "original_query": query_text, "spans": [], "citations": []}
+            meta = {"sources": [], "context": "", "prompt": query_text, "original_query": query_text, "spans": [], "citations": [], "system": system_prompt, "stream_validation": {"enabled": bool(getattr(cfg, "ENABLE_STREAM_VALIDATION", False)), "repairs": repairs_log, "original_full": sv_acc.get("original", ""), "repaired_full": sv_acc.get("repaired", "")}}
         print("="*80)
         print("🔍 STREAM_QUERY_RAG DEBUG END (VECTOR)")
         print("="*80 + "\n")
         return _gen(), meta
+
+
+def _stream_with_validation(raw_iter, allowed_struct, repairs_log: Optional[list] = None, sv_acc: Optional[dict] = None, instruction_text: Optional[str] = None):
+    """Detached streaming validator/repair wrapper.
+
+    Buffers to sentence boundaries, validates citation format and membership,
+    and performs cheap repairs without stalling output.
+    """
+    try:
+        from . import config as _cfg  # type: ignore
+    except Exception:
+        class _Cfg:
+            ENABLE_STREAM_VALIDATION = False
+            STREAM_REPAIR_MAX_CONSECUTIVE_INVALID = 3
+        _cfg = _Cfg()  # type: ignore
+
+    if not getattr(_cfg, "ENABLE_STREAM_VALIDATION", False):
+        for ch in raw_iter:
+            yield ch
+        return
+
+    # Build allowed section/code set
+    allowed_sections: set[str] = set()
+    try:
+        for item in (allowed_struct or []):
+            code = str(item.get("code") or "").strip()
+            sec = str(item.get("section") or "").strip()
+            if code:
+                allowed_sections.add(code)
+            if sec:
+                allowed_sections.add(sec)
+    except Exception:
+        allowed_sections = set()
+
+    # Also parse Allowed citations from the instruction text we sent to the model
+    try:
+        if instruction_text:
+            import re as _re
+            # Match lines like: - file=..., sections=["...", "..."]
+            for line in instruction_text.splitlines():
+                m = _re.search(r"sections=\[(.*?)\]", line)
+                if not m:
+                    continue
+                inner = m.group(1)
+                for part in inner.split(","):
+                    s = part.strip().strip('"').strip("'")
+                    if s:
+                        allowed_sections.add(s)
+    except Exception:
+        pass
+
+    import re as _re
+    sentence_end = _re.compile(r"([.!?])\s+")
+    citation_re = _re.compile(r"\[(?P<section>[^\[\]]+)\]$")
+    forbidden = _re.compile(r"\((?:see\s*)?\[[^\]]+\]\)", _re.IGNORECASE)
+
+    buffer = ""
+    consecutive_invalid = 0
+
+    def _emit_safe_fallback() -> str:
+        try:
+            one = next(iter(allowed_sections)) if allowed_sections else ""
+        except Exception:
+            one = ""
+        if one:
+            return f"Answer constrained by available sections. [{one}]"
+        return ""
+
+    for chunk in raw_iter:
+        t = str(chunk)
+        buffer += t
+        try:
+            if isinstance(sv_acc, dict):
+                sv_acc["original"] = sv_acc.get("original", "") + t
+        except Exception:
+            pass
+        parts = sentence_end.split(buffer)
+        rebuilt: list[str] = []
+        i = 0
+        while i + 2 < len(parts):
+            rebuilt.append(parts[i] + parts[i+1])
+            i += 3
+        tail = "".join(parts[i:]) if i < len(parts) else ""
+        for sent in rebuilt:
+            s = sent.strip()
+            if not s:
+                continue
+            is_forbidden = bool(forbidden.search(s))
+            m = citation_re.search(s)
+            has_one_cite = bool(m)
+            sec = (m.group("section").strip() if m else "")
+            in_allowed = sec in allowed_sections
+            if (not is_forbidden) and has_one_cite and in_allowed:
+                consecutive_invalid = 0
+                try:
+                    if isinstance(sv_acc, dict):
+                        sv_acc["repaired"] = sv_acc.get("repaired", "") + sent
+                except Exception:
+                    pass
+                yield sent
+                continue
+            repaired = _try_llm_repair_if_enabled(s, allowed_sections)
+            if repaired:
+                try:
+                    if isinstance(repairs_log, list):
+                        repairs_log.append({"original": s, "repaired": repaired})
+                except Exception:
+                    pass
+                try:
+                    if isinstance(sv_acc, dict):
+                        sv_acc["repaired"] = sv_acc.get("repaired", "") + repaired + " "
+                except Exception:
+                    pass
+                consecutive_invalid = 0
+                yield repaired + " "
+                continue
+            consecutive_invalid += 1
+            if consecutive_invalid >= getattr(_cfg, "STREAM_REPAIR_MAX_CONSECUTIVE_INVALID", 3):
+                filler = _emit_safe_fallback()
+                if filler:
+                    yield filler + " "
+                consecutive_invalid = 0
+        buffer = tail
+
+    s = buffer.strip()
+    if s:
+        m = citation_re.search(s)
+        is_forbidden = bool(forbidden.search(s))
+        if m and (m.group("section").strip() in allowed_sections) and not is_forbidden:
+            try:
+                if isinstance(sv_acc, dict):
+                    sv_acc["repaired"] = sv_acc.get("repaired", "") + s
+            except Exception:
+                pass
+            yield s
+        else:
+            repaired = _try_llm_repair_if_enabled(s, allowed_sections)
+            if repaired:
+                try:
+                    if isinstance(repairs_log, list):
+                        repairs_log.append({"original": s, "repaired": repaired})
+                except Exception:
+                    pass
+                try:
+                    if isinstance(sv_acc, dict):
+                        sv_acc["repaired"] = sv_acc.get("repaired", "") + repaired
+                except Exception:
+                    pass
+                yield repaired
+
+
+def _try_micro_repair(sentence: str, allowed_sections: set[str]) -> str:
+    """Cheap repair without external calls. Returns fixed sentence or ''."""
+    try:
+        import re as _re
+        cites = _re.findall(r"\[([^\]]+)\]", sentence)
+        candidate = cites[-1].strip() if cites else ""
+        if candidate in allowed_sections:
+            base = _re.sub(r"\s*\[[^\]]+\]\s*", "", sentence).strip()
+            return f"{base} [{candidate}]"
+        cand = next(iter(allowed_sections)) if allowed_sections else ""
+        if cand:
+            base = _re.sub(r"\s*\[[^\]]+\]\s*", "", sentence).strip()
+            return f"{base} [{cand}]"
+        return ""
+    except Exception:
+        return ""
+
+
+def _try_llm_repair_if_enabled(sentence: str, allowed_sections: set[str]) -> str:
+    """If STREAM_REPAIR_USE_LLM is enabled, run a tiny constrained repair; else micro-repair.
+
+    Returns repaired sentence or ''. Never blocks beyond configured timeout.
+    """
+    try:
+        from . import config as _cfg  # type: ignore
+    except Exception:
+        class _Cfg:
+            STREAM_REPAIR_USE_LLM = False
+            STREAM_REPAIR_TIMEOUT_MS = 100
+        _cfg = _Cfg()  # type: ignore
+
+    # Fast path: if disabled, use micro-repair
+    if not getattr(_cfg, "STREAM_REPAIR_USE_LLM", False):
+        return _try_micro_repair(sentence, allowed_sections)
+
+    # If no allowed sections, do not attempt
+    if not allowed_sections:
+        return ""
+
+    # Compose strict instruction
+    allow_list = ", ".join(sorted(f"[{s}]" for s in allowed_sections))
+    prompt = (
+        "Repair this one paragraph. Rules: "
+        "- Keep only content that can end with EXACTLY ONE allowed citation. "
+        "- Allowed citations (choose one): " + allow_list + ". "
+        "- Delete any extra citations and trailing text after the citation. "
+        "- If repair not possible, return an empty string."
+    )
+
+    try:
+        # Use the same provider model but with a tiny budget
+        from . import config as _cfg2  # type: ignore
+        model_name = getattr(_cfg2, "GENERATOR_MODEL", "")
+        timeout_s = max(0.05, float(getattr(_cfg2, "STREAM_REPAIR_TIMEOUT_MS", 100)) / 1000.0)
+        # Prefer OpenAI small models if provider is openai; otherwise reuse primary with short timeout
+        if getattr(_cfg2, "LLM_PROVIDER", "anthropic").lower() == "openai":
+            try:
+                from langchain_openai import ChatOpenAI
+                small = ChatOpenAI(model="gpt-4o-mini", temperature=0, timeout=timeout_s)
+                resp = small.invoke(prompt + "\n\nParagraph:\n" + sentence)
+                out = str(getattr(resp, "content", resp) or "").strip()
+            except Exception:
+                out = ""
+        else:
+            try:
+                from langchain_anthropic import ChatAnthropic
+                small = ChatAnthropic(model=model_name, temperature=0, timeout=timeout_s)
+                resp = small.invoke(prompt + "\n\nParagraph:\n" + sentence)
+                out = str(getattr(resp, "content", resp) or "").strip()
+            except Exception:
+                out = ""
+
+        # Validate output quickly
+        if not out:
+            return ""
+        import re as _re
+        # Must end with [section]
+        m = _re.search(r"\[([^\]]+)\]$", out)
+        if not m:
+            return ""
+        sec = m.group(1).strip()
+        if sec not in allowed_sections:
+            return ""
+        # Ensure only one citation and clean internal citations
+        base = _re.sub(r"\s*\[[^\]]+\]\s*", "", out).strip()
+        return f"{base} [{sec}]"
+    except Exception:
+        return _try_micro_repair(sentence, allowed_sections)
 
 
 def main():

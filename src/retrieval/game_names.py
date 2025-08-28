@@ -94,10 +94,8 @@ Official game name:"""
             print(f"LLM extraction failed for {filename}: {e}")
             break
 
-    fallback_name = filename.replace(".pdf", "").replace("-", " ").replace("_", " ").title()
-    normalized_fallback = normalize_game_title(fallback_name)
-    print(f"Using fallback name: '{normalized_fallback}' for '{filename}'")
-    return normalized_fallback
+    # No filename-based fallback; return empty when LLM fails
+    return ""
 
 
 def improve_fallback_name(filename: str) -> str:
@@ -108,6 +106,8 @@ def store_game_name(filename: str, game_name: str) -> None:
     # Catalog-only storage in DB-less mode
     try:
         from ..catalog import load_catalog, save_catalog, _now_iso  # type: ignore
+        if not game_name or not game_name.strip():
+            return
         cat = load_catalog()
         key = Path(filename).name
         entry = cat.get(key) or {}

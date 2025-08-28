@@ -124,18 +124,18 @@ def ensure_catalog_up_to_date(log: Optional[callable] = None) -> Dict[str, dict]
         entry = cat.get(key) or {}
         # Preserve any user-assigned name if present; otherwise default to filename stem
         existing_name = str((entry or {}).get("game_name") or "").strip()
-        final_name = existing_name or p.stem
         # Update in-place to avoid dropping other fields; never set top-level file_id
         entry = entry or {}
         entry.pop("file_id", None)
-        entry["game_name"] = final_name
+        if existing_name:
+            entry["game_name"] = existing_name
         entry.setdefault("pages", entry.get("pages") if isinstance(entry.get("pages"), dict) else None)
         entry["size_bytes"] = size
         entry["updated_at"] = _now_iso()
         cat[key] = entry
         try:
             if log:
-                log(f"✅ Cataloged {key} → '{final_name}'")
+                log(f"✅ Cataloged {key} → '{existing_name}'")
         except Exception:
             pass
         save_catalog(cat)
@@ -190,20 +190,20 @@ def ensure_catalog_for_files(filenames: List[str], log: Optional[callable] = Non
         except Exception:
             size = 0
         entry = cat.get(key) or {}
-        # Preserve any user-assigned name if present; otherwise default to filename stem
+        # Preserve any user-assigned name if present; no filename fallback
         existing_name = str((entry or {}).get("game_name") or "").strip()
-        final_name = existing_name or p.stem
         # Update in-place; never set top-level file_id
         entry = entry or {}
         entry.pop("file_id", None)
-        entry["game_name"] = final_name
+        if existing_name:
+            entry["game_name"] = existing_name
         entry.setdefault("pages", entry.get("pages") if isinstance(entry.get("pages"), dict) else None)
         entry["size_bytes"] = size
         entry["updated_at"] = _now_iso()
         cat[key] = entry
         try:
             if log:
-                log(f"✅ Cataloged {key} → '{final_name}'")
+                log(f"✅ Cataloged {key} → '{existing_name}'")
         except Exception:
             pass
         save_catalog(cat)

@@ -362,6 +362,11 @@ input[type="file"]::-webkit-file-upload-button { font-family: inherit; }
 .chip { background: var(--control-bg); border: 1px solid var(--control-border); padding: 6px 10px; border-radius: var(--radius); }
 .btn { background: var(--control-bg); color: var(--text); border: 1px solid var(--control-border); border-radius: var(--radius); padding: 10px 16px; font-weight: 600; cursor: pointer; transition: background-color .12s ease, transform .05s ease; -webkit-tap-highlight-color: transparent; }
 .citation.pending { pointer-events: none; cursor: default; opacity: 0.1; text-decoration: none; }
+.citation { color: #1e90ff; }
+.btn.link.citation { color: #1e90ff !important; font-size: inherit; line-height: inherit; }
+@media (min-width: 800px) {
+  .btn.link.citation { font-size: 0.9em; }
+}
 .btn.primary { background: var(--accent); color: #ffffff; border-color: var(--accent); border-radius: var(--radius); }
 .btn.ghost { background: transparent; border-color: var(--control-border); }
 .btn.stop { background: #ef4444; color: #ffffff; border-color: #ef4444; }

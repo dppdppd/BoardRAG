@@ -15,7 +15,7 @@ import PdfPreview from "./components/PdfPreview";
 
 type CitationEntry = { file?: string; page?: number; header?: string; header_anchor_bbox_pct?: number[]; rects_norm?: number[][]; text_spans?: Array<{ page?: number; start_char?: number; end_char?: number }>|any[] };
 type MessageDev = { prompt?: string; context?: string; chunks?: any[]; allowed?: any[]; original_query?: string };
-type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; style?: "default" | "brief" | "detailed"; citations?: Record<string, CitationEntry>; dev?: MessageDev };
+type Message = { role: "user" | "assistant"; content: string; pinned?: boolean; title?: string; style?: "default" | "brief" | "detailed"; citations?: Record<string, CitationEntry>; dev?: MessageDev };
 
   // --- Citation helpers (pure) ---
   const extractUsedCitations = (answer: string): Set<string> => {
@@ -273,8 +273,6 @@ export default function HomePage() {
     // Default ON; will refine from session prefs once sessionId is loaded
     try { return localStorage.getItem('boardrag_pdf_smooth') === '1' || localStorage.getItem('boardrag_pdf_smooth') == null; } catch { return true; }
   });
-  type PromptStyle = "default" | "brief" | "detailed";
-  const [promptStyle, setPromptStyle] = useState<PromptStyle>("default");
   const [model, setModel] = useState<string>("[Anthropic] Claude Sonnet 4");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState<string>("");
@@ -337,8 +335,9 @@ export default function HomePage() {
           context: String((assistantMessage?.dev as any)?.context || userMeta?.context || ''),
           original_query: String((assistantMessage?.dev as any)?.original_query || userMeta?.original_query || ''),
         },
+        system_prompt: String((assistantMessage?.dev as any)?.system || userMeta?.system || ''),
         raw_response: String((rawResponse || (assistantMessage ? assistantMessage.content : '')) || ''),
-        retrieved_metadata: { citations: minimalMap },
+        retrieved_metadata: { citations: minimalMap, stream_validation: ((assistantMessage?.dev as any)?.stream_validation || (reg?.meta?.stream_validation) || ({})) },
         saved_with_pair: {
           assistant_message: assistantMessage ? { content: assistantMessage.content, citations: assistantMessage.citations || {} } : null,
         },
@@ -487,31 +486,7 @@ export default function HomePage() {
     try { localStorage.setItem("boardrag_last_game", selectedGame); } catch {}
   }, [selectedGame]);
 
-  // Load prompt style per game when game changes
-  useEffect(() => {
-    if (!selectedGame) return;
-    try {
-      const key = `boardrag_style:${selectedGame}`;
-      const savedRaw = localStorage.getItem(key);
-      const allowed: PromptStyle[] = ["default", "brief", "detailed"];
-      const valid = (savedRaw && (allowed as readonly string[]).includes(savedRaw)) ? (savedRaw as PromptStyle) : "default";
-      setPromptStyle(valid);
-      if (savedRaw && !allowed.includes(savedRaw as any)) {
-        try { localStorage.setItem(key, valid); } catch {}
-      }
-    } catch {
-      setPromptStyle("default");
-    }
-  }, [selectedGame]);
-
-  // Persist prompt style per game when it changes
-  useEffect(() => {
-    if (!selectedGame) return;
-    try {
-      const key = `boardrag_style:${selectedGame}`;
-      localStorage.setItem(key, promptStyle);
-    } catch {}
-  }, [promptStyle, selectedGame]);
+  // (Removed) prompt style persistence/forcing
 
   // Load PDF smooth scroll setting from session-scoped prefs when sessionId is known
   useEffect(() => {
@@ -564,9 +539,12 @@ export default function HomePage() {
       } else if (m.role === "assistant") {
         assistantCount += 1;
         if (m.pinned) {
-          const first = m.content.split("\n").find((l) => l.trim().length > 0) || m.content;
-          const cleaned = stripMarkdown(first);
-          const trimmed = cleaned.slice(0, 30);
+          const chosen = (m.title && m.title.trim().length > 0) ? m.title : (() => {
+            const first = m.content.split("\n").find((l) => l.trim().length > 0) || m.content;
+            const cleaned = stripMarkdown(first);
+            return cleaned;
+          })();
+          const trimmed = chosen.slice(0, 30);
           labels.push(trimmed);
           userIdxs.push(Math.max(0, userCount - 1));
           assistantAbsIdxs.push(assistantCount);
@@ -797,7 +775,7 @@ export default function HomePage() {
     } as any;
   };
 
-  const startQuery = async (question: string, reuseUserIndex?: number | null, styleOverride?: PromptStyle) => {
+  const startQuery = async (question: string, reuseUserIndex?: number | null) => {
     if (!selectedGame || !question) return;
     setIsStreaming(true);
     try {
@@ -811,8 +789,7 @@ export default function HomePage() {
     let workingMessages = messages;
     if (reuseUserIndex == null) {
       // append new user message
-      const styleForQuery = styleOverride ?? promptStyle;
-      workingMessages = [...messages, { role: "user", content: question, style: styleForQuery } as Message];
+      workingMessages = [...messages, { role: "user", content: question } as Message];
       setMessages(workingMessages);
       const numUsers = workingMessages.filter((m) => m.role === "user").length;
       lastSubmittedUserIndexRef.current = numUsers - 1;
@@ -844,19 +821,6 @@ export default function HomePage() {
 
     // Use original SSE endpoint by default; NDJSON only when explicitly enabled
     const NDJSON = (process.env.NEXT_PUBLIC_USE_NDJSON === '1');
-    const applyPromptStyle = (q: string, style: PromptStyle): string => {
-      // Append single-line ASCII instructions to avoid issues with SSE URLs
-      switch (style) {
-        case "brief":
-          return `${q} Instruction: Answer extremely concisely in 1-3 short sentences or a compact bulleted list.`;
-        case "detailed":
-          return `${q} Instruction: Provide a thorough, step-by-step explanation with relevant details and examples.`;
-        default:
-          return q;
-      }
-    };
-    const styleForAugment = (typeof styleOverride !== 'undefined' ? styleOverride : promptStyle);
-    const augmentedQuestion = applyPromptStyle(question, styleForAugment);
     // Helper: clear credentials and force login screen
     const kickToLogin = () => {
       try {
@@ -869,7 +833,7 @@ export default function HomePage() {
       try { window.location.reload(); } catch {}
     };
     const url = new URL(`${API_BASE}/${NDJSON ? 'stream-ndjson' : 'stream'}`);
-    url.searchParams.set("q", augmentedQuestion);
+    url.searchParams.set("q", question);
     url.searchParams.set("game", selectedGame);
     url.searchParams.set("include_web", String(includeWeb));
     url.searchParams.set("history", workingMessages
@@ -960,21 +924,22 @@ export default function HomePage() {
           if (parsed.req && typeof parsed.req === 'string') {
             if (streamReqIdRef.current == null) {
               streamReqIdRef.current = parsed.req;
-              // Seed assistant.dev with original_query/prompt/context/chunks at first token
+              // Seed assistant.dev with original_query/prompt/context/chunks/system at first token
               try {
                 const originalQuery = String(input || '');
                 const promptText = String(parsed?.meta?.prompt || '');
                 const contextText = String(parsed?.meta?.context || '');
+                const systemText = String(parsed?.meta?.system || '');
                 const chunksSnap = Array.isArray(parsed?.meta?.chunks) ? parsed?.meta?.chunks : [];
                 setMessages((cur) => {
                   const updated = [...cur];
                   // Ensure there is an assistant message to attach dev info to
                   const last = updated[updated.length - 1];
                   if (!last || last.role !== 'assistant') {
-                    updated.push({ role: 'assistant', content: '', pinned: false, dev: { original_query: originalQuery, prompt: promptText, context: contextText, chunks: chunksSnap } as any } as any);
+                    updated.push({ role: 'assistant', content: '', pinned: false, dev: { original_query: originalQuery, prompt: promptText, context: contextText, system: systemText, chunks: chunksSnap } as any } as any);
                   } else {
                     const devPrev: any = (last as any).dev || {};
-                    const devNext = { ...devPrev, original_query: originalQuery || devPrev.original_query, prompt: promptText || devPrev.prompt, context: contextText || devPrev.context, chunks: (Array.isArray(devPrev.chunks) && devPrev.chunks.length ? devPrev.chunks : chunksSnap) };
+                    const devNext = { ...devPrev, original_query: originalQuery || devPrev.original_query, prompt: promptText || devPrev.prompt, context: contextText || devPrev.context, system: systemText || devPrev.system, chunks: (Array.isArray(devPrev.chunks) && devPrev.chunks.length ? devPrev.chunks : chunksSnap) };
                     updated[updated.length - 1] = { ...(last as any), dev: devNext } as any;
                   }
                   return updated;
@@ -1012,13 +977,14 @@ export default function HomePage() {
                   const content = String((updated[i] as any).content || '');
                   const used = extractUsedCitations(content);
                   const cit = buildMessageCitations(used, lookup);
-                  // Also ensure assistant.dev carries prompt/context/original_query/chunks snapshot
+                  // Also ensure assistant.dev carries prompt/context/system/original_query/chunks snapshot
                   const devPrev: any = (updated[i] as any).dev || {};
                   const devNext = {
                     ...devPrev,
                     original_query: devPrev.original_query || String(input || ''),
                     prompt: devPrev.prompt || String(meta?.prompt || ''),
                     context: devPrev.context || String(meta?.context || ''),
+                    system: devPrev.system || String(meta?.system || ''),
                     chunks: (Array.isArray(devPrev.chunks) && devPrev.chunks.length ? devPrev.chunks : chunks),
                     citations: (Array.isArray(devPrev.citations) && devPrev.citations.length ? devPrev.citations : citations),
                   };
@@ -1195,16 +1161,70 @@ export default function HomePage() {
       }
     }
     if (absAssistant < 0) return;
-    const target = messages[absAssistant];
-    const newMsgs = [...messages];
-    newMsgs[absAssistant] = { ...target, pinned: !target.pinned } as Message;
-    setMessages(newMsgs);
-    try {
-      if (selectedGame) {
-        const key = `boardrag_conv:${sessionId}:${selectedGame}`;
-        localStorage.setItem(key, JSON.stringify(newMsgs));
+    const target = messages[absAssistant] as Message;
+    const newPinned = !target.pinned;
+    // If pinning and no title yet, request one from backend
+    const updateAndPersist = (updated: Message[]) => {
+      setMessages(updated);
+      try {
+        if (selectedGame) {
+          const key = `boardrag_conv:${sessionId}:${selectedGame}`;
+          localStorage.setItem(key, JSON.stringify(updated));
+        }
+      } catch {}
+    };
+    if (newPinned && !target.title) {
+      // Find preceding user message content for the same QA pair
+      let userContent = "";
+      let assistSeen = -1;
+      let precedingUserIdx = -1;
+      for (let i = 0; i < messages.length; i++) {
+        const m = messages[i] as Message;
+        if (m.role === "user") {
+          precedingUserIdx = i;
+        } else if (m.role === "assistant") {
+          assistSeen += 1;
+          if (assistSeen === assistantIndex) {
+            break;
+          }
+        }
       }
-    } catch {}
+      if (precedingUserIdx >= 0 && messages[precedingUserIdx]?.role === "user") {
+        userContent = (messages[precedingUserIdx] as Message).content || "";
+      }
+      const assistantContent = target.content || "";
+      // Optimistically set pinned; title will be filled when returned
+      const optimistic = [...messages];
+      optimistic[absAssistant] = { ...(target as any), pinned: newPinned } as Message;
+      updateAndPersist(optimistic);
+      (async () => {
+        try {
+          // Ensure token
+          const t = tokenRef.current || sessionStorage.getItem('boardrag_token') || localStorage.getItem('boardrag_token');
+          const headers: any = { 'Content-Type': 'application/json' };
+          if (t) headers['Authorization'] = `Bearer ${t}`;
+          const resp = await fetch(`${API_BASE}/title-qa`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ q: userContent, a: assistantContent, game: selectedGame || undefined })
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            const title = String(data?.title || '').trim();
+            if (title) {
+              const withTitle = [...optimistic];
+              withTitle[absAssistant] = { ...(withTitle[absAssistant] as any), title } as Message;
+              updateAndPersist(withTitle);
+            }
+          }
+        } catch {}
+      })();
+      return;
+    }
+    // Simple pin/unpin without title fetch
+    const newMsgs = [...messages];
+    newMsgs[absAssistant] = { ...target, pinned: newPinned } as Message;
+    updateAndPersist(newMsgs);
   };
 
 
@@ -1217,14 +1237,7 @@ export default function HomePage() {
     startQuery(q, null);
   };
 
-  const onSubmitWithStyle = (style: PromptStyle) => {
-    const q = input.trim();
-    if (!q || !selectedGame) return;
-    try { if (sessionStorage.getItem("boardrag_blocked") === "1") { return; } } catch {}
-    setInput("");
-    setPromptStyle(style);
-    startQuery(q, null, style);
-  };
+  // (Removed) onSubmitWithStyle – prompt style disabled
 
   const onStop = () => {
     // Close EventSource if active
@@ -1741,8 +1754,14 @@ export default function HomePage() {
       const isSameCitation = lastOpenedCitation === citationKey;
       
       if (isSameCitation) {
-        // Same citation clicked again - just increment anchor nonce to trigger phase progression
+        // Same citation clicked again – ensure the preview is open, set page, and trigger re-anchoring
         console.log(`[openCitation] repeated click on same citation ${sec}, triggering phase progression`);
+        try { setPreviewOpen(true); } catch {}
+        try { setPreviewTargetPage(mpage); } catch {}
+        try {
+          const arr: any = (resolved as any)?.header_anchor_bbox_pct;
+          if (Array.isArray(arr) && arr.length >= 4) setPreviewAnchorRectPct([Number(arr[0])||0, Number(arr[1])||0, Number(arr[2])||0, Number(arr[3])||0]);
+        } catch {}
         setAnchorNonce((n) => (n + 1) | 0);
         return;
       }
@@ -1778,6 +1797,8 @@ export default function HomePage() {
         const norm = (s: string) => (s || '').trim();
         const willSwitch = !(previewPdfMeta && norm(previewPdfMeta.filename || '') === norm(mfile));
         if (willSwitch || !(previewPdfMeta && typeof previewPdfMeta.pages === 'number')) {
+          // Ensure a target page is visible immediately, even before metadata finalizes
+          try { setPreviewTargetPage(mpage); } catch {}
           setPendingCitation({
             sec,
             mfile,
@@ -2312,12 +2333,9 @@ export default function HomePage() {
             input={input}
             onChangeInput={(v) => setInput(v)}
             onSubmit={onSubmit}
-            onSubmitWithStyle={onSubmitWithStyle}
             onStop={onStop}
             toggleSheet={() => setSheetOpen((s) => !s)}
             selectedGame={selectedGame}
-            promptStyle={promptStyle as any}
-            setPromptStyle={(s) => setPromptStyle(s as any)}
           />
 
           <BottomSheetMenu
@@ -2328,8 +2346,6 @@ export default function HomePage() {
             setSelectedGame={(g) => setSelectedGame(g)}
             sessionId={sessionId}
             messages={messages}
-            promptStyle={promptStyle}
-            setPromptStyle={(s) => setPromptStyle(s as any)}
             includeWeb={includeWeb}
             setIncludeWeb={(v) => setIncludeWeb(v)}
             pdfSmoothScroll={pdfSmoothScroll}

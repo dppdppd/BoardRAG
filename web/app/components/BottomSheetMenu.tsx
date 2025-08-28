@@ -12,8 +12,6 @@ type Props = {
   setSelectedGame: (g: string) => void;
   sessionId: string;
   messages: Array<{ role: string; content: string; pinned?: boolean }>;
-  promptStyle: string;
-  setPromptStyle: (s: string) => void;
   includeWeb: boolean;
   setIncludeWeb: (v: boolean) => void;
   pdfSmoothScroll: boolean;
@@ -26,7 +24,7 @@ type Props = {
   onSignOut?: () => void;
 };
 
-export default function BottomSheetMenu({ open, onClose, games, selectedGame, setSelectedGame, sessionId, messages, promptStyle, setPromptStyle, includeWeb, setIncludeWeb, pdfSmoothScroll, setPdfSmoothScroll, onUpload, uploadInputRef, uploading, uploadMsg, isAdmin, onSignOut }: Props) {
+export default function BottomSheetMenu({ open, onClose, games, selectedGame, setSelectedGame, sessionId, messages, includeWeb, setIncludeWeb, pdfSmoothScroll, setPdfSmoothScroll, onUpload, uploadInputRef, uploading, uploadMsg, isAdmin, onSignOut }: Props) {
   return (
     <>
       {open && (

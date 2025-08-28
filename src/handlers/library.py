@@ -4,7 +4,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import List
-import gradio as gr
+# Legacy Gradio removal: no gradio imports
 
 from langchain.schema.document import Document
 from langchain_community.document_loaders import PyPDFLoader
@@ -73,7 +73,7 @@ def rebuild_selected_game_handler(selected_games):
     from pathlib import Path
     # chroma not used in DB-less mode
     import traceback
-    import gradio as gr
+    # Legacy Gradio removal
 
     from .. import config
     from ..query import (
@@ -245,7 +245,7 @@ def refresh_games_handler():
             add_to_chroma(split_documents)
 
         # Extract and store game names for the new PDFs
-        from ..query import extract_and_store_game_name
+        from ..retrieval.game_names import extract_and_store_game_name
         extracted_names = []
         for pdf_filename in new_pdf_files:
             try:
