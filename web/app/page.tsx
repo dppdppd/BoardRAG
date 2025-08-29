@@ -324,6 +324,11 @@ export default function HomePage() {
           minimalMap.push({ file: v.file, section: v.header, page: v.page, header_anchor_bbox_pct: v.header_anchor_bbox_pct, text_spans: (v as any).text_spans });
         }
       }
+      // Cache chunks from assistant.dev if available; fallback to latest reg.meta.chunks
+      const chunksForSave = Array.isArray((assistantMessage?.dev as any)?.chunks)
+        ? (assistantMessage?.dev as any)?.chunks
+        : [];
+
       const bundle = {
         saved_at: new Date().toISOString(),
         game: selectedGame || '',
@@ -337,7 +342,7 @@ export default function HomePage() {
         },
         system_prompt: String((assistantMessage?.dev as any)?.system || userMeta?.system || ''),
         raw_response: String((rawResponse || (assistantMessage ? assistantMessage.content : '')) || ''),
-        retrieved_metadata: { citations: minimalMap, stream_validation: ((assistantMessage?.dev as any)?.stream_validation || (reg?.meta?.stream_validation) || ({})) },
+        retrieved_metadata: { citations: minimalMap, chunks: chunksForSave, stream_validation: ((assistantMessage?.dev as any)?.stream_validation || (reg?.meta?.stream_validation) || ({})) },
         saved_with_pair: {
           assistant_message: assistantMessage ? { content: assistantMessage.content, citations: assistantMessage.citations || {} } : null,
         },

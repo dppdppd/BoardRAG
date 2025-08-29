@@ -26,7 +26,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Run LLM extraction for a PDF and write per-page JSON artifacts (LLM mode)")
     ap.add_argument("pdf", type=str, help="PDF filename under DATA_PATH or absolute path")
     ap.add_argument("--force", action="store_true", help="Re-evaluate all pages (overwrite)")
-    ap.add_argument("--workers", type=int, default=20, help="Parallel workers for page extraction")
+    ap.add_argument("--workers", type=int, default=40, help="Parallel workers for page extraction")
     args = ap.parse_args()
 
     pdf_arg = Path(args.pdf)

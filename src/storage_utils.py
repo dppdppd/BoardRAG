@@ -76,4 +76,30 @@ def format_storage_info():
         info += f"**Size:** {pdf_size:.2f} MB\n"
         info += f"**Files:** {pdf_count} PDFs\n"
 
+    # Append configuration details mirrored from startup prints
+    try:
+        info += "\n\n## ⚙️ Configuration\n\n"
+        # Core provider/models
+        info += f"Provider: {config.LLM_PROVIDER}\n"
+        info += f"Generator Model: {config.GENERATOR_MODEL}\n"
+        info += f"Embedder Model: {config.EMBEDDER_MODEL}\n"
+        # Chunking
+        info += f"Chunk Size: {config.CHUNK_SIZE}\n"
+        info += f"Chunk Overlap: {config.CHUNK_OVERLAP}\n"
+        # Retrieval/processing flags
+        info += f"ENABLE_STREAM_VALIDATION: {getattr(config, 'ENABLE_STREAM_VALIDATION', False)}\n"
+        # Paths and templates
+        info += f"DATA_PATH: {config.DATA_PATH}\n"
+        # Web search
+        info += f"ENABLE_WEB_SEARCH: {config.ENABLE_WEB_SEARCH}\n"
+        info += f"WEB_SEARCH_RESULTS: {getattr(config, 'WEB_SEARCH_RESULTS', 0)}\n"
+        # API key presence (do not print actual values)
+        openai_status = "✅ Set" if getattr(config, 'OPENAI_API_KEY', None) else "❌ Missing"
+        anthropic_status = "✅ Set" if getattr(config, 'ANTHROPIC_API_KEY', None) else "❌ Missing"
+        info += f"OpenAI API Key: {openai_status}\n"
+        info += f"Anthropic API Key: {anthropic_status}\n"
+    except Exception:
+        # Keep storage info usable even if config rendering fails
+        pass
+
     return info

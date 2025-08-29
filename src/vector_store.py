@@ -117,6 +117,52 @@ def upsert_page_chunk(doc_id: str, text: str, metadata: Dict[str, Any]) -> None:
     db.add_texts([text], metadatas=[md], ids=[doc_id])
 
 
+def _get_sections_collection():
+    # Native client to manage an alternate collection for section chunks
+    os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+    os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "false")
+    os.environ.setdefault("CHROMA_TELEMETRY_ANONYMIZED", "false")
+    os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+    import chromadb  # type: ignore
+    try:
+        from chromadb.config import Settings  # type: ignore
+        from . import config as cfg  # type: ignore
+        chroma_path = getattr(cfg, "CHROMA_PATH", "chroma")
+        client = chromadb.PersistentClient(path=chroma_path, settings=Settings(anonymized_telemetry=False))
+    except Exception:
+        from . import config as cfg  # type: ignore
+        chroma_path = getattr(cfg, "CHROMA_PATH", "chroma")
+        client = chromadb.PersistentClient(path=chroma_path)
+    coll = client.get_or_create_collection(name="boardrag_sections")
+    # Try bumping search_ef for consistency
+    try:
+        try:
+            _ef = int(os.getenv("CHROMA_SEARCH_EF", "64"))
+        except Exception:
+            _ef = 64
+        coll.modify(metadata={"hnsw:search_ef": _ef})
+    except Exception:
+        pass
+    return coll
+
+
+def upsert_section_chunk(doc_id: str, text: str, metadata: Dict[str, Any]) -> None:
+    # Use native collection API for sections for isolation
+    coll = _get_sections_collection()
+    md = _sanitize_metadata(metadata)
+    coll.add(ids=[doc_id], documents=[text], metadatas=[md])
+
+
+def clear_pdf_sections(pdf_filename: str) -> int:
+    coll = _get_sections_collection()
+    got = coll.get(where={"source": pdf_filename})  # type: ignore[arg-type]
+    ids = (got or {}).get("ids") or []
+    if not ids:
+        return 0
+    coll.delete(ids=ids)
+    return len(ids)
+
+
 def get_chunk_by_page(pdf_basename: str, page_1based: int) -> Optional[Tuple[Any, float]]:
     db = _get_chroma()
     doc_id = f"{pdf_basename}#p{page_1based}"
@@ -169,26 +215,24 @@ def search_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[
             field_weights = {
                 # Strongly prioritize dense summary and curated vocab
                 "embedding_prefix_summary": 8.0,
-                "search_keywords": 7.0,
-                "search_synonyms": 5.0,
+                # New: prefer section-scoped search aids (keywords only; synonyms merged)
+                "section_search_keywords": 9.0,
                 # Human-readable headers and section names (from LLM extraction)
                 # These directly capture phrases like "INFILTRATION & CLOSE COMBAT"
-                "section_start_by_code": 9.0,
+                "section_start_by_code": 1.0,
                 # New: per-section title/summary extracted by LLM
                 "section_titles": 9.5,
                 "section_summaries": 8.5,
                 # Namespaced, normalized header ids also include short slugs like
                 # "20-infiltration-close-xxxx" which are highly indicative
-                "primary_section_id2": 7.0,
-                "section_id2_by_code": 6.0,
+                "primary_section_id2": 1.0,
+                "section_id2_by_code": 1.0,
                 # Raw structured sections JSON contains header lines as provided by the LLM
                 "sections_raw": 6.0,
                 # Keep numeric header codes meaningful but secondary
                 "embedding_prefix_headers": 2.0,
                 # Helpful, but lighter influence
                 "embedding_prefix_search_hints": 2.0,
-                "search_rules": 1.5,
-                "search_questions": 0.5,
             }
             # Build lowercase blobs per field
             blobs: dict[str, str] = {}
@@ -196,6 +240,12 @@ def search_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[
                 v = meta.get(key)
                 if isinstance(v, str) and v:
                     blobs[key] = v.lower()
+                # Some fields may be JSON arrays stored by ingestion; join for matching
+                elif isinstance(v, list):
+                    try:
+                        blobs[key] = " \n ".join([str(x).lower() for x in v if isinstance(x, (str, int, float))])
+                    except Exception:
+                        pass
             # Stopwords to ignore in token matches
             stop = {
                 "the","a","an","and","or","of","to","in","on","for","with",
@@ -263,6 +313,40 @@ def search_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[
     return results
 
 
+def search_section_chunks(query: str, *, pdf: Optional[str] = None, k: int = 8) -> List[Tuple[Any, float]]:
+    # Lightweight search over the sections collection using native API
+    coll = _get_sections_collection()
+    where = {"source": pdf} if pdf else None
+    try:
+        got = coll.query(query_texts=[query], n_results=k, where=where)
+        ids = (got or {}).get("ids") or [[]]
+        docs = (got or {}).get("documents") or [[]]
+        metas = (got or {}).get("metadatas") or [[]]
+        dists = (got or {}).get("distances") or [[]]
+        out: List[Tuple[Any, float]] = []
+        try:
+            from langchain.schema import Document  # type: ignore
+        except Exception:
+            Document = None  # type: ignore
+        for i in range(min(len(ids[0]), len(docs[0]))):
+            meta = metas[0][i] if (metas and metas[0]) else {}
+            # Include the id so callers can track exact chunks used
+            try:
+                meta = dict(meta or {})
+                meta["id"] = (ids[0][i] if (ids and ids[0]) else None)
+            except Exception:
+                pass
+            text = docs[0][i] if (docs and docs[0]) else ""
+            score = dists[0][i] if (dists and dists[0]) else 0.0
+            if Document is not None:
+                out.append((Document(page_content=text, metadata=meta), score))
+            else:
+                out.append((type("Doc", (), {"page_content": text, "metadata": meta})(), score))
+        return out
+    except Exception:
+        return []
+
+
 def count_processed_pages(pdf_stem: str, total_pages: int) -> int:
     """Count how many page chunk ids exist for a given PDF stem.
 
@@ -325,14 +409,8 @@ def _get_native_collection(path: Optional[str] = None):
 
 
 def clear_pdf_chunks(pdf_filename: str) -> int:
-    """Delete all chunks for a given PDF filename (metadata source exact match)."""
-    coll = _get_native_collection()
-    got = coll.get(where={"source": pdf_filename})  # type: ignore[arg-type]
-    ids = (got or {}).get("ids") or []
-    if not ids:
-        return 0
-    coll.delete(ids=ids)
-    return len(ids)
+    # No-op in section-only mode (kept for compatibility)
+    return 0
 
 
 def get_metadata_for_page(pdf_stem: str, page_1based: int) -> Optional[Dict[str, Any]]:

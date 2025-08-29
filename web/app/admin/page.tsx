@@ -41,7 +41,7 @@ export default function AdminPage() {
       return `${API_BASE}/admin/pdf-status`;
     }
   }, [role]);
-  type PdfStatusItem = { filename: string; total_pages: number; pages_exported?: number; analyzed_present?: number; evals_present?: number; chunks_present?: number; complete?: boolean };
+  type PdfStatusItem = { filename: string; total_pages: number; pages_exported?: number; analyzed_present?: number; evals_present?: number; sections_present?: number; chunks_present?: number; complete?: boolean };
   const { data: pdfStatusData, mutate: refetchPdfStatus } = useSWR<{ items: PdfStatusItem[] }>(pdfStatusUrl, fetcher, { revalidateOnFocus: true });
   const appendConsole = (line: string) => setConsoleText((cur) => (cur ? cur + "\n" + line : line));
 
@@ -233,6 +233,27 @@ export default function AdminPage() {
     return () => { try { es?.close(); } catch {} };
   }, [role]);
   // No model fetch; model is fixed
+
+  // Split Technical Info storage markdown into Storage and Config sections
+  const storageMd: string = storageData?.markdown || "";
+  const CONFIG_HEADER = "## ⚙️ Configuration";
+  const configHeaderIdx = storageMd.indexOf(CONFIG_HEADER);
+  const technicalMd = configHeaderIdx >= 0 ? storageMd.slice(0, configHeaderIdx).trim() : storageMd;
+  const configMdRaw = (() => {
+    if (configHeaderIdx < 0) return "";
+    let afterHeader = storageMd.slice(configHeaderIdx + CONFIG_HEADER.length);
+    // Remove the immediate blank line(s) following the header
+    afterHeader = afterHeader.replace(/^\s*\n+/, "");
+    return afterHeader.trim();
+  })();
+  const configMd = configMdRaw || (
+    (() => {
+      const prov = modelData?.provider || "";
+      const gen = modelData?.generator || "";
+      if (!prov && !gen) return "";
+      return `Provider: ${prov || "—"}\nGenerator Model: ${gen || "—"}`;
+    })()
+  );
 
   useEffect(() => {
     try {
@@ -579,6 +600,18 @@ export default function AdminPage() {
       case "compute-missing":
         buildAndRun("/admin/pipeline-stream", "missing", "compute");
         break;
+      case "sections-all":
+        buildAndRun("/admin/sections-stream", "all");
+        break;
+      case "sections-missing":
+        buildAndRun("/admin/sections-stream", "missing");
+        break;
+      case "populate-sections-all":
+        buildAndRun("/admin/populate-sections-stream", "all");
+        break;
+      case "populate-sections-missing":
+        buildAndRun("/admin/populate-sections-stream", "missing");
+        break;
       case "populate-all":
         // Populate only; this is effectively pipeline start=populate
         buildAndRun("/admin/pipeline-stream", "all", "populate");
@@ -658,7 +691,7 @@ export default function AdminPage() {
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "32px 1.2fr 1fr 0.6fr 0.7fr 0.7fr 0.5fr 0.5fr 0.5fr 0.5fr",
+            gridTemplateColumns: "32px 1.2fr 1fr 0.6fr 0.7fr 0.7fr 0.5fr 0.5fr 0.5fr 0.5fr 0.5fr",
             alignItems: "center",
             padding: 2,
             border: "1px solid #eee",
@@ -686,11 +719,12 @@ export default function AdminPage() {
           <div style={{ textAlign: "left" }}>Pages</div>
           <div style={{ textAlign: "left" }}>LLM Raw</div>
           <div style={{ textAlign: "left" }}>Local</div>
+          <div style={{ textAlign: "left" }}>Sections</div>
           <div style={{ textAlign: "left" }}>Chunks</div>
           <div style={{ textAlign: "left" }}>Complete</div>
         </div>
         <div style={{ height: "35vh", overflow: "auto", border: "1px solid #eee", borderTop: "none", borderRadius: 4, borderTopLeftRadius: 0, borderTopRightRadius: 0, fontSize: 13 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "32px 1.2fr 1fr 0.6fr 0.7fr 0.7fr 0.5fr 0.5fr 0.5fr 0.5fr" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "32px 1.2fr 1fr 0.6fr 0.7fr 0.7fr 0.5fr 0.5fr 0.5fr 0.5fr 0.5fr" }}>
             {sortedCatalog.map((e) => {
               const selected = renameSelection.includes(e.filename);
               const st = statusMap.get(e.filename);
@@ -698,6 +732,7 @@ export default function AdminPage() {
               const analyzedXY = st ? `${st.analyzed_present ?? 0} / ${st.total_pages ?? 0}` : "—";
               const evalsXY = st ? `${st.evals_present ?? 0} / ${st.total_pages ?? 0}` : "—";
               const chunksXY = st ? `${st.chunks_present ?? 0} / ${st.total_pages ?? 0}` : "—";
+              const sectionsCount = st ? `${st.sections_present ?? 0}` : "—";
               const complete = st?.complete ? "✔" : "";
               return (
                 <React.Fragment key={e.filename}>
@@ -719,6 +754,7 @@ export default function AdminPage() {
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{pagesXY}</div>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{analyzedXY}</div>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{evalsXY}</div>
+                  <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{sectionsCount}</div>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{chunksXY}</div>
                   <div style={{ padding: 2, borderBottom: "1px solid #f2f2f2" }}>{complete}</div>
                 </React.Fragment>
@@ -751,6 +787,10 @@ export default function AdminPage() {
               <option value="eval-missing">LLM Eval (missing)</option>
               <option value="compute-missing">Compute local (missing)</option>
               <option value="compute-all">Compute local (all)</option>
+              <option value="sections-all">Sections (all)</option>
+              <option value="sections-missing">Sections (missing)</option>
+              <option value="populate-sections-all">Populate Sections (all)</option>
+              <option value="populate-sections-missing">Populate Sections (missing)</option>
               <option value="populate-all">Populate DB (all)</option>
               <option value="populate-missing">Populate DB (missing)</option>
               <option value="pipeline-missing">Run pipeline (missing)</option>
@@ -801,7 +841,7 @@ export default function AdminPage() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr 1.2fr", alignItems: "start" }}>
+      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "1fr 1fr 1.2fr 1fr", alignItems: "start" }}>
         <div className="admin-tool">
           <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Global Model</h3>
           <div className="muted" style={{ fontSize: 15 }}>
@@ -849,10 +889,19 @@ export default function AdminPage() {
 
         <div className="admin-tool">
           <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Technical Info</h3>
-          <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 4, fontSize: 14 }}>{storageData?.markdown || ""}</pre>
+          <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 4, fontSize: 14 }}>{technicalMd}</pre>
           <div style={{ display: "flex", gap: 6 }}>
             <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
             <button onClick={openFs} style={{ padding: "6px 10px" }}>Browse DATA</button>
+          </div>
+        </div>
+
+        <div className="admin-tool alt">
+          <h3 style={{ margin: "4px 0", fontSize: 16, lineHeight: 1.2 }}>Configuration</h3>
+          <pre style={{ whiteSpace: "pre-wrap", background: "#f7f7f7", padding: 10, borderRadius: 4, fontSize: 14 }}>{configMd}</pre>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn" onClick={() => refetchModel()} style={{ padding: "6px 10px" }}>Refresh Model</button>
+            <button className="btn" onClick={() => refetchStorage()} style={{ padding: "6px 10px" }}>Refresh Config</button>
           </div>
         </div>
       </div>

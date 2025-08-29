@@ -93,7 +93,8 @@ def main() -> int:
 
     pdf = args.pdf
     k = max(1, int(args.k))
-    results = search_chunks(args.query, pdf=pdf, k=k)
+    from src.vector_store import search_section_chunks
+    results = search_section_chunks(args.query, pdf=pdf, k=k)
     items = [collect_result_info(d, s) for d, s in results]
     print(f"raw_results={len(items)}")
     for i, it in enumerate(items, 1):

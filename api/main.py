@@ -379,9 +379,12 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                                     eval_jsons = sum(1 for x in evals_dir.iterdir() if x.is_file()) if evals_dir.exists() else 0
                                 except Exception:
                                     eval_jsons = 0
-                                # Chunks from DB
+                                # Completion basis: page-chunks for legacy; eval JSONs for section-only
+                                use_sections = bool(getattr(_cfg, "USE_SECTION_CHUNKS", False))
                                 chunks = 0
-                                if count_processed_pages and pages > 0:
+                                if use_sections:
+                                    chunks = int(eval_jsons)
+                                elif count_processed_pages and pages > 0:
                                     chunks = int(count_processed_pages(pdf_path.stem, pages))
                                 # Aggregate per game
                                 total_pages += max(0, pages)
@@ -389,7 +392,7 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                                 sum_pages_files += max(0, pages_files)
                                 sum_analyzed_files += max(0, analyzed_files)
                                 sum_eval_jsons += max(0, eval_jsons)
-                                # Track best per-PDF ratio (chunks/total)
+                                # Track best per-PDF ratio (processed/total). For section-only, processed==eval_jsons
                                 ratio = 0.0 if pages <= 0 else max(0.0, min(1.0, chunks / float(pages)))
                                 if ratio > best_ratio:
                                     best_ratio = ratio
@@ -1285,6 +1288,7 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
         pages_dir = data / p.stem / "1_pdf_pages"
         analyzed_dir = data / p.stem / "2_llm_analyzed"
         processed_dir = data / p.stem / "3_eval_jsons"
+        sections_dir = data / p.stem / "4_sections_json"
         try:
             pages_exported = sum(1 for x in pages_dir.iterdir() if x.is_file()) if pages_dir.exists() else 0
         except Exception:
@@ -1297,6 +1301,10 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             evals_present = sum(1 for x in processed_dir.iterdir() if x.is_file()) if processed_dir.exists() else 0
         except Exception:
             evals_present = 0
+        try:
+            sections_present = sum(1 for x in sections_dir.iterdir() if x.is_file()) if sections_dir.exists() else 0
+        except Exception:
+            sections_present = 0
         # Count chunks in DB
         chunks_present = 0
         try:
@@ -1311,6 +1319,7 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             "pages_exported": pages_exported,
             "analyzed_present": analyzed_present,
             "evals_present": evals_present,
+            "sections_present": sections_present,
             "chunks_present": chunks_present,
             "complete": complete,
         })
@@ -1549,6 +1558,148 @@ def _sse_stream_for_scripts(entries: List[str], step: str, mode: str) -> Streami
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
+def _sse_stream_for_custom_script(entries: List[str], script_name: str, label: str) -> StreamingResponse:
+    from pathlib import Path as _P
+    import subprocess as _sp
+    loop = asyncio.get_running_loop()
+    entry_names = [str(_P(e).name) for e in entries]
+    existing = _find_running_job(label, entry_names, "custom")
+    if existing:
+        headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+        async def already_stream():
+            try:
+                yield _sse_event({"type": "log", "line": f"Job already running: {existing}"}).encode("utf-8")
+            except Exception:
+                pass
+            try:
+                yield _sse_event({"type": "done", "message": "already running"}).encode("utf-8")
+            except Exception:
+                return
+        return StreamingResponse(already_stream(), media_type="text/event-stream", headers=headers)
+
+    job_id = _job_create(label, entry_names, "custom")
+    asyncio.create_task(_jobs_publish({"type": "start", "job": _JOBS_REGISTRY.get(job_id)}))
+
+    async def run_job(queue: asyncio.Queue):
+        try:
+            await _admin_log_publish(f"{label}: start …")
+            for pdf in entries:
+                p = _P(pdf)
+                if job_id in _JOBS_CANCEL:
+                    await queue.put(("log", f"⚠️ Job {job_id} cancelled"))
+                    await queue.put(("done", "cancelled"))
+                    await queue.put(("close", ""))
+                    _job_update(job_id, done=True)
+                    await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                    return
+                await _admin_log_publish(f"{label}: {p.name}")
+                # Execute script once per PDF
+                root = Path(__file__).resolve().parent.parent
+                script = root / "scripts" / script_name
+                args = [sys.executable, "-u", str(script), str(pdf)]
+                try:
+                    proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, bufsize=1)
+                except Exception:
+                    code = _sp.call(args)
+                    if code != 0:
+                        await queue.put(("log", f"ERROR: {p.name} failed (exit {code})"))
+                        _job_update(job_id, entry=p.name, state="error", message=f"exit {code}")
+                        await _jobs_publish({"type": "error", "job_id": job_id, "entry": p.name, "exit": code})
+                        await queue.put(("done", "error"))
+                        await queue.put(("close", ""))
+                        _job_update(job_id, done=True)
+                        await _jobs_publish({"type": "done", "job_id": job_id})
+                        return
+                    await queue.put(("log", f"{p.name} done"))
+                    _job_update(job_id, entry=p.name, state="done", message="done")
+                    await _jobs_publish({"type": "progress", "job_id": job_id, "entry": p.name, "state": "done"})
+                    continue
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    try:
+                        loop.call_soon_threadsafe(queue.put_nowait, ("log", line.rstrip()))
+                        _job_update(job_id, entry=p.name, state="running", message=line.rstrip())
+                        loop.call_soon_threadsafe(lambda: asyncio.create_task(_jobs_publish({"type": "progress", "job_id": job_id, "entry": p.name, "line": line.rstrip()})))
+                    except Exception:
+                        pass
+                code = proc.wait()
+                if int(code or 0) != 0:
+                    await queue.put(("log", f"ERROR: {p.name} failed (exit {code})"))
+                    _job_update(job_id, entry=p.name, state="error", message=f"exit {code}")
+                    await _jobs_publish({"type": "error", "job_id": job_id, "entry": p.name, "exit": code})
+                    await queue.put(("done", "error"))
+                    await queue.put(("close", ""))
+                    _job_update(job_id, done=True)
+                    await _jobs_publish({"type": "done", "job_id": job_id})
+                    return
+                await queue.put(("log", f"{p.name} done"))
+                _job_update(job_id, entry=p.name, state="done", message="done")
+                await _jobs_publish({"type": "progress", "job_id": job_id, "entry": p.name, "state": "done"})
+            await queue.put(("done", "ok"))
+            await queue.put(("close", ""))
+            _job_update(job_id, done=True)
+            await _jobs_publish({"type": "done", "job_id": job_id})
+        except Exception as e:
+            await queue.put(("log", f"error: {e}"))
+            try:
+                await queue.put(("done", "error"))
+                await queue.put(("close", ""))
+            finally:
+                _job_update(job_id, done=True)
+                try:
+                    await _jobs_publish({"type": "done", "job_id": job_id, "error": str(e)})
+                except Exception:
+                    pass
+
+    async def event_stream() -> AsyncIterator[bytes]:
+        queue: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(run_job(queue))
+        try:
+            _JOBS_TASKS[job_id] = task
+        except Exception:
+            pass
+        try:
+            while True:
+                try:
+                    typ, payload = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield b": ping\n\n"
+                    continue
+                if typ == "log":
+                    yield _sse_event({"type": "log", "line": payload}).encode("utf-8")
+                elif typ == "done":
+                    yield _sse_event({"type": "done", "message": payload}).encode("utf-8")
+                elif typ == "close":
+                    break
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    _job_update(job_id, done=True)
+                except Exception:
+                    pass
+                try:
+                    await _jobs_publish({"type": "done", "job_id": job_id, "cancelled": True})
+                except Exception:
+                    pass
+            try:
+                _JOBS_TASKS.pop(job_id, None)
+            except Exception:
+                pass
+            try:
+                _JOBS_CANCEL.discard(job_id)
+            except Exception:
+                pass
+
+    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+    async def safe_stream():
+        try:
+            async for chunk in event_stream():
+                yield chunk
+        except asyncio.CancelledError:
+            return
+    return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
+
 def _run_step_script(step: str, pdf_path: str, force: bool, on_line = None, cancel_checker: Optional[Callable[[], bool]] = None) -> int:
     import subprocess as _sp
     import sys as _sys
@@ -1630,6 +1781,27 @@ async def admin_compute_local_stream(entries: str, mode: str = "missing", token:
     pdfs = [str((data_dir / _P(name).name)) for name in selected]
     return _sse_stream_for_scripts(pdfs, step="compute", mode=("all" if mode == "all" else "missing"))
 
+
+@app.get("/admin/sections-stream")
+async def admin_sections_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+    return _sse_stream_for_custom_script(pdfs, script_name="sections_export.py", label="sections")
+
+
+@app.get("/admin/populate-sections-stream")
+async def admin_populate_sections_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    selected = _parse_entries_list(entries)
+    data_dir = _P(cfg.DATA_PATH)
+    pdfs = [str((data_dir / _P(name).name)) for name in selected]
+    return _sse_stream_for_custom_script(pdfs, script_name="populate_sections.py", label="populate-sections")
 
 @app.get("/admin/populate-db-stream")
 async def admin_populate_db_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):

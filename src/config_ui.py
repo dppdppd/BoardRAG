@@ -293,20 +293,16 @@ def get_config_info():
     from . import config
     return f"""
 ## ⚙️ Configuration
-
-**Provider:** {config.LLM_PROVIDER}  
-**Generator Model:** {config.GENERATOR_MODEL}  
-**Embedder Model:** {config.EMBEDDER_MODEL}  
-**Chunk Size:** {config.CHUNK_SIZE}  
-**Chunk Overlap:** {config.CHUNK_OVERLAP}  
-**Web Search:** {"Enabled" if config.ENABLE_WEB_SEARCH else "Disabled"}  
-**Data Path:** {config.DATA_PATH}  
-**DB-less mode:** {getattr(config, 'DB_LESS', True)}  
-
-## 🔐 Access Control
-
-**USER_PW:** {"✅ Set" if config.USER_PW else "❌ Missing"}  
-**ADMIN_PW:** {"✅ Set" if config.ADMIN_PW else "❌ Missing"}  
+Provider: {config.LLM_PROVIDER}  
+Generator Model: {config.GENERATOR_MODEL}  
+Embedder Model: {config.EMBEDDER_MODEL}  
+Chunk Size: {config.CHUNK_SIZE}  
+Chunk Overlap: {config.CHUNK_OVERLAP}  
+Web Search: {"Enabled" if config.ENABLE_WEB_SEARCH else "Disabled"}  
+Data Path: {config.DATA_PATH}  
+DB-less mode: {getattr(config, 'DB_LESS', True)}  
+USER_PW: {"✅ Set" if config.USER_PW else "❌ Missing"}  
+ADMIN_PW: {"✅ Set" if config.ADMIN_PW else "❌ Missing"}  
 """
 
 

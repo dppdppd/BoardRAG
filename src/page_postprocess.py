@@ -18,8 +18,8 @@ def _parse_strict_json(text: str) -> Dict[str, Any]:
     try:
         obj = json.loads(s)
         if isinstance(obj, dict):
-            # minimal validation
-            for key in ("summary", "sections", "visuals", "visual_importance"):
+            # minimal validation (summary no longer required)
+            for key in ("sections", "visuals", "visual_importance"):
                 if key not in obj:
                     raise ValueError(f"Missing key: {key}")
             return obj
@@ -33,7 +33,7 @@ def _parse_strict_json(text: str) -> Dict[str, Any]:
             js = (m.group(1) or "").strip()
             obj = json.loads(js)
             if isinstance(obj, dict):
-                for key in ("summary", "sections", "visuals", "visual_importance"):
+                for key in ("sections", "visuals", "visual_importance"):
                     if key not in obj:
                         raise ValueError(f"Missing key: {key}")
                 return obj
@@ -47,7 +47,7 @@ def _parse_strict_json(text: str) -> Dict[str, Any]:
             try:
                 obj = json.loads(js)
                 if isinstance(obj, dict):
-                    for key in ("summary", "sections", "visuals", "visual_importance"):
+                    for key in ("sections", "visuals", "visual_importance"):
                         if key not in obj:
                             raise ValueError(f"Missing key: {key}")
                     return obj

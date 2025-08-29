@@ -25,6 +25,7 @@ load_dotenv()
 
 # LLM Provider selection: "openai", "anthropic", "ollama", or "openrouter"
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic")
+print(f"[config] LLM_PROVIDER = {LLM_PROVIDER}")
 
 # Model configurations by provider
 MODEL_CONFIGS = {
@@ -120,46 +121,21 @@ RAG_MODE = "vector"
 IS_VECTOR_MODE = True
 IS_DB_LESS_MODE = False
 
-# Chunking parameters optimized by model context window
-CHUNKING_CONFIGS = {
-    "claude-sonnet-4-20250514": {
-        "chunk_size": 1400,
-        "chunk_overlap": 250,
-    },  # Enhanced for Claude 4's improved reasoning
-    "claude-3-5-sonnet-20241022": {
-        "chunk_size": 1200,
-        "chunk_overlap": 200,
-    },  # Reduced for better citations
-    "claude-3-5-haiku-20241022": {"chunk_size": 2400, "chunk_overlap": 300},
-    "claude-3-5-haiku-latest": {"chunk_size": 2400, "chunk_overlap": 300},
-    "gpt-4o": {"chunk_size": 2400, "chunk_overlap": 300},
-    "gpt-4-turbo": {"chunk_size": 2400, "chunk_overlap": 300},
-    "gpt-3.5-turbo": {"chunk_size": 800, "chunk_overlap": 80},
-    "mistral": {"chunk_size": 800, "chunk_overlap": 80},
-    # Add more models as needed
-}
+# ---------------------------------------------------------------------------
+# Chunking Mode
+# ---------------------------------------------------------------------------
+# Section-only mode (pages removed downstream). Always True.
+USE_SECTION_CHUNKS = True
 
-# Get chunking config for current generator model, with fallback
-_chunking = CHUNKING_CONFIGS.get(
-    GENERATOR_MODEL, {"chunk_size": 800, "chunk_overlap": 80}
-)
-
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", _chunking["chunk_size"]))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", _chunking["chunk_overlap"]))
+## Page-based chunking params removed in section-only mode
+CHUNK_SIZE = 0
+CHUNK_OVERLAP = 0
 
 # ---------------------------------------------------------------------------
 # Context Filtering Configuration
 # ---------------------------------------------------------------------------
-# Whether to filter chunks by visual importance when building context blocks
-# Set to False to include all retrieved chunks regardless of visual importance
-IGNORE_VISUAL_IMPORTANCE = os.getenv("IGNORE_VISUAL_IMPORTANCE", "True").lower() in {
-    "1",
-    "true", 
-    "yes",
-}
-
-# Debug print so users can see what the setting resolved to at import time
-print(f"[config] IGNORE_VISUAL_IMPORTANCE = {IGNORE_VISUAL_IMPORTANCE}")
+# Page visual importance filtering not applicable in section-only mode
+IGNORE_VISUAL_IMPORTANCE = True
 
 # ---------------------------------------------------------------------------
 # Optional - Streaming Validation/Repair (detached, togglable)

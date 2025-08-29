@@ -7,8 +7,9 @@ import unicodedata
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
+from pathlib import Path
 
-from .chunk_schema import PageChunk, VisualDesc, SCHEMA_VERSION
+from .chunk_schema import VisualDesc, SCHEMA_VERSION
 
 
 def build_embed_and_metadata(
@@ -81,23 +82,23 @@ def build_embed_and_metadata(
 	except Exception:
 		sections_list = [str(s) for s in (llm_obj.get("sections") or [])]
 
+	# Section-only mode: we no longer create PageChunk records downstream. Preserve page-level
+	# eval metadata in md for compatibility with any readers that still inspect page evals.
 	visuals = [VisualDesc(**v) for v in (llm_obj.get("visuals") or []) if isinstance(v, dict)]
-	chunk = PageChunk(
-		id=f"{pdf_filename.replace('.pdf','')}#p{page_1based}",
-		source=pdf_filename,
-		page=page_index_zero_based,
-		next_page=(page_index_zero_based + 1 if next_page_exists else None),
-		full_text=str(llm_obj.get("full_text") or ""),
-		summary=str(llm_obj.get("summary") or ""),
-		sections=sections_list,
-		visuals=visuals,
-		visual_importance=int(llm_obj.get("visual_importance") or 1),
-		pdf_sha256=pdf_sha256,
-		page_pdf_sha256=page_pdf_sha256,
-		created_at=datetime.utcnow().isoformat() + "Z",
-		version=SCHEMA_VERSION,
-	)
-	md = chunk.to_metadata()
+	md: Dict[str, Any] = {
+		"source": pdf_filename,
+		"page": page_index_zero_based,
+		"page_1based": page_1based,
+		"full_text": str(llm_obj.get("full_text") or ""),
+		"summary": str(llm_obj.get("summary") or ""),
+		"sections": sections_list,
+		"visuals": [asdict(v) for v in visuals],
+		"visual_importance": int(llm_obj.get("visual_importance") or 1),
+		"pdf_sha256": pdf_sha256,
+		"page_pdf_sha256": page_pdf_sha256,
+		"created_at": datetime.utcnow().isoformat() + "Z",
+		"version": SCHEMA_VERSION,
+	}
 	try:
 		md.update({
 			"page_1based": page_1based,
@@ -238,7 +239,7 @@ def build_embed_and_metadata(
 	headers_block = "Headers: " + " | ".join(primary_with_titles or primary_sections)
 	if cont_sections:
 		headers_block += " | Continuations: " + " | ".join(cont_sections)
-	summary_block = (chunk.summary or "").strip()
+	summary_block = str(llm_obj.get("summary") or "").strip()
 
 	# Compose a compact search-hints block from LLM arrays
 	def _take_strings(name: str, max_items: int, max_len: int) -> list[str]:
@@ -280,8 +281,9 @@ def build_embed_and_metadata(
 		parts.append(search_block)
 	if headers_block.strip():
 		parts.append(headers_block.strip())
-	if chunk.full_text:
-		parts.append(chunk.full_text)
+	ft_val = llm_obj.get("full_text")
+	if isinstance(ft_val, str) and ft_val.strip():
+		parts.append(ft_val)
 	embed_text = "\n\n".join(parts)
 	md["embedding_prefix_headers"] = headers_block
 	if summary_block:
@@ -291,4 +293,172 @@ def build_embed_and_metadata(
 
 	return embed_text, md
 
+
+# New: deterministic per-section aggregation from per-page artifacts
+def aggregate_sections_from_artifacts(
+	artifacts: List["Path"],
+	pdf_filename: str,
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+	"""Aggregate sections across page artifacts and return (doc_id, text, metadata) per section.
+
+	- Uses only per-item page values to collect occurrences
+	- Restricts to a single contiguous run of pages starting at first occurrence
+	- Builds text from pages in the contiguous run order only
+	"""
+	from pathlib import Path as _P
+	from datetime import datetime
+	import json as _json
+
+	by_code: Dict[str, Dict[str, Any]] = {}
+	for art in artifacts:
+		try:
+			obj = _json.loads(_P(art).read_text(encoding="utf-8"))
+		except Exception:
+			continue
+		try:
+			llm_js = obj.get("llm") or {}
+			sections = llm_js.get("sections") or []
+			full_text = str((llm_js.get("full_text") or "").strip())
+			page_summary = str((llm_js.get("summary") or "").strip())
+			search_keys = list(llm_js.get("search_keywords") or [])
+		except Exception:
+			continue
+		for it in sections:
+			if not isinstance(it, dict):
+				continue
+			code = str(it.get("section_id") or "").strip()
+			if not code:
+				continue
+			title = str(it.get("title") or "").strip()
+			sec_start = str(it.get("section_start") or "").strip()
+			sec_summary = str(it.get("summary") or "").strip()
+			code2 = str(it.get("section_id_2") or "").strip() or None
+			# Prefer section-provided page index
+			try:
+				pg_item = int(it.get("page"))
+			except Exception:
+				pg_item = None
+			agg = by_code.get(code)
+			if agg is None:
+				agg = {
+					"code": code,
+					"code2": code2,
+					"title": title,
+					"start": sec_start,
+					"pages": set(),
+					# Track earliest header anchor bbox (pct) and its page
+					"anchor": None,
+					"anchor_page": None,
+					"section_summaries": set(),
+					"page_summaries": set(),
+					"texts_by_page": {},
+					"keywords_by_page": {},
+				}
+				by_code[code] = agg
+			if title and not agg.get("title"):
+				agg["title"] = title
+			if sec_start and not agg.get("start"):
+				agg["start"] = sec_start
+			if code2 and not agg.get("code2"):
+				agg["code2"] = code2
+			if isinstance(pg_item, int):
+				agg["pages"].add(pg_item)
+			# Capture header anchor if present (prefer earliest page)
+			try:
+				hb = it.get("header_bbox_pct")
+				if isinstance(hb, (list, tuple)) and len(hb) >= 4:
+					x, y, bw, bh = float(hb[0]), float(hb[1]), float(hb[2]), float(hb[3])
+					ok = (0 <= x <= 100 and 0 <= y <= 100 and 0 < bw <= 100 and 0 < bh <= 100)
+					if ok:
+						ap = agg.get("anchor_page")
+						if ap is None or (isinstance(pg_item, int) and pg_item < ap):
+							agg["anchor"] = [x, y, bw, bh]
+							agg["anchor_page"] = pg_item if isinstance(pg_item, int) else ap
+			except Exception:
+				pass
+			if page_summary:
+				agg["page_summaries"].add(page_summary)
+			if sec_summary:
+				agg["section_summaries"].add(sec_summary)
+			if full_text and isinstance(pg_item, int):
+				agg["texts_by_page"][pg_item] = full_text
+				kbp = agg.get("keywords_by_page") or {}
+				cur = set(kbp.get(pg_item) or [])
+				for k in (search_keys or []):
+					if isinstance(k, str) and k.strip():
+						cur.add(k.strip())
+				kbp[pg_item] = sorted(list(cur))
+				agg["keywords_by_page"] = kbp
+
+	out: List[Tuple[str, str, Dict[str, Any]]] = []
+	stem = _P(pdf_filename).stem
+	for code, a in by_code.items():
+		pages_sorted = sorted(list(a.get("pages") or []))
+		first_page = pages_sorted[0] if pages_sorted else None
+		run_pages: List[int] = []
+		if pages_sorted:
+			run_pages.append(pages_sorted[0])
+			prev = pages_sorted[0]
+			for p in pages_sorted[1:]:
+				if p == prev + 1:
+					run_pages.append(p)
+					prev = p
+				else:
+					break
+		texts_by_page = a.get("texts_by_page") or {}
+		body_texts: List[str] = []
+		for p in run_pages:
+			try:
+				txt = texts_by_page.get(p)
+				if isinstance(txt, str) and txt.strip():
+					body_texts.append(txt)
+			except Exception:
+				continue
+		sec_summaries = [s for s in (a.get("section_summaries") or []) if s]
+		pg_summaries = [s for s in (a.get("page_summaries") or []) if s]
+		keys_list: List[str] = []
+		for p in run_pages:
+			for k in (a.get("keywords_by_page", {}).get(p) or []):
+				if isinstance(k, str) and k.strip():
+					keys_list.append(k.strip())
+		# Build embed text
+		header = f"Section: {code} {str(a.get('title') or '').strip()}".strip()
+		summaries_block = "\n".join([*sec_summaries, *pg_summaries])
+		keys = ", ".join(sorted(list(dict.fromkeys(keys_list))))
+		keys_block = f"Search hints: KW: {keys}" if keys_list else ""
+		pages_block = f"Pages: {', '.join(str(p) for p in run_pages)}" if run_pages else ""
+		parts: List[str] = [header]
+		if summaries_block:
+			parts.append(summaries_block)
+		if keys_block:
+			parts.append(keys_block)
+		if pages_block:
+			parts.append(pages_block)
+		if body_texts:
+			parts.append("\n\n".join(body_texts))
+		embed_text = "\n\n".join([p for p in parts if p])
+		# Metadata structure compatible with SectionChunk.to_metadata()
+		md: Dict[str, Any] = {
+			"source": pdf_filename,
+			"section_code": code,
+			"section_id2": a.get("code2"),
+			"section_title": str(a.get("title") or ""),
+			"section_start": str(a.get("start") or ""),
+			"first_page": first_page,
+			"pages": run_pages,
+			"summary": (sec_summaries[0] if sec_summaries else (pg_summaries[0] if pg_summaries else "")),
+			"version": SCHEMA_VERSION,
+			"created_at": datetime.utcnow().isoformat() + "Z",
+			"chunk_kind": "section",
+		}
+		# Attach per-section anchors if captured
+		try:
+			anchor = a.get("anchor")
+			if isinstance(anchor, (list, tuple)) and len(anchor) >= 4:
+				md["header_anchors_pct"] = { code: [float(anchor[0]), float(anchor[1]), float(anchor[2]), float(anchor[3])] }
+		except Exception:
+			pass
+		doc_id = f"{stem}#s{code.replace('/', '_')}"
+		out.append((doc_id, embed_text, md))
+	return out
 

@@ -482,7 +482,7 @@ def stream_query_rag(
     use_vector = True
     if use_vector:
         try:
-            from .vector_store import search_chunks, count_processed_pages  # type: ignore
+            from .vector_store import count_processed_pages  # type: ignore
         except Exception as e:
             def _err_gen():
                 yield f"Vector DB unavailable: {e}"
@@ -509,15 +509,23 @@ def stream_query_rag(
         # Increase k to reduce sensitivity to small rank shifts during reranking
         k_results = 12
         results: list[tuple[Any, float]] = []
+        # Section-only retrieval
+        try:
+            from .vector_store import search_section_chunks  # type: ignore
+        except Exception:
+            search_section_chunks = None  # type: ignore
         if pdf_filenames:
             for fn in pdf_filenames:
-                results.extend(search_chunks(query_text, pdf=fn, k=k_results))
+                if search_section_chunks is not None:
+                    results.extend(search_section_chunks(query_text, pdf=fn, k=k_results))
         else:
-            # If a game was specified but we couldn't resolve any filenames, avoid cross-game leakage
             if selected_game:
                 results = []
             else:
-                results = search_chunks(query_text, pdf=None, k=k_results)
+                if search_section_chunks is not None:
+                    results = search_section_chunks(query_text, pdf=None, k=k_results)
+                else:
+                    results = []
         # Apply canonical dedupe-then-sort policy
         results = dedupe_then_sort_results(results)
 
@@ -558,63 +566,26 @@ def stream_query_rag(
         for doc, score in top_n:
             meta = getattr(doc, 'metadata', {}) or {}
             source = str(meta.get('source') or '')
-            page0 = int(meta.get('page') or 0)
-            vi = int(meta.get('visual_importance') or 1)
             base = _P(source).name
-            from . import config
-            if config.IGNORE_VISUAL_IMPORTANCE or vi < 4:
-                ctx_raw = str(getattr(doc, 'page_content', '') or '')
-                ctx = _strip_embed_prefixes(ctx_raw)
-                context_blocks.append(f"[Context from {base} p{page0+1}]\n{ctx}")
-
-        # Build Allowed citations block from selected chunks using ONLY canonical section codes.
-        # We derive codes from metadata.section_ids when available; otherwise we parse a numeric code prefix from headers.
-        allowed_lines = []
-        grouped_codes: dict[str, set[str]] = {}
-        for doc, _score in top_n:
-            meta = getattr(doc, 'metadata', {}) or {}
-            src = str(meta.get('source') or '')
-            # Load per-chunk header lists and header->code map
-            try:
-                import json as _json
-                prim = _json.loads(meta.get('primary_sections') or '[]') or []
-            except Exception:
-                prim = []
-            try:
-                import json as _json
-                cont = _json.loads(meta.get('continuation_sections') or '[]') or []
-            except Exception:
-                cont = []
-            try:
-                import json as _json
-                sid_map = _json.loads(meta.get('section_ids') or '{}') or {}
-            except Exception:
-                sid_map = {}
-
-            # Helper to emit only explicit section_ids from metadata (no header parsing fallback)
-            def _to_code(header: str) -> str:
-                code = str(sid_map.get(str(header or '').strip()) or '').strip()
-                return code
-
-            codes: set[str] = set()
-            for h in list(prim) + list(cont):
-                code = _to_code(h)
+            ctx_raw = str(getattr(doc, 'page_content', '') or '')
+            ctx = _strip_embed_prefixes(ctx_raw)
+            code = str(meta.get('section_code') or '')
+            fp = meta.get('first_page')
+            suffix = f" {code}" if code else ""
+            if isinstance(fp, int) and fp > 0:
+                # Add machine-parseable citation line for this context block
                 if code:
-                    codes.add(code)
-            if codes:
-                dest = grouped_codes.get(src)
-                if dest is None:
-                    grouped_codes[src] = set(codes)
+                    context_blocks.append(f"[Context from {base} p{fp}{suffix}]\nCitation: [{code}]\n{ctx}")
                 else:
-                    dest.update(codes)
+                    context_blocks.append(f"[Context from {base} p{fp}]\n{ctx}")
+            else:
+                if code:
+                    context_blocks.append(f"[Context from {base}{suffix}]\nCitation: [{code}]\n{ctx}")
+                else:
+                    context_blocks.append(f"[Context from {base}]\n{ctx}")
 
-        # Emit lines with codes only
-        for src, codes in grouped_codes.items():
-            sorted_codes = sorted([c for c in codes if c])
-            sect_list = ", ".join([f"\"{c}\"" for c in sorted_codes])
-            allowed_lines.append(f"- file={_P(src).name}, sections=[{sect_list}]")
-
-        allowed_block = "\n".join(["Allowed citations:"] + allowed_lines) if allowed_lines else ""
+        # We no longer include an explicit Allowed citations list in the prompt.
+        # Anything included in the context is allowed; each context block will carry its own citation string.
 
         # Build structured allowed citations list for client-side resolution
         allowed_struct: list[dict[str, Any]] = []
@@ -625,6 +596,47 @@ def stream_query_rag(
                 src = str(meta.get('source') or '')
                 base_name = _P(src).name
                 import json as _json
+                # Fast-path for section-chunk metadata: emit a single entry per section
+                try:
+                    is_section = str(meta.get('chunk_kind') or '') == 'section'
+                except Exception:
+                    is_section = False
+                if is_section:
+                    try:
+                        code = str(meta.get('section_code') or '').strip()
+                        # Prefer explicit title; fall back to detected section_start; finally code
+                        label = str(meta.get('section_title') or meta.get('section_start') or '').strip() or code
+                        fp_val = meta.get('first_page')
+                        page_val = int(fp_val) if isinstance(fp_val, int) and fp_val > 0 else None
+                        key = (base_name, label or code)
+                        if key not in seen_pairs:
+                            entry: dict[str, Any] = {
+                                "file": base_name,
+                                "section": label,
+                                "page": page_val,
+                                "code": code,
+                            }
+                            # Attach anchor if present on section metadata under header_anchors_pct keyed by code
+                            try:
+                                import json as _json2
+                                ha_raw = meta.get('header_anchors_pct')
+                                anchors_obj = None
+                                if isinstance(ha_raw, str) and ha_raw:
+                                    anchors_obj = _json2.loads(ha_raw)
+                                elif isinstance(ha_raw, dict):
+                                    anchors_obj = ha_raw
+                                if isinstance(anchors_obj, dict):
+                                    arr = anchors_obj.get(code) or anchors_obj.get(label)
+                                    if isinstance(arr, list) and len(arr) >= 4:
+                                        entry["header_anchor_bbox_pct"] = [float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])]
+                            except Exception:
+                                pass
+                            allowed_struct.append(entry)
+                            seen_pairs.add(key)
+                    except Exception:
+                        pass
+                    # Do not attempt page-chunk-specific maps for section chunks
+                    continue
                 try:
                     sp = _json.loads(meta.get('section_pages') or '{}') or {}
                 except Exception:
@@ -701,7 +713,6 @@ def stream_query_rag(
         except Exception:
             allowed_struct = []
         instruction = (
-            f"{allowed_block}\n\n"
             f"Question: {query_text}\n\n"
         )
         if context_blocks:
@@ -718,12 +729,11 @@ def stream_query_rag(
             "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations. "
             "Do not use any preambles or phrases that reference the rulebook or the context such as 'Based on the rulebook,' 'According to', 'Based on the provided material,' etc. "
             "Answer the user's question based ONLY on the attached material. "
-            "Answer concisely in a few short paragraphs. "
+            # "Answer concisely in a few short paragraphs. "
             "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the form [<section>], placed immediately after the paragraph with no trailing text. "
             "Do not combine multiple sections into a single bracketed citation. "
             "Do not enclose a citation with parentheses or extra text (e.g., '(see [13.1])'). "
-            "Use ONLY section labels from the Allowed citations list, VERBATIM. Do not add any characters, words, or symbols to the section labels."
-            # "Example (format only): Wire cards can only be placed as a discard. [13.1]"
+            "Use the exact citation string shown as 'Citation: [..]' in the context block for any material you used from that block. Do not invent or modify citations."
         )
 
         # Collect streaming validation/repair log (if enabled)
@@ -784,44 +794,9 @@ def stream_query_rag(
             attach_meta: list[tuple[str, int]] = []  # (pdf filename base, 1-based page)
             seen_attach = set()
             seen_meta = set()
-            for doc, score in results:
-                meta = getattr(doc, 'metadata', {}) or {}
-                source = str(meta.get('source') or '')
-                page0 = int(meta.get('page') or 0)
-                vi = int(meta.get('visual_importance') or 1)
-                # Explicit pages directory: data/<PDF_STEM>/1_pdf_pages
-                pages_dir = data_dir / _P(source).stem / "1_pdf_pages"
-                base_name = _P(source).name
-                # Resolve 1-based filenames using slugged pattern <slug>_pNNNN.pdf
-                from .pdf_pages import page_slug_from_pdf, make_page_filename  # type: ignore
-                slug = page_slug_from_pdf(_P(source))
-                p1_num = (page0 if page0 > 0 else page0 + 1)
-                p1 = pages_dir / make_page_filename(slug, p1_num)
-                if not p1.exists():
-                    p1_num = page0 + 1
-                    p1 = pages_dir / make_page_filename(slug, p1_num)
-                p2_num = (page0 + 1 if page0 > 0 else page0 + 2)
-                p2 = pages_dir / make_page_filename(slug, p2_num)
-                if not p2.exists():
-                    p2_num = page0 + 2
-                    p2 = pages_dir / make_page_filename(slug, p2_num)
-                if vi >= 4 and p1.exists():
-                    if str(p1) not in seen_attach:
-                        attach_paths.append(p1)
-                        seen_attach.add(str(p1))
-                    key1 = (base_name, int(p1_num))
-                    if key1 not in seen_meta:
-                        attach_meta.append(key1)
-                        seen_meta.add(key1)
-                    if p2.exists() and str(p2) not in seen_attach:
-                        attach_paths.append(p2)
-                        seen_attach.add(str(p2))
-                        key2 = (base_name, int(p2_num))
-                        if key2 not in seen_meta:
-                            attach_meta.append(key2)
-                            seen_meta.add(key2)
+            # Section-only: no page attachments
 
-            if not attach_paths and not context_blocks:
+            if not context_blocks:
                 yield "No relevant chunks found."
                 return
 
@@ -1018,6 +993,7 @@ def stream_query_rag(
             for doc, _score in top_n:
                 try:
                     meta_doc = getattr(doc, 'metadata', {}) or {}
+                    is_section = str(meta_doc.get('chunk_kind') or '') == 'section'
                     from pathlib import Path as _Path
                     src_name = _Path((meta_doc.get("source") or "")).name or (meta_doc.get("source") or "")
                     # Extract labels from primary/continuation sections on this chunk
@@ -1077,11 +1053,17 @@ def stream_query_rag(
                     except Exception:
                         header_anchors_pct = None
                     payload = {
+                        "id": str(meta_doc.get("id") or ""),
+                        "kind": (meta_doc.get("chunk_kind") or ("section" if is_section else "page")),
                         "text": str(getattr(doc, 'page_content', '') or ''),
                         "source": src_name,
                         "page": meta_doc.get("page"),
+                        "first_page": meta_doc.get("first_page"),
+                        "pages": meta_doc.get("pages"),
                         "section": (meta_doc.get("section") or "").strip(),
                         "section_number": (meta_doc.get("section_number") or "").strip(),
+                        "section_code": (meta_doc.get("section_code") or "").strip(),
+                        "section_id2": (meta_doc.get("section_id2") or "").strip(),
                         "labels": labels,
                     }
                     if text_spans_map is not None:

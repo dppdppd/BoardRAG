@@ -98,18 +98,14 @@ def delete_pdfs(entries_to_delete: List[str]) -> Tuple[str, List[str], List[str]
         try:
             safe_base = Path(fname).name
             stem = Path(safe_base).stem
-            # 1) Clear vector DB chunks
+            # 1) Clear section chunks only (page chunks removed)
             try:
-                from ..vector_store import clear_pdf_chunks  # type: ignore
+                from ..vector_store import clear_pdf_sections  # type: ignore
+                if stem:
+                    pdf_basename = safe_base if safe_base.lower().endswith(".pdf") else f"{stem}.pdf"
+                    _ = clear_pdf_sections(pdf_basename)
             except Exception:
-                clear_pdf_chunks = None  # type: ignore
-            if stem:
-                pdf_basename = safe_base if safe_base.lower().endswith(".pdf") else f"{stem}.pdf"
-                try:
-                    if clear_pdf_chunks:
-                        _ = clear_pdf_chunks(pdf_basename)
-                except Exception:
-                    pass
+                pass
             # 2) Remove exported page PDFs directory data/<stem>/1_pdf_pages
             try:
                 pages_dir = data_root / stem / "1_pdf_pages"

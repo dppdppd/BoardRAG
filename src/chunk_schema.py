@@ -46,3 +46,37 @@ class PageChunk:
         }
 
 
+
+@dataclass
+class SectionChunk:
+    id: str
+    source: str
+    section_code: str
+    section_id2: Optional[str]
+    title: str
+    section_start: str
+    first_page: Optional[int]
+    pages: List[int] = field(default_factory=list)
+    summary: str = ""
+    visuals: List[VisualDesc] = field(default_factory=list)
+    visual_importance: int = 1
+    created_at: Optional[str] = None
+    version: str = SCHEMA_VERSION
+
+    def to_metadata(self) -> Dict[str, Any]:
+        return {
+            "source": self.source,
+            "section_code": self.section_code,
+            "section_id2": self.section_id2,
+            "section_title": self.title,
+            "section_start": self.section_start,
+            "first_page": self.first_page,
+            "pages": self.pages,
+            "summary": self.summary,
+            "visuals": [v.__dict__ for v in (self.visuals or [])],
+            "visual_importance": self.visual_importance,
+            "version": self.version,
+            "created_at": self.created_at,
+            # Identify type for downstream conditionals
+            "chunk_kind": "section",
+        }

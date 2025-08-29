@@ -90,6 +90,74 @@ def main() -> int:
         out_json.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"[local-eval] saved 3_eval_jsons/{out_json.name}")
 
+    # Second pass: refine spillover using next page's first section_start (if available)
+    try:
+        def _find_loose(text: str, pattern: str) -> int | None:
+            import re as _re
+            if not pattern:
+                return None
+            pat = _re.escape(pattern)
+            pat = pat.replace(r"\ ", r"\s+")
+            m = _re.search(pat, text, flags=_re.IGNORECASE)
+            return (m.start() if m else None)
+
+        # Map page->json path for convenience (use top-level import)
+        slug = page_slug_from_pdf(pdf_path)
+        def _json_path(n: int) -> Path:
+            return eval_dir / f"{slug}_p{n:04}.json"
+
+        for page_num, _page_pdf in indexed_pages:
+            next_num = page_num + 1
+            cur_path = _json_path(page_num)
+            next_path = _json_path(next_num)
+            if not (cur_path.exists() and next_path.exists()):
+                continue
+            try:
+                cur_obj = json.loads(cur_path.read_text(encoding="utf-8"))
+                nxt_obj = json.loads(next_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            try:
+                nxt_sections = (nxt_obj.get("llm") or {}).get("sections") or []
+                nxt_text = all_text[next_num - 1] if (next_num - 1) < len(all_text) else ""
+                # Find earliest occurrence of any section_start on the next page
+                first_idx = None
+                first_label = ""
+                for it in nxt_sections:
+                    try:
+                        if int(it.get("page")) != next_num:
+                            continue
+                    except Exception:
+                        continue
+                    sstart = str(it.get("section_start") or "").strip()
+                    if not sstart:
+                        continue
+                    idx = _find_loose(nxt_text, sstart)
+                    if idx is None:
+                        continue
+                    if (first_idx is None) or (idx < first_idx):
+                        first_idx = idx
+                        first_label = sstart
+                if first_idx is None:
+                    continue
+                primary_text = all_text[page_num - 1] if (page_num - 1) < len(all_text) else ""
+                spill = nxt_text[:first_idx].rstrip()
+                new_full = primary_text if not spill else (primary_text + "\n\n" + spill)
+                # Update JSON only if content changes
+                llm_obj = cur_obj.get("llm") or {}
+                old_full = str(llm_obj.get("full_text") or "")
+                if new_full and new_full.strip() != old_full.strip():
+                    llm_obj["full_text"] = new_full.strip()
+                    if first_label:
+                        llm_obj["boundary_header_on_next"] = first_label
+                    cur_obj["llm"] = llm_obj
+                    cur_path.write_text(json.dumps(cur_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+                    print(f"[local-eval] refined spillover p{page_num} using next page section_start")
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     print("Done")
     return 0
 

@@ -34,7 +34,8 @@ def main() -> int:
         return 0
 
     if args.query:
-        results = search_chunks(args.query, pdf=args.pdf)
+        from src.vector_store import search_section_chunks
+        results = search_section_chunks(args.query, pdf=args.pdf)
         for i, (doc, score) in enumerate(results, 1):
             print(f"{i:>2}. score={score:.4f} {doc.metadata.get('source')}#p{doc.metadata.get('page')}")
             print(doc.page_content[:400].replace("\n", " ") + ("…" if len(doc.page_content) > 400 else ""))
