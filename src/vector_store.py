@@ -174,6 +174,29 @@ def count_sections_for_pdf(pdf_filename: str) -> int:
         return 0
 
 
+def count_pages_with_section_chunks(pdf_filename: str) -> int:
+    """Return the count of unique pages that have at least one section chunk for the given PDF.
+
+    Uses the native sections collection and inspects the stored metadata field
+    `page_1based` set during ingestion to determine coverage per page.
+    """
+    try:
+        coll = _get_sections_collection()
+        got = coll.get(where={"source": pdf_filename}, include=["metadatas"])  # type: ignore[arg-type]
+        metas = (got or {}).get("metadatas") or []
+        pages: set[int] = set()
+        for md in metas:
+            try:
+                p = int((md or {}).get("page_1based") or 0)
+            except Exception:
+                p = 0
+            if p > 0:
+                pages.add(p)
+        return len(pages)
+    except Exception:
+        return 0
+
+
 def get_chunk_by_page(pdf_basename: str, page_1based: int) -> Optional[Tuple[Any, float]]:
     db = _get_chroma()
     doc_id = f"{pdf_basename}#p{page_1based}"

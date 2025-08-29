@@ -841,6 +841,31 @@ export default function AdminPage() {
               onClick={() => setRenameSelection([])}
               style={{ padding: "6px 10px" }}
             >Check None</button>
+            <button
+              onClick={() => {
+                try {
+                  // Expand selection to include all PDFs assigned to the same game(s)
+                  const selectedSet = new Set(renameSelection || []);
+                  // Determine which game_names are represented in the current selection
+                  const selectedGames = new Set<string>();
+                  for (const row of sortedCatalog) {
+                    if (selectedSet.has(row.filename) && row.game_name) {
+                      selectedGames.add(String(row.game_name));
+                    }
+                  }
+                  if (selectedGames.size === 0) return;
+                  // Add all filenames whose game_name matches any selected game
+                  const expanded = new Set<string>(selectedSet);
+                  for (const row of sortedCatalog) {
+                    if (row.game_name && selectedGames.has(String(row.game_name))) {
+                      expanded.add(row.filename);
+                    }
+                  }
+                  setRenameSelection(Array.from(expanded));
+                } catch {}
+              }}
+              style={{ padding: "6px 10px" }}
+            >Check Similar</button>
           </div>
           <button onClick={async () => {
             try {

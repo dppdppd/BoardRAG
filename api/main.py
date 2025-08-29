@@ -344,9 +344,10 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                 except Exception:
                     get_page_count = None  # type: ignore
                 try:
-                    from src.vector_store import count_processed_pages  # type: ignore
+                    from src.vector_store import count_processed_pages, count_sections_for_pdf  # type: ignore
                 except Exception:
                     count_processed_pages = None  # type: ignore
+                    count_sections_for_pdf = None  # type: ignore
                 # Compute minimal progress per game: chunks vs total pages
                 try:
                     from src.catalog import get_pdf_filenames_for_game  # type: ignore
@@ -357,8 +358,7 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                         sum_pages_files = 0
                         sum_analyzed_files = 0
                         sum_eval_jsons = 0
-                        best_ratio = 0.0
-                        complete_flag = False
+                        all_pdfs_complete = True
                         for fn in filenames:
                             try:
                                 pdf_path = (data / fn).resolve()
@@ -371,6 +371,7 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                                 pages_dir = base_dir / "1_pdf_pages"
                                 analyzed_dir = base_dir / "2_llm_analyzed"
                                 evals_dir = base_dir / "3_eval_jsons"
+                                sections_dir = base_dir / "4_sections_json"
                                 try:
                                     pages_files = sum(1 for x in pages_dir.iterdir() if x.is_file()) if pages_dir.exists() else 0
                                 except Exception:
@@ -383,27 +384,45 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                                     eval_jsons = sum(1 for x in evals_dir.iterdir() if x.is_file()) if evals_dir.exists() else 0
                                 except Exception:
                                     eval_jsons = 0
-                                # Completion basis: page-chunks for legacy; eval JSONs for section-only
+                                # Completion basis: require N/N per-PDF
                                 use_sections = bool(getattr(_cfg, "USE_SECTION_CHUNKS", False))
                                 chunks = 0
-                                if use_sections:
-                                    chunks = int(eval_jsons)
-                                elif count_processed_pages and pages > 0:
+                                pdf_complete = False
+                                if use_sections and (count_sections_for_pdf is not None):
+                                    # Denominator: expected section JSON files when available; else fallback to pages
+                                    try:
+                                        denom_sections = sum(1 for x in sections_dir.iterdir() if x.is_file()) if sections_dir.exists() else 0
+                                    except Exception:
+                                        denom_sections = 0
+                                    try:
+                                        chunks = int(count_sections_for_pdf(fn))
+                                    except Exception:
+                                        chunks = 0
+                                    if denom_sections > 0:
+                                        pdf_complete = (chunks == denom_sections)
+                                        total_pages += denom_sections
+                                    else:
+                                        pdf_complete = (pages > 0) and (chunks == pages)
+                                        total_pages += max(0, pages)
+                                elif (not use_sections) and count_processed_pages and pages > 0:
                                     chunks = int(count_processed_pages(pdf_path.stem, pages))
+                                    pdf_complete = (chunks == pages)
+                                    total_pages += max(0, pages)
+                                else:
+                                    # Unknown mode; treat as incomplete
+                                    pdf_complete = False
+                                    total_pages += max(0, pages)
                                 # Aggregate per game
-                                total_pages += max(0, pages)
                                 total_chunks += max(0, chunks)
                                 sum_pages_files += max(0, pages_files)
                                 sum_analyzed_files += max(0, analyzed_files)
                                 sum_eval_jsons += max(0, eval_jsons)
-                                # Track best per-PDF ratio (processed/total). For section-only, processed==eval_jsons
-                                ratio = 0.0 if pages <= 0 else max(0.0, min(1.0, chunks / float(pages)))
-                                if ratio > best_ratio:
-                                    best_ratio = ratio
-                                if ratio >= 1.0 and pages > 0:
-                                    complete_flag = True
+                                if not pdf_complete:
+                                    all_pdfs_complete = False
                             except Exception:
                                 continue
+                        # Game is complete only if every associated PDF is N/N complete
+                        complete_flag = bool(all_pdfs_complete)
                         progress[g] = {
                             "complete": bool(complete_flag),
                             "ratio": (0.0 if total_pages <= 0 else max(0.0, min(1.0, total_chunks / float(total_pages)))),
@@ -417,6 +436,12 @@ async def list_games(token: Optional[str] = None, authorization: Optional[str] =
                     pass
             except Exception:
                 progress = {}
+            # Filter for non-admins: only show complete games
+            if str(role).strip().lower() != "admin":
+                games = [g for g in games if bool((progress.get(g) or {}).get("complete"))]
+                # Optionally prune progress to only included games
+                filtered_progress = {g: progress.get(g) or {} for g in games}
+                return {"games": games, "progress": filtered_progress}
             return {"games": games, "progress": progress}
         except Exception:
             return {"games": [], "progress": {}}
