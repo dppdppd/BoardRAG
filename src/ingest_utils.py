@@ -12,6 +12,38 @@ from pathlib import Path
 from .chunk_schema import VisualDesc, SCHEMA_VERSION
 
 
+def normalize_section_code(raw: str) -> str:
+    """Normalize a section code/slug to a canonical form for IDs and filenames.
+
+    Rules:
+    - Trim
+    - Replace Unicode dashes (en/em) with ASCII hyphen
+    - Preserve hyphens and dots; replace forward slashes with underscore
+    - Collapse repeated whitespace and hyphens
+    - Lowercase
+    """
+    try:
+        s = (raw or "").strip()
+        if not s:
+            return s
+        # Normalize unicode dashes
+        s = s.replace("\u2013", "-").replace("\u2014", "-")
+        # Replace path separators that conflict with IDs/filenames
+        s = s.replace("/", "_")
+        # Collapse spaces around hyphens
+        import re as _re
+        s = _re.sub(r"\s*-[\s-]*", "-", s)
+        s = _re.sub(r"\s+", " ", s)
+        return s.lower()
+    except Exception:
+        return (raw or "").strip().lower()
+
+
+def build_section_doc_id(pdf_stem: str, section_code: str) -> str:
+    """Build canonical section chunk id from pdf stem and raw section code/slug."""
+    return f"{pdf_stem}#s{normalize_section_code(section_code)}"
+
+
 def build_embed_and_metadata(
 	pdf_filename: str,
 	pdf_sha256: str,
@@ -458,7 +490,7 @@ def aggregate_sections_from_artifacts(
 				md["header_anchors_pct"] = { code: [float(anchor[0]), float(anchor[1]), float(anchor[2]), float(anchor[3])] }
 		except Exception:
 			pass
-		doc_id = f"{stem}#s{code.replace('/', '_')}"
+		doc_id = build_section_doc_id(stem, code)
 		out.append((doc_id, embed_text, md))
 	return out
 

@@ -1,0 +1,77 @@
+You are analyzing one primary PDF page from a boardgame rulebook.
+Primary page: {page_num_1based} (1-based). Only the primary page is attached; you may not see page {next_page}.
+
+DEFINITIONS:
+- Section identifiers (codes) appear at line start and may include letters, digits, dots and slashes (e.g., '3', '3.1', '3.1.2', 'A1', '6/3').
+- Some rulebooks print codes enclosed in square brackets. Example: '[2.5] PARTS INVENTORY'. Treat the brackets as part of the printed header line.
+- A section label (title) may follow the code on the same line.
+
+FIELD DEFINITIONS:
+- section_id: the EXACT printed code when present (e.g., '3.1.2', '6/3'). Preserve separators (never substitute '/' with '-' or '.'). If the code is printed with surrounding square brackets (e.g., '[2.5]'), return the code WITHOUT the brackets as section_id (i.e., '2.5'). If no code is present, return a lowercase slug of the label (spaces→dashes, strip punctuation).
+- section_id_2: a base identifier composed of section_id plus a short, normalized slug of the first two words following the code (e.g., '20.2-infiltration').
+- section_start: the first 10 words of the section's first line on its page, inclusive of the printed code and its title/label (join with single spaces). PRESERVE any punctuation/enclosures visible in print around the code. For example, if the page shows '[2.5] PARTS INVENTORY …', section_start MUST begin with '[2.5] PARTS INVENTORY …' (do NOT strip the brackets).
+- title: the textual heading (label) for the section, without the code and without trailing ':' or '.'. Example: 'INFILTRATION & CLOSE COMBAT'.
+- summary: a single concise sentence (<= 160 chars) summarizing what this specific section covers (only for top-level or big-category headers). Omit this key entirely for sections where a summary does not apply.
+- search_keywords (per section, MAJOR SECTIONS ONLY): up to 10 core terms/phrases that reflect the entire larger section (<= 50 chars each).
+  Include common morphological variants and standard abbreviations, and merge any obvious synonyms/aliases directly into this list.
+- page: integer; exactly {page_num_1based} or {next_page}.
+- boundary_header_on_next: the first new header on page {next_page}, or null if none (it may not be visible).
+
+INSTRUCTIONS:
+1) Detect the first header on page {page_num_1based}. Discard any text before it. Codes may be bracketed (e.g., '[3.0] TITLE').
+2) Enumerate EVERY visible section and subsection header on page {page_num_1based} (and continuation portions on page {next_page}). This is a hard requirement: include ALL numeric dot/letter codes down to the deepest level that appear (e.g., 10, 10.1, 10.12, 10.123). Do not skip intermediate levels if they are visible.
+   - Treat lines like '21. DEMOLITION CHARGES' as a parent section, and include each child header that appears on the page (e.g., '21.1', '21.2', '21.3', '21.4'), each as its own sections[] entry.
+   - Recognize headers even if the title ends with a colon ':'; exclude the colon from the header text.
+   - Use regex at line starts to ensure coverage: match ^[A-Za-z]?\d+(?:[./][A-Za-z0-9]+)*\b for codes like '21.1', 'A10.2b', '3.1.2', '6/3'. If such a line exists, it MUST be included in sections.
+
+SPECIAL CASE — TABLE OF CONTENTS / INDEX PAGES:
+- Identify TOC/Index pages. Heuristics that indicate TOC/Index may include some or all of the following:
+  • Pages dominated by short lines that look like headers (codes+titles) with prose paragraphs.
+  • Presence of words like 'CONTENTS', 'TABLE OF CONTENTS', 'INDEX', or 'CONTENTS CONTINUED' near the top.
+  • Many lines ending (or beginning) with numbers (right-aligned page refs) OR consistent increasing numeric codes (e.g., 1.0, 2.0, 3.0, ...).
+  • A single page listing numerous distinct MAJOR sections (codes ending in '.0') and many subordinate codes without accompanying paragraph text.
+- OVERRIDE (critical): When identified as TOC/Index, DO NOT enumerate listing entries as sections (ignore instruction 2).
+- Instead, return exactly one sections[] item summarizing the TOC: set section_id='toc', section_id_2='toc-summary', section_start='TABLE OF CONTENTS', title='Table of Contents', page={page_num_1based}.
+- Only include this single synthetic TOC section and omit all individual listing entries.
+
+3) Provide per-section "summary" ONLY for top-level or big-category headers; for all other sections, omit the "summary" key entirely.
+   - Top-level or big-category headers are those whose section_id has no '.' or '/' (e.g., '24', 'A10') OR ends with '.0' (e.g., '24.0').
+   - For those, provide a single concise sentence (<= 160 chars).
+4) Derive concise search aids from the page content only (no invention), attached to each section item:
+   - Only provide sections[].search_keywords for MAJOR SECTIONS (no '.' or '/' in code, or ends with '.0').
+   - For those major sections, return up to 10 terms/phrases that apply to the entire larger section (<= 50 chars each).
+   - Merge synonyms/aliases into sections[].search_keywords (do not return a separate synonyms list).
+
+CONSTRAINTS:
+- sections[].page must equal the page where that header appears ({page_num_1based} or {next_page}).
+
+OUTPUT (single JSON object only; strict JSON, no prose):
+{
+  "sections": [ { "section_id": string, "section_id_2": string, "section_start": string, "title": string, "summary"?: string, "search_keywords": string[]?, "page": number } ],
+  "visuals": [ { "type": string, "description": string, "relevance": string } ],
+  "visual_importance": 1,
+  "boundary_header_on_next": string | null
+}
+
+RESPONSE RULES (critical):
+- Output MUST be a single valid JSON object only. No markdown, no code fences, no commentary.
+- STRICT OUTPUT: Return raw JSON only (UTF-8). No ```json fences, no prose, no trailing commas, exact keys.
+- Use line breaks/newlines and indentation so the JSON is human-inspectable.
+- Valid example:
+{"sections":[{"section_id":"3.1","section_id_2":"3.1-movement","section_start":"3.1 MOVEMENT","title":"MOVEMENT","page":12}],"visuals":[],"visual_importance":1,"boundary_header_on_next":"3.2"}
+- Invalid examples (do NOT do these):
+```json { ... }``` (code fences)
+{ sections: [...] } (unquoted keys)
+- Include a separate "sections" item for every visible subsection heading (e.g., if 10.1 and 10.12 appear, include both).
+- Ensure "section_id_2" is only the base (no checksum).
+- Preserve the exact separator characters in printed codes. If a section uses slash separators (e.g., '6/3', '16/4'), return them exactly with slashes in section_id. Never substitute '-' or '.' for '/'.
+- Do NOT normalize away square brackets in the printed header when composing section_start (keep '[…]' exactly as printed).
+- Self-check: compare your extracted headers against the regex above on page {page_num_1based} text; if any code line is missing from sections, add it.
+- For sections[].search_keywords, include both singular and plural where applicable and common abbreviations (e.g., 'leader', 'leaders', 'SL').
+- Omit keys entirely when they would be empty (do NOT include empty arrays or empty strings).
+- Only MAJOR SECTIONS may include sections[].search_keywords; for non-major sections omit this key.
+- Omit sections[].summary when not provided (only include for major sections).
+- Do not invent content. If an item is not supported by this page's text, omit the key or use an empty string only where required by the schema (e.g., minor section summaries).
+- Ensure the final character of your output is a closing brace '}' (JSON must be complete).
+- Use exactly the keys shown above and correct value types.
+

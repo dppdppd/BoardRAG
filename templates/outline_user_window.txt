@@ -1,0 +1,21 @@
+Return JSON ONLY.
+
+You are given the text for two consecutive pages: page N and page N+1.
+Use BOTH pages to avoid cutting headers or content at page breaks.
+
+Extract ALL of the following:
+- candidates: [{page:int, line:string}] where 'line' is a full line that STARTS with a visible section code
+- sections: [{code, title, first_page, section_kind}] where title is the substring after the code; if a colon ':' is present, use the substring BEFORE the first ':'; first_page is the smallest page number the code appears on within these two pages
+- alias_map: { alias_phrase: code } for codes present in 'sections'
+- glossary_codes: [codes] if obvious
+- objects: [{parent_code, kind, title, first_page, anchor_code, snippet}]
+
+Rules for codes: numeric dotted (e.g., 3.5, 3.5.1, 5.6.1), letter-first (F4, F4.a, A10.2b), digit-first (1B6, 1B6b). Include sublevels.
+Do NOT invent codes; only use visible codes at start of line.
+
+Input pages:
+{pages}
+
+Output schema (STRICT JSON object only):
+{"candidates": [{"page": int, "line": string}], "sections": [{"code": string, "title": string, "first_page": int, "section_kind": string}], "alias_map": {string: string}, "glossary_codes": [string], "objects": [{"parent_code": string, "kind": string, "title": string, "first_page": int, "anchor_code": string, "snippet": string}]}
+STRICT JSON RULES: single JSON object, no prose/markdown, no code fences, no trailing commas, exact keys.

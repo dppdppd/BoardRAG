@@ -221,17 +221,12 @@ CONTENT FROM FIRST PAGES:
 
 """
 
-            prompt = f""" Extract the proper board game name from this filename: "{filename}"{context_section}
-
-Guidelines:
-- Return ONLY the official published game name with no preamble or formatting.
-- Remove file-related words: "rules", "manual", "rulebook", "complete", "rework", "bw", "color", "v1", "v2"
-- If an acronym, find a possible name from the PDF content
-- Use proper capitalization for official game titles
-- If you see the actual game title in the PDF content, prefer that over filename guessing
-
-Filename: {filename}
-Official game name:"""
+            from templates.load_jinja_template import render_template  # type: ignore
+            prompt = render_template(
+                "name_extract.txt",
+                filename=filename,
+                context_section=context_section,
+            )
 
             if debug:
                 print("\n===== PROMPT SENT TO LLM =====\n")
@@ -712,11 +707,13 @@ def stream_query_rag(
                     seen_pairs.add(key)
         except Exception:
             allowed_struct = []
-        instruction = (
-            f"Question: {query_text}\n\n"
+        from templates.load_jinja_template import render_template, read_text_template  # type: ignore
+        # Render instruction from template with explicit placeholders
+        instruction = render_template(
+            "rag_instruction.txt",
+            question=query_text,
+            context_blocks=("\n\n".join(context_blocks) if context_blocks else ""),
         )
-        if context_blocks:
-            instruction += "\n\n" + "\n\n".join(context_blocks)
 
         # Note: Do not sanitize or post-process model output; enforce formatting via prompt only.
 
@@ -725,16 +722,7 @@ def stream_query_rag(
             return text
 
         # Define system prompt once (used for all providers) so it can be returned via metadata
-        system_prompt = (
-            "You are an expert assistant for boardgame rulebooks. Provide concise answers with inline citations. "
-            "Do not use any preambles or phrases that reference the rulebook or the context such as 'Based on the rulebook,' 'According to', 'Based on the provided material,' etc. "
-            "Answer the user's question based ONLY on the attached material. "
-            # "Answer concisely in a few short paragraphs. "
-            "Every paragraph must be a single brief claim (1–2 short sentences maximum) that ends with exactly one inline citation of the form [<section>], placed immediately after the paragraph with no trailing text. "
-            "Do not combine multiple sections into a single bracketed citation. "
-            "Do not enclose a citation with parentheses or extra text (e.g., '(see [13.1])'). "
-            "Use the exact citation string shown as 'Citation: [..]' in the context block for any material you used from that block. Do not invent or modify citations."
-        )
+        system_prompt = read_text_template("rag_system.txt")
 
         # Collect streaming validation/repair log (if enabled)
         repairs_log: list[dict[str, Any]] = []
@@ -775,8 +763,15 @@ def stream_query_rag(
                     else:
                         from langchain_community.llms.ollama import Ollama  # type: ignore
                         model = Ollama(model=_cfg2.GENERATOR_MODEL, base_url=getattr(_cfg2, "OLLAMA_URL", "http://localhost:11434"))
-                    resp = model.invoke(instruction)
-                    text = str(getattr(resp, "content", resp) or "")
+                    # Ensure the system prompt is respected by using role-based messages
+                    try:
+                        from langchain.schema import HumanMessage, SystemMessage  # type: ignore
+                        resp = model.invoke([SystemMessage(content=system_prompt), HumanMessage(content=instruction)])
+                        text = str(getattr(resp, "content", resp) or "")
+                    except Exception:
+                        # Fallback: single string if provider/model wrapper doesn't support role messages
+                        resp = model.invoke(f"System:\n{system_prompt}\n\nUser:\n{instruction}")
+                        text = str(getattr(resp, "content", resp) or "")
                     text = _inject_pages(text)
                     def _raw_chunks():
                         slice_size = 64
@@ -1272,12 +1267,11 @@ def _try_llm_repair_if_enabled(sentence: str, allowed_sections: set[str]) -> str
 
     # Compose strict instruction
     allow_list = ", ".join(sorted(f"[{s}]" for s in allowed_sections))
-    prompt = (
-        "Repair this one paragraph. Rules: "
-        "- Keep only content that can end with EXACTLY ONE allowed citation. "
-        "- Allowed citations (choose one): " + allow_list + ". "
-        "- Delete any extra citations and trailing text after the citation. "
-        "- If repair not possible, return an empty string."
+    from templates.load_jinja_template import render_template  # type: ignore
+    prompt = render_template(
+        "stream_repair.txt",
+        allow_list=allow_list,
+        sentence=sentence,
     )
 
     try:

@@ -1,0 +1,6 @@
+<context>
+{context_blocks}
+</context>
+
+<question>{question}</question>
+

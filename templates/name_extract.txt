@@ -1,0 +1,14 @@
+Extract the proper board game name from this filename: "{filename}"
+
+{context_section}
+
+Guidelines:
+- Return ONLY the official published game name with no preamble or formatting.
+- Remove file-related words: "rules", "manual", "rulebook", "complete", "rework", "bw", "color", "v1", "v2".
+- If an acronym, find a possible name from the PDF content.
+- Use proper capitalization for official game titles.
+- If you see the actual game title in the PDF content, prefer that over filename guessing.
+
+Filename: {filename}
+Official game name:
+

@@ -27,7 +27,7 @@ JINJA_TEMPLATE_PATH = str(_candidate)
 
 def load_jinja2_prompt(
     context: str, question: str, template_name: str = None
-) -> PromptTemplate:
+) -> str:
     """
     Loads the content of the .jinja2 file selected by environment variable and creates a LangChain PromptTemplate.
 
@@ -47,11 +47,47 @@ def load_jinja2_prompt(
     else:
         template_path = JINJA_TEMPLATE_PATH
 
-    with open(template_path, "r") as file:
+    with open(template_path, "r", encoding="utf-8") as file:
         template_str = file.read()
 
-    # Load the template into LangChain's PromptTemplate
-    prompt = PromptTemplate.from_template(template_str)
-    formatted_prompt = prompt.format(context=context, question=question)
+    # Perform literal, safe replacement for known placeholders only
+    out = template_str.replace("{context}", str(context)).replace("{question}", str(question))
+    return out
 
-    return formatted_prompt
+
+def render_template(template_name: str, **kwargs: str) -> str:
+    """
+    Render an arbitrary prompt template from the templates directory with named parameters.
+
+    Args:
+        template_name: File name within the templates directory (e.g., 'rag_query_pixegami.txt')
+        **kwargs: Named variables available in the template.
+
+    Returns:
+        The rendered string.
+    """
+    # Resolve path: allow absolute/relative elsewhere, else use bundled templates dir
+    candidate = Path(template_name)
+    if not candidate.is_file():
+        candidate = Path(__file__).parent / template_name
+    if not candidate.is_file():
+        raise FileNotFoundError(f"Template {template_name} not found")
+
+    with open(candidate, "r", encoding="utf-8") as f:
+        template_str = f.read()
+
+    # Literal, safe replacement for provided placeholders, without interpreting other braces
+    out = template_str
+    for k, v in (kwargs or {}).items():
+        out = out.replace("{" + str(k) + "}", str(v))
+    return out
+
+
+def read_text_template(template_name: str) -> str:
+    """Return raw text contents of a template file in templates/ or absolute path."""
+    candidate = Path(template_name)
+    if not candidate.is_file():
+        candidate = Path(__file__).parent / template_name
+    if not candidate.is_file():
+        raise FileNotFoundError(f"Template {template_name} not found")
+    return candidate.read_text(encoding="utf-8")

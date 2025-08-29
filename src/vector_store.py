@@ -163,6 +163,17 @@ def clear_pdf_sections(pdf_filename: str) -> int:
     return len(ids)
 
 
+def count_sections_for_pdf(pdf_filename: str) -> int:
+    """Return the number of section chunks stored for the given PDF filename."""
+    try:
+        coll = _get_sections_collection()
+        got = coll.get(where={"source": pdf_filename})  # type: ignore[arg-type]
+        ids = (got or {}).get("ids") or []
+        return len(ids)
+    except Exception:
+        return 0
+
+
 def get_chunk_by_page(pdf_basename: str, page_1based: int) -> Optional[Tuple[Any, float]]:
     db = _get_chroma()
     doc_id = f"{pdf_basename}#p{page_1based}"

@@ -15,6 +15,7 @@ if str(_repo) not in sys.path:
 from src import config as cfg  # type: ignore
 from src.chunk_schema import SCHEMA_VERSION, SectionChunk
 from src.vector_store import upsert_section_chunk, clear_pdf_sections
+from src.ingest_utils import build_section_doc_id  # type: ignore
 
 
 def _aggregate_sections(artifacts: list[Path], pdf_filename: str) -> list[tuple[str, str, dict]]:
@@ -185,7 +186,7 @@ def _aggregate_sections(artifacts: list[Path], pdf_filename: str) -> list[tuple[
 		embed_text = "\n\n".join([p for p in parts if p])
 
 		ch = SectionChunk(
-			id=f"{stem}#s{code.replace('/', '_')}",
+			id=build_section_doc_id(stem, code),
 			source=pdf_filename,
 			section_code=code,
 			section_id2=a.get("code2"),

@@ -36,80 +36,15 @@ from src.llm_outline_helpers import make_llm as _make_llm  # type: ignore
 from src.llm_outline_helpers import anthropic_pdf_messages, upload_pdf_to_anthropic_files, anthropic_pdf_messages_with_file  # type: ignore
 
 
-_SYS = (
-    "You extract a semantic outline from boardgame rulebooks. "
-    "Given page texts, return STRICT JSON only with keys: "
-    "game_name (string), sections (array), alias_map (object), glossary_codes (array), objects (array)."
-)
+from templates.load_jinja_template import read_text_template, render_template  # type: ignore
+_SYS = read_text_template("outline_system.txt")
 
-_USR_TEMPLATE = (
-    "Return JSON ONLY.\n\n"
-    "Rules for game_name:\n"
-    "- Provide the official game/module name extracted from the cover/title/intro lines. Keep it short and exact (e.g., 'High Frontier 4 All').\n\n"
-    "Rules for sections:\n"
-    "- Extract code, title, and first_page (smallest page where code appears). If a code is not visible, omit it (do not invent), but still include a section with code=''.\n"
-    "- code must be a visible section code: numeric dotted (e.g., 3.5, 3.5.1), letter-first (e.g., F4, F4.a, A10.2b), or digit-first (e.g., 1B6, 1B6b). Some rulebooks print the code in square brackets (e.g., '[2.5]'). If brackets are present in print, set code to the inner value without brackets (e.g., '2.5').\n"
-    "- title is the label text following the code on the same line, without trailing ':' or '.'.\n"
-    "- section_kind ∈ {{setup, operation, movement, hazard, scoring, endgame, glossary, component, politics, economy, reference, example, note, other}}.\n"
-    "- Choose the most specific; use 'glossary' for term definitions.\n\n"
-    "Rules for alias_map:\n"
-    "- Map common phrases to canonical codes (e.g., 'sunspot cycle phase' -> C8).\n"
-    "- Only include codes that exist in sections.\n\n"
-    "Rules for glossary_codes:\n"
-    "- List any codes that are glossary entries (if obvious).\n\n"
-    "Rules for objects (fine-grained references):\n"
-    "- Extract notable items within sections: definitions, examples, tables, figures, charts, boxes, notes.\n"
-    "- For each object, provide: parent_code, kind, title (short label), first_page, and anchor_code.\n"
-    "- anchor_code must include ONLY letters/digits/periods and start with parent_code, e.g., '1B6.ex1', 'F4.def1', 'C8.fig1'.\n"
-    "- Optional: snippet (<=320 chars) quoting the relevant lines.\n\n"
-    "Input pages (format === Page N ===):\n{pages}\n\n"
-    "Output schema (STRICT JSON object only):\n"
-    "{\"game_name\": string, \"sections\": [{\"code\": string, \"title\": string, \"first_page\": int, \"section_kind\": string}], \"alias_map\": {string: string}, \"glossary_codes\": [string], \"objects\": [{\"parent_code\": string, \"kind\": string, \"title\": string, \"first_page\": int, \"anchor_code\": string, \"snippet\": string}]}\n"
-    "STRICT JSON RULES: single JSON object, no prose/markdown, no trailing commas, properly closed arrays/objects, exact keys."
-)
+_USR_TEMPLATE = read_text_template("outline_user_pages.txt")
 
 
-_USR_CANDIDATES_TEMPLATE = (
-    "Return JSON ONLY.\n\n"
-    "You are given candidate header lines extracted from the PDF, each prefixed with 'p <page>:' where <page> is 1-based.\n"
-    "Rules for game_name:\n"
-    "- Provide the official game/module name extracted from the cover/title/intro lines. Keep it short and exact.\n\n"
-    "Rules for sections:\n"
-    "- Extract ALL sections using ONLY visible codes that appear at the START of the candidate lines.\n"
-    "- For each section include: code, title (substring after the code on the same line; if a colon ':' exists, use the substring BEFORE the first ':'), first_page (smallest page for that code), and section_kind.\n"
-    "- Code patterns include (examples): 3.5, 3.5.1, 5.6.1, F4, F4.a, A10.2b, 1B6, 1B6b.\n"
-    "- Include sublevels (e.g., 5.6.1) not just top-level.\n"
-    "- If a code is missing on a line, skip it (do not invent).\n\n"
-    "Rules for alias_map:\n"
-    "- Map common phrases to canonical codes that exist in sections. Keep small.\n\n"
-    "Rules for glossary_codes:\n"
-    "- List any codes that are glossary entries (if obvious).\n\n"
-    "Rules for objects:\n"
-    "- Optional. Extract notable items within sections (definition/example/table/figure/chart/box/note).\n"
-    "- Provide: parent_code, kind, title (short), first_page, anchor_code.\n\n"
-    "Input candidate lines (format: 'p N: ...'):\n{candidates}\n\n"
-    "Output schema (STRICT JSON object only):\n"
-    "{\"game_name\": string, \"sections\": [{\"code\": string, \"title\": string, \"first_page\": int, \"section_kind\": string}], \"alias_map\": {string: string}, \"glossary_codes\": [string], \"objects\": [{\"parent_code\": string, \"kind\": string, \"title\": string, \"first_page\": int, \"anchor_code\": string, \"snippet\": string}]}\n"
-    "STRICT JSON RULES: single JSON object, no prose/markdown, no trailing commas, properly closed arrays/objects, exact keys."
-)
+_USR_CANDIDATES_TEMPLATE = read_text_template("outline_user_candidates.txt")
 
-_USR_WINDOW_TEMPLATE = (
-    "Return JSON ONLY.\n\n"
-    "You are given the text for two consecutive pages: page N and page N+1.\n"
-    "Use BOTH pages to avoid cutting headers or content at page breaks.\n\n"
-    "Extract ALL of the following:\n"
-    "- candidates: [{page:int, line:string}] where 'line' is a full line that STARTS with a visible section code\n"
-    "- sections: [{code, title, first_page, section_kind}] where title is the substring after the code; if a colon ':' is present, use the substring BEFORE the first ':'; first_page is the smallest page number the code appears on within these two pages\n"
-    "- alias_map: { alias_phrase: code } for codes present in 'sections'\n"
-    "- glossary_codes: [codes] if obvious\n"
-    "- objects: [{parent_code, kind, title, first_page, anchor_code, snippet}]\n\n"
-    "Rules for codes: numeric dotted (e.g., 3.5, 3.5.1, 5.6.1), letter-first (F4, F4.a, A10.2b), digit-first (1B6, 1B6b). Include sublevels.\n"
-    "Do NOT invent codes; only use visible codes at start of line.\n\n"
-    "Input pages:\n{pages}\n\n"
-    "Output schema (STRICT JSON object only):\n"
-    "{\"candidates\": [{\"page\": int, \"line\": string}], \"sections\": [{\"code\": string, \"title\": string, \"first_page\": int, \"section_kind\": string}], \"alias_map\": {string: string}, \"glossary_codes\": [string], \"objects\": [{\"parent_code\": string, \"kind\": string, \"title\": string, \"first_page\": int, \"anchor_code\": string, \"snippet\": string}]}\n"
-    "STRICT JSON RULES: single JSON object, no prose/markdown, no trailing commas, properly closed arrays/objects, exact keys."
-)
+_USR_WINDOW_TEMPLATE = read_text_template("outline_user_window.txt")
 
 
 def extract_pdf_outline(pdf_path: str, debug_dir: str | None = None) -> Dict[str, Any]:

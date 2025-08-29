@@ -1,7 +1,26 @@
-Answer the question based only on the following content. If the answer is NOT explicitly contained in the content, reply with "I don't know".
-
+<task>You will answer strictly based on the provided context.</task>
+<context>
 {context}
+</context>
+<question>{question}</question>
 
----
-Answer the question based on the above content:
-{question}
+<requirements>
+- Write 1–3 short paragraphs.
+- Each paragraph ends with exactly one bracketed citation, e.g., [3.1].
+- Use only citations present as "Citation: [...]" in <context>.
+- No preamble, no lists, no markdown, no extra commentary.
+- If the answer is not explicitly contained in the context, reply with: I don't know
+</requirements>
+
+<format>
+Return only the paragraphs as plain text. No headings, no tags.
+</format>
+
+<examples>
+Correct:
+Players may not trade during the Buy phase. [3.2]
+Incorrect (multiple citations):
+Players may not trade during the Buy phase. [3.2][4.1]
+Incorrect (parentheses around citation):
+Players may not trade during the Buy phase. (see [3.2])
+</examples>

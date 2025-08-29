@@ -1,0 +1,35 @@
+Return JSON ONLY.
+
+Rules for game_name:
+- Provide the official game/module name extracted from the cover/title/intro lines. Keep it short and exact (e.g., 'High Frontier 4 All').
+
+Rules for sections:
+- Extract code, title, and first_page (smallest page where code appears). If a code is not visible, omit it (do not invent), but still include a section with code=''.
+- code must be a visible section code: numeric dotted (e.g., 3.5, 3.5.1), letter-first (e.g., F4, F4.a, A10.2b), or digit-first (e.g., 1B6, 1B6b). Some rulebooks print the code in square brackets (e.g., '[2.5]'). If brackets are present in print, set code to the inner value without brackets (e.g., '2.5').
+- title is the label text following the code on the same line, without trailing ':' or '.'.
+- section_kind ∈ {setup, operation, movement, hazard, scoring, endgame, glossary, component, politics, economy, reference, example, note, other}.
+- Choose the most specific; use 'glossary' for term definitions.
+
+Rules for alias_map:
+- Map common phrases to canonical codes (e.g., 'sunspot cycle phase' -> C8).
+- Only include codes that exist in sections.
+
+Rules for glossary_codes:
+- List any codes that are glossary entries (if obvious).
+
+Rules for objects (fine-grained references):
+- Extract notable items within sections: definitions, examples, tables, figures, charts, boxes, notes.
+- For each object, provide: parent_code, kind, title (short label), first_page, and anchor_code.
+- anchor_code must include ONLY letters/digits/periods and start with parent_code, e.g., '1B6.ex1', 'F4.def1', 'C8.fig1'.
+- Optional: snippet (<=320 chars) quoting the relevant lines.
+
+Input pages (format === Page N ===):
+{pages}
+
+Output schema (STRICT JSON object only):
+{"game_name": string, "sections": [{"code": string, "title": string, "first_page": int, "section_kind": string}], "alias_map": {string: string}, "glossary_codes": [string], "objects": [{"parent_code": string, "kind": string, "title": string, "first_page": int, "anchor_code": string, "snippet": string}]}
+STRICT JSON RULES: single JSON object, no prose/markdown, no code fences, no trailing commas, exact keys.
+Valid example:
+{"game_name":"High Frontier 4 All","sections":[{"code":"3.1","title":"Movement","first_page":12,"section_kind":"movement"}],"alias_map":{},"glossary_codes":[],"objects":[]}
+Invalid examples: ```json { ... }``` (code fences); { sections: [...] } (unquoted keys).
+

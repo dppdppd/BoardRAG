@@ -13,8 +13,12 @@ import re
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse, PlainTextResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 import mimetypes
+import zipfile
+import tempfile
+import contextlib
 
 from src.query import stream_query_rag, get_available_games
 from src.query import get_stored_game_names  # catalog-based
@@ -571,6 +575,61 @@ async def admin_fs_delete(payload: FsPathPayload, token: Optional[str] = None, a
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"delete failed: {e}")
         return {"message": f"Deleted {target.name}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
+
+
+@app.get("/admin/data-zip")
+async def admin_data_zip(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Enforce auth
+    _ = _require_auth(authorization, token)
+    try:
+        from src import config as cfg  # type: ignore
+        base = Path(cfg.DATA_PATH).resolve()
+        if not base.exists() or not base.is_dir():
+            raise HTTPException(status_code=404, detail="data directory not found")
+
+        # Create a temporary zip file under repo-local temp directory
+        temp_dir = Path("temp")
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Fallback to system temp if repo temp fails
+            temp_dir = Path(tempfile.gettempdir())
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        zip_path = temp_dir / f"data-{ts}.zip"
+
+        # Build zip archive
+        try:
+            with zipfile.ZipFile(str(zip_path), mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for root, _dirs, files in os.walk(str(base)):
+                    for fname in files:
+                        fpath = Path(root) / fname
+                        try:
+                            arcname = str(fpath.relative_to(base)).replace("\\", "/")
+                        except Exception:
+                            arcname = fpath.name
+                        try:
+                            zf.write(str(fpath), arcname)
+                        except Exception:
+                            # Skip files that cannot be read
+                            pass
+        except Exception as e:
+            # Cleanup partial file
+            with contextlib.suppress(Exception):
+                zip_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+            raise HTTPException(status_code=500, detail=f"zip failed: {e}")
+
+        # Serve file and delete afterwards
+        return FileResponse(
+            path=str(zip_path),
+            media_type="application/zip",
+            filename=zip_path.name,
+            background=BackgroundTask(os.remove, str(zip_path)),
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -1265,7 +1324,7 @@ async def admin_jobs_clear(token: Optional[str] = None, authorization: Optional[
 async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
     _ = _require_auth(authorization, token)
     from src import config as cfg  # type: ignore
-    from src.vector_store import count_processed_pages  # type: ignore
+    from src.vector_store import count_sections_for_pdf  # type: ignore
     from pathlib import Path as _P
     import os as _os
     data = _P(cfg.DATA_PATH)
@@ -1305,14 +1364,18 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             sections_present = sum(1 for x in sections_dir.iterdir() if x.is_file()) if sections_dir.exists() else 0
         except Exception:
             sections_present = 0
-        # Count chunks in DB
+        # Count section chunks in DB
         chunks_present = 0
         try:
-            chunks_present = count_processed_pages(p.stem, total)
+            chunks_present = count_sections_for_pdf(p.name)
         except Exception:
             chunks_present = 0
-        # Complete: only consider DB vs expected catalog pages
-        complete = (chunks_present >= total) and (total > 0)
+        # Complete: require EXACT match when sections are present; else require EXACT page match
+        denom_sections = sections_present if sections_present else 0
+        if denom_sections > 0:
+            complete = (chunks_present == denom_sections)
+        else:
+            complete = (total > 0) and (chunks_present == total)
         items.append({
             "filename": p.name,
             "total_pages": total,
@@ -1324,6 +1387,83 @@ async def admin_pdf_status(token: Optional[str] = None, authorization: Optional[
             "complete": complete,
         })
     return {"items": items}
+@app.get("/admin/sections-diff")
+async def admin_sections_diff(filename: str, token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    """Compare expected section chunk IDs from 4_sections_json with chunks present in the DB.
+
+    Returns counts and the list of missing IDs to diagnose mismatches like 108 vs 105.
+    """
+    _ = _require_auth(authorization, token)
+    try:
+        from src import config as cfg  # type: ignore
+        base = Path(cfg.DATA_PATH)
+        pdf_path = base / filename
+        if not pdf_path.exists() or not pdf_path.is_file():
+            raise HTTPException(status_code=404, detail=f"PDF not found: {filename}")
+        sec_dir = base / pdf_path.stem / "4_sections_json"
+        if not sec_dir.exists() or not sec_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"sections dir not found: {sec_dir}")
+
+        # Load expected IDs from emitted section JSONs
+        expected_ids: list[str] = []
+        for p in sorted(sec_dir.glob("*.json")):
+            try:
+                js = json.loads(p.read_text(encoding="utf-8"))
+                chunk_id = str((js or {}).get("id") or "").strip()
+                if chunk_id:
+                    expected_ids.append(chunk_id)
+            except Exception:
+                continue
+
+        # Probe DB presence per id
+        present_ids: set[str] = set()
+        missing_ids: list[str] = []
+        try:
+            from src.vector_store import _get_sections_collection  # type: ignore
+            coll = _get_sections_collection()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"DB unavailable: {e}")
+        for cid in expected_ids:
+            try:
+                got = coll.get(ids=[cid])
+                ids = (got or {}).get("ids") or []
+                if ids:
+                    present_ids.add(cid)
+                else:
+                    # Try common variants to detect character mismatches
+                    code_part = cid.split("#s", 1)[-1]
+                    # Normalize en-dash to hyphen
+                    code_norm = code_part.replace("\u2013", "-")
+                    alt_id = cid.split("#s", 1)[0] + "#s" + code_norm.replace("-", "_")
+                    alt_id2 = cid.split("#s", 1)[0] + "#s" + code_norm
+                    found = False
+                    for alt in (alt_id, alt_id2):
+                        try:
+                            got2 = coll.get(ids=[alt])
+                            if (got2 or {}).get("ids"):
+                                present_ids.add(cid)
+                                found = True
+                                break
+                        except Exception:
+                            pass
+                    # Do not do variants in strict mode; report as missing
+                    if not found:
+                        missing_ids.append(cid)
+            except Exception:
+                missing_ids.append(cid)
+
+        return {
+            "filename": filename,
+            "expected_count": len(expected_ids),
+            "present_count": len(present_ids),
+            "missing_count": len(missing_ids),
+            "missing_ids": missing_ids,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"error: {e}")
+
 
 
 @app.get("/admin/citations-by-page")
@@ -1920,6 +2060,61 @@ async def admin_pipeline_stream(entries: str, mode: str = "missing", start: str 
                                                     pass
                                     except Exception:
                                         pass
+                            # After populate, compute sections diff and log to admin panel
+                            try:
+                                from pathlib import Path as _Path
+                                import json as _json
+                                from src.vector_store import _get_sections_collection  # type: ignore
+                                base = _Path(_cfg_cleanup.DATA_PATH)
+                                sec_dir = base / p.stem / "4_sections_json"
+                                expected_ids: list[str] = []
+                                if sec_dir.exists() and sec_dir.is_dir():
+                                    for jsf in sorted(sec_dir.glob("*.json")):
+                                        try:
+                                            js = _json.loads(jsf.read_text(encoding="utf-8"))
+                                            cid = str((js or {}).get("id") or "").strip()
+                                            if cid:
+                                                expected_ids.append(cid)
+                                        except Exception:
+                                            continue
+                                present = 0
+                                missing_ids: list[str] = []
+                                if expected_ids:
+                                    coll = _get_sections_collection()
+                                    for cid in expected_ids:
+                                        try:
+                                            got = coll.get(ids=[cid])
+                                            ids = (got or {}).get("ids") or []
+                                            if ids:
+                                                present += 1
+                                            else:
+                                                code_part = cid.split("#s", 1)[-1]
+                                                code_norm = code_part.replace("\u2013", "-")
+                                                alt_id = cid.split("#s", 1)[0] + "#s" + code_norm.replace("-", "_")
+                                                alt_id2 = cid.split("#s", 1)[0] + "#s" + code_norm
+                                                found = False
+                                                for alt in (alt_id, alt_id2):
+                                                    try:
+                                                        got2 = coll.get(ids=[alt])
+                                                        if (got2 or {}).get("ids"):
+                                                            present += 1
+                                                            found = True
+                                                            break
+                                                    except Exception:
+                                                        pass
+                                                # Do not do variants in strict mode; report as missing
+                                                if not found:
+                                                    missing_ids.append(cid)
+                                        except Exception:
+                                            missing_ids.append(cid)
+                                diff_line = f"sections-diff {p.name}: expected={len(expected_ids)} present={present} missing={len(missing_ids)}"
+                                await queue.put(("log", diff_line))
+                                if missing_ids:
+                                    head = ", ".join(missing_ids[:10])
+                                    more = "" if len(missing_ids) <= 10 else f" … (+{len(missing_ids)-10} more)"
+                                    await queue.put(("log", f"missing: {head}{more}"))
+                            except Exception:
+                                pass
                     except Exception:
                         pass
             await queue.put(("done", "ok"))
@@ -2738,19 +2933,12 @@ async def title_qa(payload: TitleQaPayload, token: Optional[str] = None, authori
     try:
         # Build concise title prompt
         from src import config as cfg
-        prompt = (
-            "Generate a concise, human-friendly title for this Q&A.\n\n"
-            "Requirements:\n"
-            "- Single line\n"
-            "- 2 to 6 words\n"
-            "- <= 40 characters\n"
-            "- No trailing punctuation\n"
-            "- Use Title Case\n"
-            "- Avoid the game name\n\n"
-            f"Game: {payload.game or '-'}\n\n"
-            f"Question:\n{payload.q}\n\n"
-            f"Answer:\n{payload.a}\n\n"
-            "Title:"
+        from templates.load_jinja_template import render_template  # type: ignore
+        prompt = render_template(
+            "title_generator.txt",
+            game=(payload.game or "-"),
+            q=payload.q,
+            a=payload.a,
         )
 
         # Select model based on configured provider

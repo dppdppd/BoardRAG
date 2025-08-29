@@ -612,13 +612,6 @@ export default function AdminPage() {
       case "populate-sections-missing":
         buildAndRun("/admin/populate-sections-stream", "missing");
         break;
-      case "populate-all":
-        // Populate only; this is effectively pipeline start=populate
-        buildAndRun("/admin/pipeline-stream", "all", "populate");
-        break;
-      case "populate-missing":
-        buildAndRun("/admin/pipeline-stream", "missing", "populate");
-        break;
       case "pipeline-all":
         buildAndRun("/admin/pipeline-stream", "all");
         break;
@@ -731,7 +724,7 @@ export default function AdminPage() {
               const pagesXY = st ? `${st.pages_exported ?? 0} / ${st.total_pages ?? 0}` : "—";
               const analyzedXY = st ? `${st.analyzed_present ?? 0} / ${st.total_pages ?? 0}` : "—";
               const evalsXY = st ? `${st.evals_present ?? 0} / ${st.total_pages ?? 0}` : "—";
-              const chunksXY = st ? `${st.chunks_present ?? 0} / ${st.total_pages ?? 0}` : "—";
+              const chunksXY = st ? `${st.chunks_present ?? 0} / ${st.sections_present ?? 0}` : "—";
               const sectionsCount = st ? `${st.sections_present ?? 0}` : "—";
               const complete = st?.complete ? "✔" : "";
               return (
@@ -789,10 +782,8 @@ export default function AdminPage() {
               <option value="compute-all">Compute local (all)</option>
               <option value="sections-all">Sections (all)</option>
               <option value="sections-missing">Sections (missing)</option>
-              <option value="populate-sections-all">Populate Sections (all)</option>
-              <option value="populate-sections-missing">Populate Sections (missing)</option>
-              <option value="populate-all">Populate DB (all)</option>
-              <option value="populate-missing">Populate DB (missing)</option>
+              <option value="populate-sections-all">Populate (all)</option>
+              <option value="populate-sections-missing">Populate (missing)</option>
               <option value="pipeline-missing">Run pipeline (missing)</option>
               <option value="pipeline-all">Run pipeline (all)</option>
             </select>
@@ -893,6 +884,42 @@ export default function AdminPage() {
           <div style={{ display: "flex", gap: 6 }}>
             <button style={{ padding: "6px 10px" }} onClick={() => { appendConsole("📦 Refresh storage stats"); refetchStorage().then(() => appendConsole("✅ Storage stats refreshed")).catch(() => appendConsole("❌ Storage refresh failed")); }}>🔄 Refresh Storage Stats</button>
             <button onClick={openFs} style={{ padding: "6px 10px" }}>Browse DATA</button>
+            <button onClick={async () => {
+              try {
+                appendConsole("📦 Preparing DATA zip download …");
+                const headers: any = {};
+                try {
+                  const t = sessionStorage.getItem("boardrag_token") || localStorage.getItem("boardrag_token");
+                  if (t) headers["Authorization"] = `Bearer ${t}`;
+                } catch {}
+                const resp = await fetch(`${API_BASE}/admin/data-zip`, { headers });
+                if (!resp.ok) {
+                  let detail = `HTTP ${resp.status}`;
+                  try { const js = await resp.json(); detail = js?.detail || js?.message || detail; } catch { try { detail = await resp.text(); } catch {} }
+                  appendConsole(`❌ DATA zip failed: ${detail}`);
+                  return;
+                }
+                // Determine filename from Content-Disposition
+                let filename = "data.zip";
+                try {
+                  const cd = resp.headers.get("Content-Disposition") || resp.headers.get("content-disposition") || "";
+                  const m = cd.match(/filename\*=UTF-8''([^;\n\r]+)/) || cd.match(/filename="?([^";\n\r]+)"?/);
+                  if (m && m[1]) filename = decodeURIComponent(m[1]);
+                } catch {}
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename || 'data.zip';
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                appendConsole(`✅ DATA zip download started: ${filename}`);
+              } catch (e: any) {
+                appendConsole(`❌ DATA zip error: ${e?.message || e || 'unknown error'}`);
+              }
+            }} style={{ padding: "6px 10px" }}>Download DATA Zip</button>
           </div>
         </div>
 

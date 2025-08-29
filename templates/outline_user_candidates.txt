@@ -1,0 +1,32 @@
+Return JSON ONLY.
+
+You are given candidate header lines extracted from the PDF, each prefixed with 'p <page>:' where <page> is 1-based.
+Rules for game_name:
+- Provide the official game/module name extracted from the cover/title/intro lines. Keep it short and exact.
+
+Rules for sections:
+- Extract ALL sections using ONLY visible codes that appear at the START of the candidate lines.
+- For each section include: code, title (substring after the code on the same line; if a colon ':' exists, use the substring BEFORE the first ':'), first_page (smallest page for that code), and section_kind.
+- Code patterns include (examples): 3.5, 3.5.1, 5.6.1, F4, F4.a, A10.2b, 1B6, 1B6b.
+- Include sublevels (e.g., 5.6.1) not just top-level.
+- If a code is missing on a line, skip it (do not invent).
+
+Rules for alias_map:
+- Map common phrases to canonical codes that exist in sections. Keep small.
+
+Rules for glossary_codes:
+- List any codes that are glossary entries (if obvious).
+
+Rules for objects:
+- Optional. Extract notable items within sections (definition/example/table/figure/chart/box/note).
+- Provide: parent_code, kind, title (short), first_page, anchor_code.
+
+Input candidate lines (format: 'p N: ...'):
+{candidates}
+
+Output schema (STRICT JSON object only):
+{"game_name": string, "sections": [{"code": string, "title": string, "first_page": int, "section_kind": string}], "alias_map": {string: string}, "glossary_codes": [string], "objects": [{"parent_code": string, "kind": string, "title": string, "first_page": int, "anchor_code": string, "snippet": string}]}
+STRICT JSON RULES: single JSON object, no prose/markdown, no code fences, no trailing commas, exact keys.
+Valid example: {"game_name":"Game","sections":[{"code":"2.1","title":"Setup","first_page":3,"section_kind":"setup"}],"alias_map":{},"glossary_codes":[],"objects":[]}
+Invalid: ```json ...```; { sections: [...] }
+

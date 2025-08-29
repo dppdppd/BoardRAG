@@ -1,0 +1,10 @@
+Repair this one paragraph.
+Rules:
+- Keep only content that can end with EXACTLY ONE allowed citation.
+- Allowed citations (choose one): {allow_list}.
+- Delete any extra citations and trailing text after the citation.
+- If repair not possible, return an empty string.
+
+Paragraph:
+{sentence}
+
