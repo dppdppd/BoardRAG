@@ -31,29 +31,41 @@ def collect_result_info(doc: Any, score: float) -> Dict[str, Any]:
     meta = getattr(doc, "metadata", {}) or {}
     text = getattr(doc, "page_content", "") or ""
     src = str(meta.get("source") or "")
-    page_1 = int(meta.get("page_1based") or (int(meta.get("page") or 0) + 1))
+    # Section chunks: prefer first_page or first of pages[]
+    pages_list = parse_json_field(meta.get("pages"), []) or []
+    first_page_val = meta.get("first_page")
+    try:
+        page_1 = int(first_page_val) if first_page_val is not None else 0
+    except Exception:
+        page_1 = 0
+    if not page_1:
+        try:
+            if isinstance(pages_list, list) and pages_list:
+                page_1 = int(pages_list[0])
+        except Exception:
+            page_1 = 0
+    if not page_1:
+        try:
+            page_1 = int(meta.get("page_1based") or (int(meta.get("page") or 0) + 1))
+        except Exception:
+            page_1 = 0
     vis = int(meta.get("visual_importance") or 1)
-    prim = parse_json_field(meta.get("primary_sections"), []) or []
-    cont = parse_json_field(meta.get("continuation_sections"), []) or []
-    sec_pages = parse_json_field(meta.get("section_pages"), {}) or {}
-    sec_ids = parse_json_field(meta.get("section_ids"), {}) or {}
+    # Section-chunk fields
+    sec_code = str(meta.get("section_code") or "").strip()
+    sec_id2 = str(meta.get("section_id2") or "").strip()
     anchors = parse_json_field(meta.get("header_anchors_pct"), {}) or {}
     flags = {}
     boundary = str(meta.get("boundary_header_on_next") or "")
-    # Choose a section id for dedupe: prefer first primary section if present
-    section_id = ""
-    if prim:
-        h = str(prim[0])
-        section_id = str(sec_ids.get(h) or h)
+    # Preferred section identifier: section_id2, else section_code, else empty
+    section_id = sec_id2 or sec_code
     return {
         "score": score,
         "source": src,
         "page": page_1,
         "visual_importance": vis,
-        "primary_sections": prim,
-        "continuation_sections": cont,
-        "section_pages": sec_pages,
-        "section_ids": sec_ids,
+        "section_code": sec_code,
+        "section_id2": sec_id2,
+        "pages": pages_list,
         "header_anchors_pct": anchors,
         # section_flags removed from ingestion; keep empty for backward-compat
         "section_flags": flags,
@@ -71,14 +83,21 @@ def dedupe_then_sort(results: List[Tuple[Any, float]]) -> List[Tuple[Any, float]
 
 def plan_route(item: Dict[str, Any]) -> str:
     vis = int(item.get("visual_importance") or 1)
+    # Section chunks: use first_page or first pages[] entry
     sec_page = 0
     try:
-        prim = item.get("primary_sections") or []
-        if prim:
-            h = str(prim[0])
-            sec_page = int((item.get("section_pages") or {}).get(h) or 0)
+        fp = item.get("page") or item.get("first_page")
+        if isinstance(fp, int) and fp > 0:
+            sec_page = fp
+        if not sec_page:
+            pages = item.get("pages") or []
+            if isinstance(pages, list) and pages:
+                try:
+                    sec_page = int(pages[0])
+                except Exception:
+                    sec_page = 0
     except Exception:
-        pass
+        sec_page = 0
     if vis >= 4 and sec_page:
         return f"attach PDFs: p{sec_page:04}.pdf (+ p{sec_page+1:04}.pdf if needed)"
     return "use chunk text"
@@ -98,7 +117,8 @@ def main() -> int:
     items = [collect_result_info(d, s) for d, s in results]
     print(f"raw_results={len(items)}")
     for i, it in enumerate(items, 1):
-        print(f"{i:>2}. score={it['score']:.4f} src={it['source']} page={it['page']} vis={it['visual_importance']} prim={it['primary_sections']}")
+        sec_disp = it.get('section_id') or ''
+        print(f"{i:>2}. score={it['score']:.4f} src={it['source']} page={it['page']} vis={it['visual_importance']} sec={sec_disp}")
     print()
     dedup_sorted = dedupe_then_sort(results)
     ranked_items = [collect_result_info(d, s) for d, s in dedup_sorted]
@@ -106,7 +126,7 @@ def main() -> int:
     for i, it in enumerate(ranked_items, 1):
         route = plan_route(it)
         print(f"{i:>2}. section_id={it.get('section_id') or '-'} src={it['source']} page={it['page']} score={it.get('score'):.4f} route={route}")
-        print(f"    prim={it['primary_sections']} cont={it['continuation_sections']}")
+        print(f"    sec_code={it.get('section_code') or ''} sec_id2={it.get('section_id2') or ''}")
         print(f"    boundary_next={it.get('boundary_header_on_next') or '-'}")
     return 0
 

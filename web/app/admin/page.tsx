@@ -578,7 +578,41 @@ export default function AdminPage() {
       };
       es.onerror = () => { try { es.close(); } catch {}; appendConsole("❌ Stream error"); };
     };
+    if (action === "clear-intermediate") {
+      try {
+        appendConsole(`🧹 Clearing intermediate artifacts for: ${renameSelection.join(", ")}`);
+        const headers: any = { "Content-Type": "application/json" };
+        try { if (token) headers["Authorization"] = `Bearer ${token}`; } catch {}
+        const resp = await fetch(`${API_BASE}/admin/clear-intermediate`, { method: "POST", headers, body: JSON.stringify(renameSelection) });
+        const data = await resp.json().catch(() => ({} as any));
+        if (!resp.ok) throw new Error(data?.message || data?.detail || `HTTP ${resp.status}`);
+        if (data?.message) setMessage(data.message);
+        appendConsole(data?.message || "✅ Cleared intermediate artifacts");
+        await Promise.all([refetchPdfStatus()]);
+      } catch (e: any) {
+        appendConsole(`❌ Clear intermediate failed: ${e?.message || e || "error"}`);
+      }
+      return;
+    }
     switch (action) {
+      case "delete-selected": {
+        try {
+          appendConsole(`🗑️ Delete PDF requested: ${renameSelection.join(", ") || "<none>"}`);
+          const resp = await fetch(`${API_BASE}/admin/delete-pdfs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(renameSelection),
+          });
+          const data = await resp.json();
+          setMessage(data.message || "");
+          if (data?.message) appendConsole(data.message);
+          setRenameSelection([]);
+          await Promise.all([refetchGames(), refetchChoices(), refetchStorage(), refetchCatalog()]);
+        } catch (e: any) {
+          appendConsole(`❌ Delete failed: ${e?.message || e || "error"}`);
+        }
+        break;
+      }
       case "split-all":
         // Run full pipeline starting from split
         buildAndRun("/admin/pipeline-stream", "all", "split");
@@ -786,6 +820,8 @@ export default function AdminPage() {
               <option value="populate-sections-missing">Populate (missing)</option>
               <option value="pipeline-missing">Run pipeline (missing)</option>
               <option value="pipeline-all">Run pipeline (all)</option>
+              <option value="clear-intermediate">Clear intermediate artifacts</option>
+              <option value="delete-selected">Delete selected</option>
             </select>
             <button
               onClick={startAction}
@@ -793,23 +829,19 @@ export default function AdminPage() {
               style={{ padding: "6px 10px" }}
             >Take Action</button>
           </div>
-          <button
-            onClick={async () => {
-              appendConsole(`🗑️ Delete PDF requested: ${renameSelection.join(", ") || "<none>"}`);
-              const resp = await fetch(`${API_BASE}/admin/delete-pdfs`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(renameSelection),
-              });
-              const data = await resp.json();
-              setMessage(data.message || "");
-              if (data?.message) appendConsole(data.message);
-              setRenameSelection([]);
-              await Promise.all([refetchGames(), refetchChoices(), refetchStorage(), refetchCatalog()]);
-            }}
-            disabled={renameSelection.length === 0}
-            style={{ padding: "6px 10px" }}
-          >Delete Selected</button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              onClick={() => {
+                // Select all filenames from current catalog view
+                setRenameSelection(sortedCatalog.map((e) => e.filename));
+              }}
+              style={{ padding: "6px 10px" }}
+            >Check All</button>
+            <button
+              onClick={() => setRenameSelection([])}
+              style={{ padding: "6px 10px" }}
+            >Check None</button>
+          </div>
           <button onClick={async () => {
             try {
               appendConsole("Refreshing catalog …");

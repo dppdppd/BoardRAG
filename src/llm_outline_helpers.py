@@ -121,7 +121,12 @@ def make_llm() -> Any:
 
     if outline_provider == "anthropic":
         from langchain_anthropic import ChatAnthropic  # type: ignore
-        return ChatAnthropic(model=outline_model, temperature=0, max_tokens=4096)
+        try:
+            from src import config as cfg  # type: ignore
+            _mt = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+        except Exception:
+            _mt = 64000
+        return ChatAnthropic(model=outline_model, temperature=0, max_tokens=_mt)
     if outline_provider == "openai":
         from langchain_openai import ChatOpenAI  # type: ignore
         return ChatOpenAI(model=outline_model, temperature=0, max_tokens=3000)
@@ -146,9 +151,14 @@ def anthropic_pdf_messages(api_key: str, model: str, system_prompt: str, user_pr
         "anthropic-version": "2023-06-01",
         # Enable Files API beta if needed in future; for base64 it's not required.
     }
+    try:
+        from src import config as cfg  # type: ignore
+        _mt_single = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+    except Exception:
+        _mt_single = 64000
     body = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": _mt_single,
         "temperature": 0,
         "system": system_prompt,
         "messages": [
@@ -253,9 +263,14 @@ def anthropic_pdf_messages_with_file(api_key: str, model: str, system_prompt: st
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "files-api-2025-04-14",
     }
+    try:
+        from src import config as cfg  # type: ignore
+        _mt_files = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+    except Exception:
+        _mt_files = 64000
     body = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": _mt_files,
         "temperature": 0,
         "system": system_prompt,
         "messages": [
@@ -314,9 +329,14 @@ def anthropic_pdf_messages_with_files(api_key: str, model: str, system_prompt: s
             "source": {"type": "file", "file_id": fid},
         })
     content.append({"type": "text", "text": user_prompt})
+    try:
+        from src import config as cfg  # type: ignore
+        _mt_multi = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+    except Exception:
+        _mt_multi = 64000
     body = {
         "model": model,
-        "max_tokens": 4096,
+        "max_tokens": _mt_multi,
         "temperature": 0,
         "system": system_prompt,
         "messages": [{"role": "user", "content": content}],
@@ -360,9 +380,14 @@ def anthropic_pdf_messages_with_file_stream(api_key: str, model: str, system_pro
         "anthropic-beta": "files-api-2025-04-14",
         "accept": "text/event-stream",
     }
+    try:
+        from src import config as cfg  # type: ignore
+        _mt_stream = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+    except Exception:
+        _mt_stream = 64000
     body = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": _mt_stream,
         "temperature": 0,
         "system": system_prompt,
         "stream": True,
@@ -497,9 +522,14 @@ def anthropic_pdf_messages_with_pages_stream(api_key: str, model: str, system_pr
             continue
     content_blocks.append({"type": "text", "text": user_prompt})
 
+    try:
+        from src import config as cfg  # type: ignore
+        _mt_pages_stream = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+    except Exception:
+        _mt_pages_stream = 64000
     body = {
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": _mt_pages_stream,
         "temperature": 0,
         "system": system_prompt,
         "stream": True,

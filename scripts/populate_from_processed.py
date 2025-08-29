@@ -255,8 +255,14 @@ def main() -> int:
 		print(f"Upserted {doc_id}")
 		try:
 			out = {"id": doc_id, "text": text, "metadata": md}
-			name = doc_id.split("#s", 1)[-1]
-			(sec_dir / f"{slug}_s{name}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+			# Prefer section_id2 for filename to avoid odd hashes; fallback to raw code
+			try:
+				sec_id2 = str((md or {}).get("section_id2") or "").strip()
+			except Exception:
+				sec_id2 = ""
+			if not sec_id2:
+				sec_id2 = doc_id.split("#s", 1)[-1]
+			(sec_dir / f"{slug}_s{sec_id2}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 		except Exception:
 			pass
 

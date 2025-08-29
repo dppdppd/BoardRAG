@@ -117,9 +117,14 @@ def extract_page_json(primary_page_pdf: Path, spillover_page_pdf: Optional[Path]
             merged.append(b)
         merged.append({"type": "text", "text": user_suffix_text})
 
+        try:
+            from . import config as _cfg_max  # type: ignore
+            _mt = int(getattr(_cfg_max, "ANTHROPIC_MAX_TOKENS", 64000))
+        except Exception:
+            _mt = 64000
         body = {
             "model": model,
-            "max_tokens": 8192,
+            "max_tokens": _mt,
             "system": sys_msg,
             "messages": [{"role": "user", "content": merged}],
         }

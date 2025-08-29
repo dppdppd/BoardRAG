@@ -11,8 +11,8 @@ FIELD DEFINITIONS:
 - section_id_2: a base identifier composed of section_id plus a short, normalized slug of the first two words following the code (e.g., '20.2-infiltration').
 - section_start: the first 10 words of the section's first line on its page, inclusive of the printed code and its title/label (join with single spaces). PRESERVE any punctuation/enclosures visible in print around the code. For example, if the page shows '[2.5] PARTS INVENTORY …', section_start MUST begin with '[2.5] PARTS INVENTORY …' (do NOT strip the brackets).
 - title: the textual heading (label) for the section, without the code and without trailing ':' or '.'. Example: 'INFILTRATION & CLOSE COMBAT'.
-- summary: a single concise sentence (<= 160 chars) summarizing what this specific section covers (only for top-level or big-category headers). Omit this key entirely for sections where a summary does not apply.
-- search_keywords (per section, MAJOR SECTIONS ONLY): up to 10 core terms/phrases that reflect the entire larger section (<= 50 chars each).
+- summary: a single concise sentence (<= 160 chars) summarizing what this specific section covers. Omit this key entirely for sections where a summary does not apply.
+- search_keywords (per section): up to 10 core terms/phrases that reflect the entire section (<= 100 chars each).
   Include common morphological variants and standard abbreviations, and merge any obvious synonyms/aliases directly into this list.
 - page: integer; exactly {page_num_1based} or {next_page}.
 - boundary_header_on_next: the first new header on page {next_page}, or null if none (it may not be visible).
@@ -38,8 +38,8 @@ SPECIAL CASE — TABLE OF CONTENTS / INDEX PAGES:
    - Top-level or big-category headers are those whose section_id has no '.' or '/' (e.g., '24', 'A10') OR ends with '.0' (e.g., '24.0').
    - For those, provide a single concise sentence (<= 160 chars).
 4) Derive concise search aids from the page content only (no invention), attached to each section item:
-   - Only provide sections[].search_keywords for MAJOR SECTIONS (no '.' or '/' in code, or ends with '.0').
-   - For those major sections, return up to 10 terms/phrases that apply to the entire larger section (<= 50 chars each).
+   - Provide sections[].search_keywords for every section.
+   - Return up to 10 terms/phrases that apply to the entire larger section (<= 100 chars each).
    - Merge synonyms/aliases into sections[].search_keywords (do not return a separate synonyms list).
 
 CONSTRAINTS:
@@ -69,7 +69,6 @@ RESPONSE RULES (critical):
 - Self-check: compare your extracted headers against the regex above on page {page_num_1based} text; if any code line is missing from sections, add it.
 - For sections[].search_keywords, include both singular and plural where applicable and common abbreviations (e.g., 'leader', 'leaders', 'SL').
 - Omit keys entirely when they would be empty (do NOT include empty arrays or empty strings).
-- Only MAJOR SECTIONS may include sections[].search_keywords; for non-major sections omit this key.
 - Omit sections[].summary when not provided (only include for major sections).
 - Do not invent content. If an item is not supported by this page's text, omit the key or use an empty string only where required by the schema (e.g., minor section summaries).
 - Ensure the final character of your output is a closing brace '}' (JSON must be complete).

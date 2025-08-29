@@ -64,6 +64,13 @@ GENERATOR_MODEL = os.getenv("GENERATOR_MODEL", _config["generator"])
 EMBEDDER_MODEL = os.getenv("EMBEDDER_MODEL", _config["embedder"])
 EVALUATOR_MODEL = os.getenv("EVALUATOR_MODEL", _config["evaluator"])
 
+# Unified Anthropic max tokens (Sonnet 4 supports 64k output tokens)
+# Allow override via env ANTHROPIC_MAX_TOKENS; default to 64000
+try:
+    ANTHROPIC_MAX_TOKENS = int(os.getenv("ANTHROPIC_MAX_TOKENS", "64000"))
+except Exception:
+    ANTHROPIC_MAX_TOKENS = 64000
+
 # ---------------------------------------------------------------------------
 # Optional - Web Search Configuration
 # ---------------------------------------------------------------------------

@@ -98,7 +98,11 @@ def rewrite_search_query(raw_query: str) -> str:
 
         print("✏️  Rewriting web search query via LLM …")
         if cfg.LLM_PROVIDER.lower() == "anthropic":
-            model = ChatAnthropic(model=cfg.SEARCH_REWRITE_MODEL, temperature=0, max_tokens=512)
+            try:
+                _mt = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+            except Exception:
+                _mt = 64000
+            model = ChatAnthropic(model=cfg.SEARCH_REWRITE_MODEL, temperature=0, max_tokens=_mt)
         elif cfg.LLM_PROVIDER.lower() == "ollama":
             from langchain_community.llms.ollama import Ollama
 

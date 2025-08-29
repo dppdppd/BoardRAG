@@ -2362,6 +2362,71 @@ async def admin_delete_pdfs(entries: List[str]):
     return {"message": msg, "games": updated_games, "pdf_choices": pdf_choices, "catalog": entries_out}
 
 
+@app.post("/admin/clear-intermediate")
+async def admin_clear_intermediate(entries: List[str], token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    # Require admin auth (supports Bearer header or token query param)
+    _ = _require_auth(authorization, token)
+    from src import config as cfg  # type: ignore
+    from pathlib import Path as _P
+    import shutil as _shutil
+
+    if not isinstance(entries, list):
+        raise HTTPException(status_code=400, detail="Expected a JSON array of PDF entries or filenames")
+
+    data_dir = _P(getattr(cfg, "DATA_PATH", "data"))
+    if not data_dir.exists():
+        raise HTTPException(status_code=400, detail=f"DATA_PATH not found: {data_dir}")
+
+    cleared: int = 0
+    failed: int = 0
+    targets = ["1_pdf_pages", "3_eval_jsons", "4_sections_json", "debug"]
+
+    try:
+        await _admin_log_publish(f"Clearing intermediate artifacts for {len(entries or [])} PDF(s)…")
+    except Exception:
+        pass
+
+    for entry in entries or []:
+        try:
+            base_name = _P(entry).name  # constrain to basename
+            stem = _P(base_name).stem
+            if not stem:
+                continue
+            base = data_dir / stem
+            try:
+                await _admin_log_publish(f"🧹 Clearing: {base_name}")
+            except Exception:
+                pass
+
+            for dname in targets:
+                d = base / dname
+                try:
+                    if d.exists():
+                        _shutil.rmtree(d, ignore_errors=True)
+                except Exception:
+                    # best-effort; continue other directories
+                    pass
+            cleared += 1
+            try:
+                await _admin_log_publish(f"✅ Cleared: {base_name}")
+            except Exception:
+                pass
+        except Exception:
+            failed += 1
+            try:
+                await _admin_log_publish(f"⚠️ Clear failed: {entry}")
+            except Exception:
+                pass
+
+    # Let the client refresh processed status
+    try:
+        await _admin_log_publish("Refreshing processed status…")
+    except Exception:
+        pass
+
+    return {"message": f"Cleared intermediate artifacts for {cleared} PDF(s){' (with failures)' if failed else ''}", "cleared": cleared, "failed": failed}
+
+
 # ----------------------------------------------------------------------------
 # Catalog (DB-less): list and refresh
 # ----------------------------------------------------------------------------

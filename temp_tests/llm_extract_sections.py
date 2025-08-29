@@ -101,7 +101,12 @@ def _make_llm() -> Any:
         return ChatOpenAI(model=model_name, temperature=0)
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic  # type: ignore
-        return ChatAnthropic(model=model_name, temperature=0, max_tokens=2048)
+        try:
+            from src import config as cfg  # type: ignore
+            _mt = int(getattr(cfg, "ANTHROPIC_MAX_TOKENS", 64000))
+        except Exception:
+            _mt = 64000
+        return ChatAnthropic(model=model_name, temperature=0, max_tokens=_mt)
     if provider == "ollama":
         from langchain_community.llms.ollama import Ollama  # type: ignore
         return Ollama(model=model_name, base_url=getattr(cfg, "OLLAMA_URL", "http://localhost:11434"))

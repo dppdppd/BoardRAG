@@ -54,10 +54,16 @@ def main() -> int:
     slug = page_slug_from_pdf(pdf_path)
     for doc_id, text, md in triples:
         try:
-            name = doc_id.split("#s", 1)[-1]
+            # Prefer section_id2 for filename; fallback to raw code if missing
+            try:
+                sec_id2 = str((md or {}).get("section_id2") or "").strip()
+            except Exception:
+                sec_id2 = ""
+            if not sec_id2:
+                sec_id2 = doc_id.split("#s", 1)[-1]
             payload = {"id": doc_id, "text": text, "metadata": md}
-            (out_dir / f"{slug}_s{name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"Exported {name}.json")
+            (out_dir / f"{slug}_s{sec_id2}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"Exported {sec_id2}.json")
         except Exception as e:
             print(f"WARN: failed to write section json for {doc_id}: {e}")
 
