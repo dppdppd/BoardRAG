@@ -1723,7 +1723,7 @@ def _sse_stream_for_scripts(entries: List[str], step: str, mode: str) -> Streami
     return StreamingResponse(safe_stream(), media_type="text/event-stream", headers=headers)
 
 
-def _sse_stream_for_custom_script(entries: List[str], script_name: str, label: str) -> StreamingResponse:
+def _sse_stream_for_custom_script(entries: List[str], script_name: str, label: str, *, force: bool = False) -> StreamingResponse:
     from pathlib import Path as _P
     import subprocess as _sp
     loop = asyncio.get_running_loop()
@@ -1762,6 +1762,8 @@ def _sse_stream_for_custom_script(entries: List[str], script_name: str, label: s
                 root = Path(__file__).resolve().parent.parent
                 script = root / "scripts" / script_name
                 args = [sys.executable, "-u", str(script), str(pdf)]
+                if force:
+                    args.append("--force")
                 try:
                     proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True, bufsize=1)
                 except Exception:
@@ -1966,7 +1968,8 @@ async def admin_populate_sections_stream(entries: str, mode: str = "missing", to
     selected = _parse_entries_list(entries)
     data_dir = _P(cfg.DATA_PATH)
     pdfs = [str((data_dir / _P(name).name)) for name in selected]
-    return _sse_stream_for_custom_script(pdfs, script_name="populate_sections.py", label="populate-sections")
+    # Pass force=True when mode=="all" so existing chunks are cleared prior to repopulate
+    return _sse_stream_for_custom_script(pdfs, script_name="populate_sections.py", label="populate-sections", force=(mode == "all"))
 
 @app.get("/admin/populate-db-stream")
 async def admin_populate_db_stream(entries: str, mode: str = "missing", token: Optional[str] = None, authorization: Optional[str] = Header(None)):

@@ -13,12 +13,13 @@ if str(_repo) not in sys.path:
     sys.path.insert(0, str(_repo))
 
 from src import config as cfg  # type: ignore
-from src.vector_store import upsert_section_chunk  # type: ignore
+from src.vector_store import upsert_section_chunk, clear_pdf_sections  # type: ignore
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Populate sections from 4_sections_json into the vector store")
     ap.add_argument("pdf", type=str, help="PDF filename under DATA_PATH or absolute path")
+    ap.add_argument("--force", action="store_true", help="Clear existing section chunks for this PDF before populating")
     args = ap.parse_args()
 
     pdf_arg = Path(args.pdf)
@@ -37,6 +38,14 @@ def main() -> int:
     if not files:
         print("No section json files found")
         return 0
+
+    # If forcing, clear existing section chunks for a clean reinsert
+    if args.force:
+        try:
+            removed = clear_pdf_sections(pdf_path.name)
+            print(f"Cleared {removed} existing section chunks for {pdf_path.name}")
+        except Exception as e:
+            print(f"WARN: failed to clear existing section chunks: {e}")
 
     for f in files:
         try:
